@@ -1,0 +1,621 @@
+<!--
+  SPDX-License-Identifier: MIT
+  Copyright (c) 2026 Mykola Kovhanko <thuesdays@gmail.com>
+-->
+<UserControl x:Class="GhostShell.App.Views.ProfilesView"
+             x:Name="PageRoot"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="clr-namespace:GhostShell.App.ViewModels"
+             d:DataContext="{d:DesignInstance Type=vm:ProfilesViewModel}"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d"
+             Background="Transparent">
+
+    <UserControl.Resources>
+        <!-- Row context menu — shared between cards and table.
+             ContextMenu lives in a separate visual tree so plain
+             bindings see the row's DataContext (a ProfileRowVm)
+             rather than the page VM. We pin DataContext to PageRoot
+             via x:Reference, then grab the row via
+             PlacementTarget.DataContext for CommandParameter. -->
+        <ContextMenu x:Key="ProfileRowMenu"
+                     DataContext="{Binding DataContext, Source={x:Reference PageRoot}}">
+            <MenuItem Header="Start"
+                      Command="{Binding StartCommand}"
+                      CommandParameter="{Binding RelativeSource={RelativeSource AncestorType=ContextMenu},
+                                                  Path=PlacementTarget.DataContext}"/>
+            <MenuItem Header="Stop"
+                      Command="{Binding StopCommand}"
+                      CommandParameter="{Binding RelativeSource={RelativeSource AncestorType=ContextMenu},
+                                                  Path=PlacementTarget.DataContext}"/>
+            <Separator/>
+            <MenuItem Header="Edit…"
+                      Command="{Binding EditCommand}"
+                      CommandParameter="{Binding RelativeSource={RelativeSource AncestorType=ContextMenu},
+                                                  Path=PlacementTarget.DataContext}"/>
+            <MenuItem Header="Delete"
+                      Command="{Binding DeleteCommand}"
+                      CommandParameter="{Binding RelativeSource={RelativeSource AncestorType=ContextMenu},
+                                                  Path=PlacementTarget.DataContext}"/>
+        </ContextMenu>
+
+        <!-- ════════════════════════════════════════════════════════
+             CARD TEMPLATE — used by the cards-mode ItemsControl.
+             Mirrors the legacy web's .profile-card layout: top-left
+             checkbox, top-right status pill, header (icon+name),
+             meta (template+last-run), 2-up stats, action strip.
+             ════════════════════════════════════════════════════════ -->
+        <DataTemplate x:Key="ProfileCardTemplate" DataType="{x:Type vm:ProfileRowVm}">
+            <!-- Outer wrapper carries the colored left-stripe; the
+                 inner Border holds the actual card chrome. The stripe
+                 hue comes from AccentBrushKey (per-template / per-name
+                 hash) so the cards read as a colour map at a glance. -->
+            <Grid Margin="0,0,12,12" MinWidth="280" MinHeight="170">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="4"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+
+                <!-- Left accent stripe — color from AccentBrushKey -->
+                <Border Grid.Column="0"
+                        CornerRadius="8,0,0,8"
+                        Background="{Binding AccentBrushKey,
+                                             Converter={StaticResource ResourceKeyToBrush}}"/>
+
+                <Border Grid.Column="1"
+                        Background="{StaticResource BgRaised}"
+                        BorderBrush="{StaticResource Border}"
+                        BorderThickness="1"
+                        CornerRadius="0,8,8,0"
+                        Padding="14"
+                        ContextMenu="{StaticResource ProfileRowMenu}">
+                <Border.Style>
+                    <Style TargetType="Border">
+                        <Setter Property="Background" Value="{StaticResource BgRaised}"/>
+                        <Setter Property="BorderBrush" Value="{StaticResource Border}"/>
+                        <Setter Property="BorderThickness" Value="1"/>
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding IsRunning}" Value="True">
+                                <Setter Property="BorderBrush" Value="{StaticResource OkBrush}"/>
+                            </DataTrigger>
+                            <DataTrigger Binding="{Binding IsSelected}" Value="True">
+                                <Setter Property="BorderBrush" Value="{StaticResource Accent}"/>
+                                <Setter Property="BorderThickness" Value="2"/>
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </Border.Style>
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <!-- Header row: checkbox + name + status pill -->
+                    <Grid Grid.Row="0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <CheckBox Grid.Column="0"
+                                  IsChecked="{Binding IsSelected, Mode=TwoWay}"
+                                  VerticalAlignment="Center"
+                                  Margin="0,0,8,0"/>
+                        <TextBlock Grid.Column="1"
+                                   Text="{Binding Name}"
+                                   Foreground="{StaticResource Text}"
+                                   FontSize="14"
+                                   FontWeight="SemiBold"
+                                   VerticalAlignment="Center"
+                                   TextTrimming="CharacterEllipsis"/>
+
+                        <!-- Status pill — Background / BorderBrush flip
+                             with Running / Starting via the Style block.
+                             Foreground gets its own nested style so the
+                             text colour matches the border. -->
+                        <Border Grid.Column="2" VerticalAlignment="Center" Padding="8,2"
+                                CornerRadius="10" BorderThickness="1">
+                            <Border.Style>
+                                <Style TargetType="Border">
+                                    <Setter Property="Background"  Value="{StaticResource BgRaised}"/>
+                                    <Setter Property="BorderBrush" Value="{StaticResource Border}"/>
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsRunning}" Value="True">
+                                            <Setter Property="Background"  Value="{StaticResource OkSoftBrush}"/>
+                                            <Setter Property="BorderBrush" Value="{StaticResource OkBrush}"/>
+                                        </DataTrigger>
+                                        <DataTrigger Binding="{Binding IsStarting}" Value="True">
+                                            <Setter Property="Background"  Value="{StaticResource AccentSoft}"/>
+                                            <Setter Property="BorderBrush" Value="{StaticResource Accent}"/>
+                                        </DataTrigger>
+                                        <DataTrigger Binding="{Binding IsReady}" Value="True">
+                                            <Setter Property="Background"  Value="{StaticResource InfoSoftBrush}"/>
+                                            <Setter Property="BorderBrush" Value="{StaticResource InfoBrush}"/>
+                                        </DataTrigger>
+                                        <DataTrigger Binding="{Binding IsNotReady}" Value="True">
+                                            <Setter Property="Background"  Value="{StaticResource WarnSoftBrush}"/>
+                                            <Setter Property="BorderBrush" Value="{StaticResource WarnBrush}"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Border.Style>
+                            <TextBlock Text="{Binding StatusText}">
+                                <TextBlock.Style>
+                                    <Style TargetType="TextBlock" BasedOn="{StaticResource PillText}">
+                                        <Setter Property="Foreground" Value="{StaticResource TextMuted}"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsRunning}" Value="True">
+                                                <Setter Property="Foreground" Value="{StaticResource OkBrush}"/>
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding IsStarting}" Value="True">
+                                                <Setter Property="Foreground" Value="{StaticResource Accent}"/>
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding IsReady}" Value="True">
+                                                <Setter Property="Foreground" Value="{StaticResource InfoBrush}"/>
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding IsNotReady}" Value="True">
+                                                <Setter Property="Foreground" Value="{StaticResource WarnBrush}"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
+                        </Border>
+                    </Grid>
+
+                    <!-- Meta row: template + last-run -->
+                    <Grid Grid.Row="1" Margin="0,8,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Text="{Binding TemplateId, FallbackValue='auto'}"
+                                   Style="{StaticResource MutedText}"
+                                   FontFamily="{StaticResource FontMono}"
+                                   FontSize="11"
+                                   TextTrimming="CharacterEllipsis"/>
+                        <TextBlock Grid.Column="1" Style="{StaticResource MutedText}" FontSize="11">
+                            <Run Text="last: "/>
+                            <Run Text="{Binding LastRunHuman, Mode=OneWay}"/>
+                        </TextBlock>
+                    </Grid>
+
+                    <!-- 2-up stats grid (runs count + proxy slug) -->
+                    <Grid Grid.Row="2" Margin="0,12,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <Border Grid.Column="0" Background="{StaticResource BgDeep}"
+                                CornerRadius="6" Padding="8,6" Margin="0,0,4,0">
+                            <StackPanel>
+                                <TextBlock Text="RUNS"
+                                           Style="{StaticResource MutedText}"
+                                           FontSize="9"/>
+                                <TextBlock Text="{Binding RunCount}"
+                                           Foreground="{StaticResource Text}"
+                                           FontFamily="{StaticResource FontMono}"
+                                           FontSize="14"
+                                           FontWeight="SemiBold"/>
+                            </StackPanel>
+                        </Border>
+                        <Border Grid.Column="1" Background="{StaticResource BgDeep}"
+                                CornerRadius="6" Padding="8,6" Margin="4,0,0,0">
+                            <StackPanel>
+                                <TextBlock Text="PROXY"
+                                           Style="{StaticResource MutedText}"
+                                           FontSize="9"/>
+                                <TextBlock Text="{Binding ProxySlug, FallbackValue='—'}"
+                                           Foreground="{StaticResource Accent}"
+                                           FontFamily="{StaticResource FontMono}"
+                                           FontSize="11"
+                                           TextTrimming="CharacterEllipsis"/>
+                            </StackPanel>
+                        </Border>
+                    </Grid>
+
+                    <!-- Action strip — Start / Stop + Edit -->
+                    <Grid Grid.Row="3" Margin="0,12,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <!-- Start (idle).
+                             Both children of the StackPanel get
+                             VerticalAlignment="Center" so the icon
+                             glyph (Segoe MDL2 11px) and the label
+                             (FontUi 13px) sit on the same midline.
+                             Without it the icon hugs the top because
+                             baseline alignment offsets a 11px glyph
+                             above a 13px text run. -->
+                        <Button Grid.Column="0" Margin="0,0,6,0"
+                                Style="{StaticResource ButtonPrimary}"
+                                Visibility="{Binding IsRunning, Converter={StaticResource InverseBoolToVis}}"
+                                Command="{Binding DataContext.StartCommand,
+                                          Source={x:Reference PageRoot}}"
+                                CommandParameter="{Binding}">
+                            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                <TextBlock FontFamily="Segoe MDL2 Assets" FontSize="12"
+                                           Text="&#xE768;" Margin="0,0,6,0"
+                                           VerticalAlignment="Center"/>
+                                <TextBlock Text="Start" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </Button>
+                        <!-- Stop (running) -->
+                        <Button Grid.Column="0" Margin="0,0,6,0"
+                                Visibility="{Binding IsRunning, Converter={StaticResource BoolToVis}}"
+                                Command="{Binding DataContext.StopCommand,
+                                          Source={x:Reference PageRoot}}"
+                                CommandParameter="{Binding}">
+                            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                <TextBlock FontFamily="Segoe MDL2 Assets" FontSize="12"
+                                           Foreground="{StaticResource ErrBrush}"
+                                           Text="&#xE71A;" Margin="0,0,6,0"
+                                           VerticalAlignment="Center"/>
+                                <TextBlock Text="Stop" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </Button>
+                        <!-- Quick FP regenerate — small icon button.
+                             Doesn't leave the page; calls
+                             IFingerprintService.RegenerateAsync and
+                             shows a brief score dialog. The user can
+                             open the full Fingerprint page from the
+                             sidebar for the detailed view. -->
+                        <Button Grid.Column="1" Content="↻ FP"
+                                Command="{Binding DataContext.QuickRegenerateFpCommand,
+                                          Source={x:Reference PageRoot}}"
+                                CommandParameter="{Binding}"
+                                ToolTip="Regenerate fingerprint payload"
+                                MinWidth="44"
+                                Margin="0,0,4,0"/>
+                        <Button Grid.Column="1" Content="Edit"
+                                Command="{Binding DataContext.EditCommand,
+                                          Source={x:Reference PageRoot}}"
+                                CommandParameter="{Binding}"
+                                MinWidth="60"
+                                HorizontalAlignment="Right"/>
+                    </Grid>
+                </Grid>
+            </Border>
+            </Grid>
+        </DataTemplate>
+    </UserControl.Resources>
+
+    <Grid Margin="24,20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>  <!-- header     -->
+            <RowDefinition Height="Auto"/>  <!-- bulk strip -->
+            <RowDefinition Height="*"/>     <!-- content    -->
+        </Grid.RowDefinitions>
+
+        <!-- Header + toolbar -->
+        <Grid Grid.Row="0" Margin="0,0,0,12">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+
+            <StackPanel Grid.Column="0" Margin="0,0,16,0">
+                <TextBlock Style="{StaticResource PageTitle}" Text="Profiles"/>
+                <TextBlock Style="{StaticResource PageSubtitle}"
+                           Text="Browser identities — create, start, inspect, manage. Tick rows to start or delete in bulk."/>
+            </StackPanel>
+
+            <!-- VerticalAlignment=Top so toolbar buttons never overlap
+                 a wrapped subtitle. -->
+            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Top">
+                <!-- Cards / Table segmented toggle. Active state uses
+                     the Accent background tint so it reads clearly. -->
+                <Border Background="{StaticResource BgDeep}"
+                        BorderBrush="{StaticResource Border}"
+                        BorderThickness="1"
+                        CornerRadius="6"
+                        Margin="0,0,10,0">
+                    <StackPanel Orientation="Horizontal">
+                        <Button Command="{Binding SetViewModeCardsCommand}"
+                                Padding="10,4" BorderThickness="0"
+                                MinWidth="78"
+                                ToolTip="Cards view">
+                            <Button.Style>
+                                <Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+                                    <Setter Property="Background" Value="Transparent"/>
+                                    <Setter Property="Foreground" Value="{StaticResource TextMuted}"/>
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsCardsMode}" Value="True">
+                                            <Setter Property="Background" Value="{StaticResource AccentSoft}"/>
+                                            <Setter Property="Foreground" Value="{StaticResource Text}"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Button.Style>
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="▦" Margin="0,0,5,0"/>
+                                <TextBlock Text="Cards"/>
+                            </StackPanel>
+                        </Button>
+                        <Button Command="{Binding SetViewModeTableCommand}"
+                                Padding="10,4" BorderThickness="0"
+                                MinWidth="78"
+                                ToolTip="Table view">
+                            <Button.Style>
+                                <Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+                                    <Setter Property="Background" Value="Transparent"/>
+                                    <Setter Property="Foreground" Value="{StaticResource TextMuted}"/>
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsTableMode}" Value="True">
+                                            <Setter Property="Background" Value="{StaticResource AccentSoft}"/>
+                                            <Setter Property="Foreground" Value="{StaticResource Text}"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Button.Style>
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="☰" Margin="0,0,5,0"/>
+                                <TextBlock Text="Table"/>
+                            </StackPanel>
+                        </Button>
+                    </StackPanel>
+                </Border>
+
+                <Button Content="↻  Reload" Command="{Binding ReloadCommand}"
+                        Margin="0,0,8,0"/>
+                <Button Content="⚡  Bulk create"
+                        Command="{Binding BulkAddCommand}"
+                        Margin="0,0,8,0"
+                        MinWidth="120"/>
+                <Button Content="+  Add profile"
+                        Command="{Binding AddCommand}"
+                        Style="{StaticResource ButtonPrimary}"
+                        MinWidth="120"/>
+            </StackPanel>
+        </Grid>
+
+        <!-- Bulk-action strip — visible only when at least one row is checked.
+             Mirrors the web's "selection bar" that appears once you tick a row. -->
+        <Border Grid.Row="1" Margin="0,0,0,8" Padding="14,8" CornerRadius="6"
+                Background="{StaticResource AccentSoft}"
+                BorderBrush="{StaticResource Accent}"
+                BorderThickness="1"
+                Visibility="{Binding HasSelection, Converter={StaticResource BoolToVis}}">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                    <TextBlock Foreground="{StaticResource Text}" FontWeight="SemiBold">
+                        <Run Text="{Binding SelectedCount, Mode=OneWay}"/>
+                        <Run Text=" selected"/>
+                    </TextBlock>
+                    <Button Content="Select all"
+                            Command="{Binding SelectAllCommand}"
+                            Style="{StaticResource ButtonGhost}"
+                            Margin="14,0,0,0"/>
+                    <Button Content="Clear"
+                            Command="{Binding ClearSelectionCommand}"
+                            Style="{StaticResource ButtonGhost}"
+                            Margin="6,0,0,0"/>
+                </StackPanel>
+                <StackPanel Grid.Column="1" Orientation="Horizontal">
+                    <Button Content="▶  Start selected"
+                            Command="{Binding BulkStartCommand}"
+                            Style="{StaticResource ButtonPrimary}"
+                            Margin="0,0,8,0"/>
+                    <Button Content="🗑  Delete selected"
+                            Command="{Binding BulkDeleteCommand}"
+                            Style="{StaticResource ButtonDanger}"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- Content -->
+        <Grid Grid.Row="2">
+            <!-- Empty-state -->
+            <Border Style="{StaticResource Card}" Padding="40"
+                    Visibility="{Binding IsEmpty, Converter={StaticResource BoolToVis}}">
+                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+                    <TextBlock FontSize="32" HorizontalAlignment="Center"
+                               Foreground="{StaticResource TextDim}" Text="∅"/>
+                    <TextBlock Margin="0,10,0,4" HorizontalAlignment="Center"
+                               Style="{StaticResource PageTitle}" FontSize="14"
+                               Text="No profiles yet"/>
+                    <TextBlock HorizontalAlignment="Center" Style="{StaticResource MutedText}"
+                               Margin="0,0,0,16"
+                               Text="Create one or generate many at once with Bulk create."/>
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                        <Button Content="⚡  Bulk create"
+                                Command="{Binding BulkAddCommand}"
+                                Margin="0,0,8,0"
+                                MinWidth="140"/>
+                        <Button Content="+  Add profile"
+                                Command="{Binding AddCommand}"
+                                Style="{StaticResource ButtonPrimary}"
+                                MinWidth="140"/>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- ─── Cards mode ─── -->
+            <ScrollViewer VerticalScrollBarVisibility="Auto"
+                          HorizontalScrollBarVisibility="Disabled">
+                <ScrollViewer.Style>
+                    <Style TargetType="ScrollViewer">
+                        <Setter Property="Visibility" Value="Collapsed"/>
+                        <Style.Triggers>
+                            <MultiDataTrigger>
+                                <MultiDataTrigger.Conditions>
+                                    <Condition Binding="{Binding IsCardsMode}" Value="True"/>
+                                    <Condition Binding="{Binding IsEmpty}"     Value="False"/>
+                                </MultiDataTrigger.Conditions>
+                                <Setter Property="Visibility" Value="Visible"/>
+                            </MultiDataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </ScrollViewer.Style>
+                <ItemsControl ItemsSource="{Binding Items}"
+                              ItemTemplate="{StaticResource ProfileCardTemplate}">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <!-- WrapPanel auto-flows cards into rows.
+                                 Each card has MinWidth=280; on a 1280-
+                                 wide window we fit ~4 cards per row,
+                                 reducing gracefully as the user
+                                 resizes. -->
+                            <WrapPanel Orientation="Horizontal"/>
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                </ItemsControl>
+            </ScrollViewer>
+
+            <!-- ─── Table mode ─── -->
+            <!-- Note on Style: WPF refuses to set the same DP twice in
+                 one element, so the inline `Style="{StaticResource Card}"`
+                 attribute can't coexist with a `<Border.Style>` child
+                 block. We move the BasedOn into the inline block and
+                 drop the attribute. -->
+            <Border Padding="0">
+                <Border.Style>
+                    <Style TargetType="Border" BasedOn="{StaticResource Card}">
+                        <Setter Property="Visibility" Value="Collapsed"/>
+                        <Style.Triggers>
+                            <MultiDataTrigger>
+                                <MultiDataTrigger.Conditions>
+                                    <Condition Binding="{Binding IsTableMode}" Value="True"/>
+                                    <Condition Binding="{Binding IsEmpty}"     Value="False"/>
+                                </MultiDataTrigger.Conditions>
+                                <Setter Property="Visibility" Value="Visible"/>
+                            </MultiDataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </Border.Style>
+                <DataGrid ItemsSource="{Binding Items}"
+                          SelectionMode="Single">
+                    <DataGrid.RowStyle>
+                        <Style TargetType="DataGridRow"
+                               BasedOn="{StaticResource {x:Type DataGridRow}}">
+                            <Setter Property="ContextMenu" Value="{StaticResource ProfileRowMenu}"/>
+                        </Style>
+                    </DataGrid.RowStyle>
+                    <DataGrid.Columns>
+                        <!-- Bulk-select checkbox column. Template column
+                             instead of DataGridCheckBoxColumn so a single
+                             click toggles (no enter-edit-mode tap). -->
+                        <DataGridTemplateColumn Header="" Width="36" IsReadOnly="True"
+                                                CanUserSort="False" CanUserReorder="False">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay,
+                                                          UpdateSourceTrigger=PropertyChanged}"
+                                              HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+
+                        <!-- Status pulse: small green dot when the profile
+                             is currently running. -->
+                        <DataGridTemplateColumn Header="" Width="22" IsReadOnly="True">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <Ellipse Width="8" Height="8"
+                                             HorizontalAlignment="Center" VerticalAlignment="Center"
+                                             Fill="{StaticResource OkBrush}"
+                                             Visibility="{Binding IsRunning, Converter={StaticResource BoolToVis}}"/>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+
+                        <DataGridTextColumn Header="NAME"     Binding="{Binding Name}"       Width="*"   IsReadOnly="True"/>
+                        <DataGridTextColumn Header="GROUP"    Binding="{Binding GroupName}"  Width="120" IsReadOnly="True"/>
+                        <DataGridTextColumn Header="TEMPLATE" Binding="{Binding TemplateId}" Width="160" IsReadOnly="True"/>
+                        <DataGridTextColumn Header="PROXY"    Binding="{Binding ProxySlug}"  Width="140" IsReadOnly="True"/>
+                        <DataGridTextColumn Header="RUNS"     Binding="{Binding RunCount}"   Width="60"  IsReadOnly="True"/>
+                        <DataGridTextColumn Header="LAST RUN"
+                                            Binding="{Binding LastRunAt, StringFormat='{}{0:yyyy-MM-dd HH:mm}'}"
+                                            Width="140" IsReadOnly="True"/>
+
+                        <!-- Actions: Start / Starting / Stop / Edit / Delete -->
+                        <DataGridTemplateColumn Header="" Width="180" IsReadOnly="True">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <StackPanel Orientation="Horizontal"
+                                                HorizontalAlignment="Center"
+                                                VerticalAlignment="Center">
+                                        <Button ToolTip="Start profile"
+                                                CommandParameter="{Binding}"
+                                                Command="{Binding DataContext.StartCommand,
+                                                          Source={x:Reference PageRoot}}">
+                                            <Button.Style>
+                                                <Style TargetType="Button" BasedOn="{StaticResource RowActionButton}">
+                                                    <Setter Property="Visibility" Value="Visible"/>
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding IsRunning}" Value="True">
+                                                            <Setter Property="Visibility" Value="Collapsed"/>
+                                                        </DataTrigger>
+                                                        <DataTrigger Binding="{Binding IsStarting}" Value="True">
+                                                            <Setter Property="Visibility" Value="Collapsed"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </Button.Style>
+                                            <TextBlock Style="{StaticResource RowActionIcon}"
+                                                       FontSize="15"
+                                                       Foreground="{StaticResource OkBrush}"
+                                                       Text="&#xE768;"/>
+                                        </Button>
+
+                                        <Border Padding="6,4"
+                                                CornerRadius="4"
+                                                Margin="2,0"
+                                                Background="{StaticResource AccentSoft}"
+                                                Visibility="{Binding IsStarting, Converter={StaticResource BoolToVis}}">
+                                            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                                <Control Style="{StaticResource Spinner}"
+                                                         Foreground="{StaticResource Accent}"/>
+                                                <TextBlock Text="Starting…"
+                                                           Foreground="{StaticResource Accent}"
+                                                           VerticalAlignment="Center"
+                                                           Margin="6,0,2,0"
+                                                           FontSize="11"/>
+                                            </StackPanel>
+                                        </Border>
+
+                                        <Button Style="{StaticResource RowActionDanger}"
+                                                ToolTip="Stop profile"
+                                                Visibility="{Binding IsRunning, Converter={StaticResource BoolToVis}}"
+                                                Command="{Binding DataContext.StopCommand,
+                                                          Source={x:Reference PageRoot}}"
+                                                CommandParameter="{Binding}">
+                                            <TextBlock Style="{StaticResource RowActionIcon}"
+                                                       FontSize="15"
+                                                       Foreground="{StaticResource ErrBrush}"
+                                                       Text="&#xE71A;"/>
+                                        </Button>
+                                        <Button Style="{StaticResource RowActionButton}"
+                                                ToolTip="Edit"
+                                                Command="{Binding DataContext.EditCommand,
+                                                          Source={x:Reference PageRoot}}"
+                                                CommandParameter="{Binding}">
+                                            <TextBlock Style="{StaticResource RowActionIcon}" FontSize="14" Text="&#xE70F;"/>
+                                        </Button>
+                                        <Button Style="{StaticResource RowActionDanger}"
+                                                ToolTip="Delete"
+                                                Command="{Binding DataContext.DeleteCommand,
+                                                          Source={x:Reference PageRoot}}"
+                                                CommandParameter="{Binding}">
+                                            <TextBlock Style="{StaticResource RowActionIcon}" FontSize="14" Text="&#xE74D;"/>
+                                        </Button>
+                                    </StackPanel>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                    </DataGrid.Columns>
+                </DataGrid>
+            </Border>
+        </Grid>
+    </Grid>
+</UserControl>

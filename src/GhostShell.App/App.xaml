@@ -1,0 +1,79 @@
+<!--
+  SPDX-License-Identifier: MIT
+  Copyright (c) 2026 Mykola Kovhanko <thuesdays@gmail.com>
+-->
+<Application x:Class="GhostShell.App.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:conv="clr-namespace:GhostShell.App.Converters"
+             xmlns:vm="clr-namespace:GhostShell.App.ViewModels"
+             xmlns:views="clr-namespace:GhostShell.App.Views"
+             ShutdownMode="OnMainWindowClose">
+    <Application.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="Resources/Themes/DarkTheme.xaml"/>
+            </ResourceDictionary.MergedDictionaries>
+
+            <!-- Converters available globally -->
+            <conv:BoolToVisibilityConverter         x:Key="BoolToVis"/>
+            <conv:InverseBoolToVisibilityConverter  x:Key="InverseBoolToVis"/>
+            <conv:NullToCollapsedConverter          x:Key="NullToCollapsedConverter"/>
+            <conv:NonEmptyToVisibleConverter        x:Key="NonEmptyToVisibleConverter"/>
+            <conv:ResourceKeyToBrushConverter       x:Key="ResourceKeyToBrush"/>
+            <conv:StringEqualsConverter             x:Key="StringEqualsConverter"/>
+
+            <!-- Logs page: short-level tag → theme brush. Two
+                 instances: the level CHIP wants the saturated brush
+                 (so INF reads green); the message body wants
+                 DimNormalLevels=True so info messages render as
+                 default text and only WAR/ERR colour the body. -->
+            <conv:LogLevelToBrushConverter          x:Key="LogLevelChipBrush"/>
+            <conv:LogLevelToBrushConverter          x:Key="LogLevelMsgBrush"
+                                                    DimNormalLevels="True"/>
+
+            <!-- Runs page: status pill style + matching text colour. -->
+            <conv:RunToPillStyleConverter           x:Key="RunToPillStyle"/>
+            <conv:RunToPillForegroundConverter      x:Key="RunToPillForeground"/>
+
+            <!-- View↔ViewModel mapping. The content area renders any
+                 BaseViewModel through ContentControl + DataTemplate. -->
+            <DataTemplate DataType="{x:Type vm:OverviewViewModel}">
+                <views:OverviewView/>
+            </DataTemplate>
+            <DataTemplate DataType="{x:Type vm:ProfilesViewModel}">
+                <views:ProfilesView/>
+            </DataTemplate>
+            <DataTemplate DataType="{x:Type vm:GroupsViewModel}">
+                <views:GroupsView/>
+            </DataTemplate>
+            <DataTemplate DataType="{x:Type vm:SchedulerViewModel}">
+                <views:SchedulerView/>
+            </DataTemplate>
+            <DataTemplate DataType="{x:Type vm:RunsViewModel}">
+                <views:RunsView/>
+            </DataTemplate>
+            <DataTemplate DataType="{x:Type vm:ProxyViewModel}">
+                <views:ProxyView/>
+            </DataTemplate>
+            <DataTemplate DataType="{x:Type vm:SessionsViewModel}">
+                <views:SessionsView/>
+            </DataTemplate>
+            <DataTemplate DataType="{x:Type vm:FingerprintViewModel}">
+                <views:FingerprintView/>
+            </DataTemplate>
+            <DataTemplate DataType="{x:Type vm:ScriptsViewModel}">
+                <views:ScriptsView/>
+            </DataTemplate>
+            <DataTemplate DataType="{x:Type vm:CookiePacksViewModel}">
+                <views:CookiePacksView/>
+            </DataTemplate>
+            <DataTemplate DataType="{x:Type vm:LogsViewModel}">
+                <views:LogsView/>
+            </DataTemplate>
+            <DataTemplate DataType="{x:Type vm:SettingsViewModel}">
+                <views:SettingsView/>
+            </DataTemplate>
+        </ResourceDictionary>
+    </Application.Resources>
+</Application>

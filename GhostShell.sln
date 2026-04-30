@@ -1,0 +1,56 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.8.0.0
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{1A2B3C4D-0001-0000-0000-000000000001}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "GhostShell.Core", "src\GhostShell.Core\GhostShell.Core.csproj", "{1A2B3C4D-0002-0000-0000-000000000001}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "GhostShell.Data", "src\GhostShell.Data\GhostShell.Data.csproj", "{1A2B3C4D-0003-0000-0000-000000000001}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "GhostShell.Runtime", "src\GhostShell.Runtime\GhostShell.Runtime.csproj", "{1A2B3C4D-0004-0000-0000-000000000001}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "GhostShell.App", "src\GhostShell.App\GhostShell.App.csproj", "{1A2B3C4D-0005-0000-0000-000000000001}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{1A2B3C4D-0006-0000-0000-000000000001}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "GhostShell.Tests", "tests\GhostShell.Tests\GhostShell.Tests.csproj", "{1A2B3C4D-0007-0000-0000-000000000001}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{1A2B3C4D-0002-0000-0000-000000000001}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{1A2B3C4D-0002-0000-0000-000000000001}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{1A2B3C4D-0002-0000-0000-000000000001}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{1A2B3C4D-0002-0000-0000-000000000001}.Release|Any CPU.Build.0 = Release|Any CPU
+		{1A2B3C4D-0003-0000-0000-000000000001}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{1A2B3C4D-0003-0000-0000-000000000001}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{1A2B3C4D-0003-0000-0000-000000000001}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{1A2B3C4D-0003-0000-0000-000000000001}.Release|Any CPU.Build.0 = Release|Any CPU
+		{1A2B3C4D-0004-0000-0000-000000000001}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{1A2B3C4D-0004-0000-0000-000000000001}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{1A2B3C4D-0004-0000-0000-000000000001}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{1A2B3C4D-0004-0000-0000-000000000001}.Release|Any CPU.Build.0 = Release|Any CPU
+		{1A2B3C4D-0005-0000-0000-000000000001}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{1A2B3C4D-0005-0000-0000-000000000001}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{1A2B3C4D-0005-0000-0000-000000000001}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{1A2B3C4D-0005-0000-0000-000000000001}.Release|Any CPU.Build.0 = Release|Any CPU
+		{1A2B3C4D-0007-0000-0000-000000000001}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{1A2B3C4D-0007-0000-0000-000000000001}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{1A2B3C4D-0007-0000-0000-000000000001}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{1A2B3C4D-0007-0000-0000-000000000001}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{1A2B3C4D-0002-0000-0000-000000000001} = {1A2B3C4D-0001-0000-0000-000000000001}
+		{1A2B3C4D-0003-0000-0000-000000000001} = {1A2B3C4D-0001-0000-0000-000000000001}
+		{1A2B3C4D-0004-0000-0000-000000000001} = {1A2B3C4D-0001-0000-0000-000000000001}
+		{1A2B3C4D-0005-0000-0000-000000000001} = {1A2B3C4D-0001-0000-0000-000000000001}
+		{1A2B3C4D-0007-0000-0000-000000000001} = {1A2B3C4D-0006-0000-0000-000000000001}
+	EndGlobalSection
+EndGlobal

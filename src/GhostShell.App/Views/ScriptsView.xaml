@@ -1,0 +1,287 @@
+<!--
+  SPDX-License-Identifier: MIT
+  Copyright (c) 2026 Mykola Kovhanko <thuesdays@gmail.com>
+-->
+<UserControl x:Class="GhostShell.App.Views.ScriptsView"
+             x:Name="PageRoot"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="clr-namespace:GhostShell.App.ViewModels"
+             d:DataContext="{d:DesignInstance Type=vm:ScriptsViewModel}"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d"
+             Background="Transparent">
+    <UserControl.Resources>
+
+        <!-- Right-click + ⋯ button menu. Lives at the user-control
+             level so it can data-context-bind to the page VM. -->
+        <ContextMenu x:Key="ScriptCardMenu"
+                     DataContext="{Binding DataContext, Source={x:Reference PageRoot}}">
+            <MenuItem Header="✎ Edit"
+                      Command="{Binding EditCommand}"
+                      CommandParameter="{Binding RelativeSource={RelativeSource AncestorType=ContextMenu}, Path=PlacementTarget.DataContext}"/>
+            <Separator/>
+            <MenuItem Header="⤓ Export to file…"
+                      Command="{Binding ExportCommand}"
+                      CommandParameter="{Binding RelativeSource={RelativeSource AncestorType=ContextMenu}, Path=PlacementTarget.DataContext}"/>
+            <MenuItem Header="📌 Set as default"
+                      Command="{Binding SetAsDefaultCommand}"
+                      CommandParameter="{Binding RelativeSource={RelativeSource AncestorType=ContextMenu}, Path=PlacementTarget.DataContext}"/>
+            <MenuItem Header="🎯 Apply to profiles…"
+                      Command="{Binding ApplyToProfilesCommand}"
+                      CommandParameter="{Binding RelativeSource={RelativeSource AncestorType=ContextMenu}, Path=PlacementTarget.DataContext}"/>
+            <Separator/>
+            <MenuItem Header="🗑 Delete"
+                      Command="{Binding DeleteCommand}"
+                      CommandParameter="{Binding RelativeSource={RelativeSource AncestorType=ContextMenu}, Path=PlacementTarget.DataContext}"/>
+        </ContextMenu>
+
+        <!-- Card container style — hover state, selected-default
+             accent border, click-to-edit cursor. -->
+        <Style x:Key="ScriptCardStyle" TargetType="{x:Type Border}">
+            <Setter Property="Margin" Value="0,0,12,12"/>
+            <Setter Property="Width"  Value="300"/>
+            <Setter Property="Padding" Value="12"/>
+            <Setter Property="CornerRadius" Value="6"/>
+            <Setter Property="Background"  Value="{StaticResource BgRaised}"/>
+            <Setter Property="BorderBrush" Value="{StaticResource Border}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="BorderBrush" Value="{StaticResource BorderStrong}"/>
+                    <Setter Property="Background"  Value="{StaticResource BgHover}"/>
+                </Trigger>
+                <DataTrigger Binding="{Binding IsDefault}" Value="True">
+                    <Setter Property="BorderBrush" Value="{StaticResource WarnBrush}"/>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+
+    </UserControl.Resources>
+
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <!-- ─── HEADER ──────────────────────────────────────────── -->
+        <Grid Grid.Row="0" Margin="0,0,0,18">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <StackPanel Grid.Column="0">
+                <TextBlock Style="{StaticResource PageTitle}" Text="Scripts"/>
+                <TextBlock Style="{StaticResource PageSubtitle}"
+                           TextWrapping="Wrap"
+                           Margin="0,4,32,0"
+                           Text="Saved flow definitions. Assign a script to a profile on the profile page — the runtime fetches the profile's script at the start of each run."/>
+            </StackPanel>
+            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Top">
+                <Button Content="🎨  Templates"
+                        Command="{Binding OpenTemplatesCommand}"
+                        Padding="12,7" Margin="0,0,8,0"
+                        ToolTip="Curated script templates (Phase 16)"/>
+                <Button Content="⤒  Import"
+                        Command="{Binding ImportCommand}"
+                        Padding="12,7" Margin="0,0,8,0"
+                        ToolTip="Load a script from a JSON file"/>
+                <Button Content="+  New script"
+                        Command="{Binding CreateCommand}"
+                        Padding="14,7"
+                        Background="{StaticResource Accent}"
+                        Foreground="White"
+                        BorderBrush="{StaticResource Accent}"
+                        FontWeight="SemiBold"/>
+            </StackPanel>
+        </Grid>
+
+        <!-- ─── SEARCH BAR ──────────────────────────────────────── -->
+        <Border Grid.Row="1" Margin="0,0,0,16"
+                Background="{StaticResource BgDeep}"
+                BorderBrush="{StaticResource Border}"
+                BorderThickness="1"
+                CornerRadius="6"
+                Padding="14,8">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" Text="🔍"
+                           FontSize="14" Margin="0,0,8,0"
+                           Foreground="{StaticResource TextMuted}"
+                           VerticalAlignment="Center"/>
+                <TextBox Grid.Column="1"
+                         Text="{Binding SearchText, Mode=TwoWay,
+                                        UpdateSourceTrigger=PropertyChanged}"
+                         Background="Transparent"
+                         BorderThickness="0"
+                         Padding="0"
+                         FontSize="13"
+                         VerticalAlignment="Center"
+                         ToolTip="Filter by name or description"/>
+                <!-- Placeholder text shown only when SearchText empty.
+                     IsHitTestVisible=False so it doesn't intercept
+                     clicks on the textbox; Visibility flips via
+                     trigger below. -->
+                <TextBlock Grid.Column="1"
+                           Text="Search scripts by name or description…"
+                           Foreground="{StaticResource TextDim}"
+                           FontSize="13"
+                           Margin="2,0,0,0"
+                           IsHitTestVisible="False"
+                           VerticalAlignment="Center">
+                    <TextBlock.Style>
+                        <Style TargetType="TextBlock">
+                            <Setter Property="Visibility" Value="Collapsed"/>
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding SearchText}" Value="">
+                                    <Setter Property="Visibility" Value="Visible"/>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding SearchText}" Value="{x:Null}">
+                                    <Setter Property="Visibility" Value="Visible"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </TextBlock.Style>
+                </TextBlock>
+            </Grid>
+        </Border>
+
+        <!-- ─── CARDS GRID ──────────────────────────────────────── -->
+        <Grid Grid.Row="2">
+            <!-- Empty state -->
+            <Border Style="{StaticResource Card}" Padding="40"
+                    Visibility="{Binding IsEmpty, Converter={StaticResource BoolToVis}}">
+                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="540">
+                    <TextBlock FontSize="48" HorizontalAlignment="Center"
+                               Foreground="{StaticResource TextDim}" Text="📜"/>
+                    <TextBlock Margin="0,12,0,4" HorizontalAlignment="Center"
+                               Style="{StaticResource PageTitle}" FontSize="16"
+                               Text="No scripts yet"/>
+                    <TextBlock HorizontalAlignment="Center" TextAlignment="Center"
+                               Style="{StaticResource MutedText}"
+                               TextWrapping="Wrap"
+                               Text="Click '+ New script' for the visual editor, 'Import' to load a JSON, or 'Templates' for curated starter flows. Right-click an existing card for actions."/>
+                </StackPanel>
+            </Border>
+
+            <ScrollViewer VerticalScrollBarVisibility="Auto"
+                          HorizontalScrollBarVisibility="Disabled"
+                          Visibility="{Binding IsEmpty, Converter={StaticResource InverseBoolToVis}}">
+                <ItemsControl ItemsSource="{Binding Items}">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <WrapPanel/>
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Border Style="{StaticResource ScriptCardStyle}"
+                                    ContextMenu="{StaticResource ScriptCardMenu}"
+                                    MouseLeftButtonUp="OnCardClick"
+                                    Tag="{Binding}">
+                                <DockPanel LastChildFill="True">
+                                    <!-- Header: dot + name + DEFAULT pill + ⋯ menu -->
+                                    <Grid DockPanel.Dock="Top">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+                                        <Ellipse Grid.Column="0"
+                                                 Width="8" Height="8"
+                                                 VerticalAlignment="Center"
+                                                 Margin="0,0,8,0"
+                                                 Fill="{Binding AccentBrushKey,
+                                                                Converter={StaticResource ResourceKeyToBrush}}"/>
+                                        <TextBlock Grid.Column="1"
+                                                   Text="{Binding Name}"
+                                                   Foreground="{StaticResource Text}"
+                                                   FontSize="14" FontWeight="SemiBold"
+                                                   TextTrimming="CharacterEllipsis"
+                                                   VerticalAlignment="Center"/>
+                                        <Border Grid.Column="2"
+                                                Background="{StaticResource WarnSoftBrush}"
+                                                BorderBrush="{StaticResource WarnBrush}"
+                                                BorderThickness="1"
+                                                CornerRadius="3"
+                                                Padding="6,1"
+                                                Margin="6,0,4,0"
+                                                VerticalAlignment="Center"
+                                                Visibility="{Binding IsDefault,
+                                                                     Converter={StaticResource BoolToVis}}">
+                                            <TextBlock Text="DEFAULT"
+                                                       Foreground="{StaticResource WarnBrush}"
+                                                       FontFamily="{StaticResource FontMono}"
+                                                       FontSize="9"
+                                                       FontWeight="Bold"/>
+                                        </Border>
+                                        <Button Grid.Column="3"
+                                                Content="⋯"
+                                                Click="OnMenuButton"
+                                                Tag="{Binding}"
+                                                Background="Transparent"
+                                                BorderThickness="0"
+                                                Foreground="{StaticResource TextMuted}"
+                                                FontSize="16"
+                                                Padding="6,0"
+                                                ToolTip="Actions"/>
+                                    </Grid>
+
+                                    <!-- Footer: stats row -->
+                                    <Border DockPanel.Dock="Bottom"
+                                            BorderBrush="{StaticResource Border}"
+                                            BorderThickness="0,1,0,0"
+                                            Margin="0,12,0,0"
+                                            Padding="0,8,0,0">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Grid.Column="0" Orientation="Horizontal">
+                                                <TextBlock Text="{Binding StepsLabel}"
+                                                           Foreground="{StaticResource Text}"
+                                                           FontFamily="{StaticResource FontMono}"
+                                                           FontSize="11" FontWeight="SemiBold"/>
+                                                <TextBlock Text=" · "
+                                                           Foreground="{StaticResource TextDim}"
+                                                           FontSize="11"
+                                                           Margin="3,0"/>
+                                                <TextBlock Text="{Binding ProfilesLabel}"
+                                                           Foreground="{StaticResource Text}"
+                                                           FontFamily="{StaticResource FontMono}"
+                                                           FontSize="11" FontWeight="SemiBold"/>
+                                            </StackPanel>
+                                            <TextBlock Grid.Column="1"
+                                                       Text="{Binding UpdatedAgo}"
+                                                       Foreground="{StaticResource TextDim}"
+                                                       FontSize="10.5"/>
+                                        </Grid>
+                                    </Border>
+
+                                    <!-- Description: 2-line max, ellipsis -->
+                                    <TextBlock Text="{Binding Description}"
+                                               Foreground="{StaticResource TextMuted}"
+                                               FontSize="12"
+                                               TextWrapping="Wrap"
+                                               TextTrimming="WordEllipsis"
+                                               MaxHeight="36"
+                                               Margin="0,8,0,0"
+                                               LineHeight="16"/>
+                                </DockPanel>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </ScrollViewer>
+        </Grid>
+    </Grid>
+</UserControl>

@@ -1,0 +1,3 @@
+# Placeholder so the Assets/Fonts/ directory exists in the repo.
+# The actual TTF files are embedded as <Resource> in
+# GhostShell.App.csproj — copy them in via tools/copy-fonts.ps1.

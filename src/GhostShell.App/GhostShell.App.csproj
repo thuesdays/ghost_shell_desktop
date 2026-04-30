@@ -1,0 +1,99 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <AssemblyName>GhostShell</AssemblyName>
+    <RootNamespace>GhostShell.App</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\AppIcon.ico</ApplicationIcon>
+    <Description>WPF main app: window, sidebar, navigation, page views.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Resource Include="Assets\AppIcon.ico" />
+    <Resource Include="Assets\AppIcon-256.png" />
+
+    <!-- Embed Inter as the app's UI font. We ship the variable-font
+         masters (one .ttf carries every weight + italic axis), keeping
+         the binary compact while still letting the theme reach for
+         Light → ExtraBold from the same file.
+
+         Build behaviour: <Resource> bakes the .ttf into the assembly
+         so the user doesn't need Inter installed at the OS level and
+         the look is identical across machines. References live in
+         Resources\Themes\Colors.xaml via the short pack URI
+             /Assets/Fonts/#Inter
+
+         The CopyInterFont MSBuild target below auto-copies the .ttf
+         from F:\projects\inter_font\ before each build, so the user
+         never has to remember to run a separate script. -->
+    <Resource Include="Assets\Fonts\Inter-Variable.ttf" Condition="Exists('Assets\Fonts\Inter-Variable.ttf')" />
+    <Resource Include="Assets\Fonts\Inter-Italic-Variable.ttf" Condition="Exists('Assets\Fonts\Inter-Italic-Variable.ttf')" />
+  </ItemGroup>
+
+  <!-- ════════════════════════════════════════════════════════════
+       Inter font auto-copy.
+
+       Runs BEFORE the Resource items are evaluated. If the
+       developer drops the Inter variable font folder into the
+       canonical location (F:\projects\inter_font), the .ttfs are
+       copied into Assets\Fonts\ and picked up as embedded
+       resources on the next build pass.
+
+       Override the source via the InterFontSource property:
+           dotnet build -p:InterFontSource=C:\fonts\inter
+
+       Skips silently if the source folder doesn't exist — the
+       FontFamily fallback chain (Inter → Segoe UI Variable Text
+       → Segoe UI → Arial) keeps text readable without the
+       embedded master.
+
+       Note: ContinueOnError="true" means a copy failure (locked
+       file, permission denied) doesn't block the build; we just
+       ship without the embedded font and fall back to OS fonts.
+       ════════════════════════════════════════════════════════════ -->
+  <PropertyGroup>
+    <InterFontSource Condition="'$(InterFontSource)' == ''">F:\projects\inter_font</InterFontSource>
+  </PropertyGroup>
+
+  <Target Name="CopyInterFont"
+          BeforeTargets="BeforeBuild"
+          Condition="Exists('$(InterFontSource)') and (!Exists('Assets\Fonts\Inter-Variable.ttf') or !Exists('Assets\Fonts\Inter-Italic-Variable.ttf'))">
+    <Message Text="CopyInterFont: pulling Inter variable masters from $(InterFontSource)" Importance="high"/>
+    <MakeDir Directories="Assets\Fonts" />
+    <Copy SourceFiles="$(InterFontSource)\Inter-VariableFont_opsz,wght.ttf"
+          DestinationFiles="Assets\Fonts\Inter-Variable.ttf"
+          ContinueOnError="true"
+          Condition="Exists('$(InterFontSource)\Inter-VariableFont_opsz,wght.ttf')"/>
+    <Copy SourceFiles="$(InterFontSource)\Inter-Italic-VariableFont_opsz,wght.ttf"
+          DestinationFiles="Assets\Fonts\Inter-Italic-Variable.ttf"
+          ContinueOnError="true"
+          Condition="Exists('$(InterFontSource)\Inter-Italic-VariableFont_opsz,wght.ttf')"/>
+  </Target>
+
+  <ItemGroup>
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.2.2" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="8.0.1" />
+    <PackageReference Include="Microsoft.Extensions.Http" Version="8.0.1" />
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="8.0.1" />
+
+    <!-- Serilog: file-rotating + console + debug. We don't pull
+         Microsoft.Extensions.Logging.Console anymore — Serilog's
+         own console sink is richer. -->
+    <PackageReference Include="Serilog" Version="4.0.2" />
+    <PackageReference Include="Serilog.Extensions.Hosting" Version="8.0.0" />
+    <PackageReference Include="Serilog.Sinks.File" Version="6.0.0" />
+    <PackageReference Include="Serilog.Sinks.Console" Version="6.0.0" />
+    <PackageReference Include="Serilog.Sinks.Debug" Version="3.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\GhostShell.Core\GhostShell.Core.csproj" />
+    <ProjectReference Include="..\GhostShell.Data\GhostShell.Data.csproj" />
+    <ProjectReference Include="..\GhostShell.Runtime\GhostShell.Runtime.csproj" />
+  </ItemGroup>
+
+</Project>

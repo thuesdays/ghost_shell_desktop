@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>GhostShell.Core</AssemblyName>
+    <RootNamespace>GhostShell.Core</RootNamespace>
+    <Description>Domain models and service contracts for Ghost Shell. No infrastructure deps.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- ILogger&lt;T&gt; is the only infra surface Core touches —
+         the LogTail under Core.Logging takes it as a constructor
+         dep so the host can plumb in Serilog without Core knowing
+         the concrete sink. Abstractions-only; no runtime cost. -->
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.1" />
+  </ItemGroup>
+
+</Project>

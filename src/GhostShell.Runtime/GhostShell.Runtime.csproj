@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>GhostShell.Runtime</AssemblyName>
+    <RootNamespace>GhostShell.Runtime</RootNamespace>
+    <Description>Browser orchestration: launcher, runner, scheduler, process reaper. Phase 3+ stub for now.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="8.0.1" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.1" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="8.0.0" />
+
+    <!-- Selenium 4 — note we DO NOT pull Selenium.WebDriver.ChromeDriver
+         because we ship our own patched chromedriver.exe alongside the
+         patched Chromium build. ChromeDriverService is configured to
+         use that path explicitly. -->
+    <PackageReference Include="Selenium.WebDriver" Version="4.21.0" />
+
+    <!-- WMI for the launch preflight: querying Win32_Process so we
+         can read each chrome.exe / chromedriver.exe's command-line
+         and reap the ones holding our user-data-dir from a previous
+         crash. The Process API in System.Diagnostics gives us name +
+         pid but not argv. -->
+    <PackageReference Include="System.Management" Version="8.0.0" />
+
+    <!-- Phase 7 — Chrome importer reads Cookies + History SQLite DBs
+         out of a real Chrome User Data dir. ProtectedData gives us
+         DPAPI for unwrapping the os_crypt master key (Local State).
+         AesGcm ships in BCL since .NET 5, no extra package needed. -->
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.6" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\GhostShell.Core\GhostShell.Core.csproj" />
+  </ItemGroup>
+
+</Project>

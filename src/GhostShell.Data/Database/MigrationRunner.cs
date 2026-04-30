@@ -1,0 +1,163 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Mykola Kovhanko <thuesdays@gmail.com>
+
+using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.Logging;
+
+namespace GhostShell.Data.Database;
+
+/// <summary>
+/// Tiny linear migration runner. We don't use EF Core / FluentMigrator
+/// here — the schema is small and stable, and shipping fewer
+/// dependencies in the persistence layer keeps the binary lean.
+///
+/// Each migration is a (version, sql) pair. We record applied
+/// versions in `__schema_version` and never re-run them.
+/// </summary>
+public sealed class MigrationRunner
+{
+    private readonly DatabaseConnection _db;
+    private readonly ILogger<MigrationRunner> _log;
+
+    public MigrationRunner(DatabaseConnection db, ILogger<MigrationRunner> log)
+    {
+        _db  = db;
+        _log = log;
+    }
+
+    private static readonly IReadOnlyList<(int Version, string Sql)> Migrations =
+    [
+        (1, Migrations_V1.Sql),
+        (2, Migrations_V2.Sql),
+        (3, Migrations_V3.Sql),
+        (4, Migrations_V4.Sql),
+        (5, Migrations_V5.Sql),
+        (6, Migrations_V6.Sql),
+        (7, Migrations_V7.Sql),
+        (8, Migrations_V8.Sql),
+        (9, Migrations_V9.Sql),
+        (10, Migrations_V10.Sql),
+        (12, Migrations_V12.Sql),
+    ];
+
+    public void Run()
+    {
+        var conn = _db.Get();
+
+        EnsureVersionTable(conn);
+
+        var applied = LoadAppliedVersions(conn);
+        foreach (var (version, sql) in Migrations)
+        {
+            if (applied.Contains(version)) continue;
+            ApplyMigration(conn, version, sql, tolerateDuplicateColumn: false);
+        }
+
+        // V11 — uses the tolerant statement-list path. The version
+        // gets recorded the same way once all statements pass.
+        if (!applied.Contains(11))
+        {
+            ApplyTolerantStatements(conn, 11, Migrations_V11.Statements);
+        }
+
+        // V13 — same pattern (the ALTER TABLE inside isn't idempotent
+        // by itself but the runner swallows duplicate-column errors).
+        if (!applied.Contains(13))
+        {
+            ApplyTolerantStatements(conn, 13, Migrations_V13.Statements);
+        }
+
+        // V14 — scripts.is_default + runs.script_run_id (Phase 12 iter 6).
+        if (!applied.Contains(14))
+        {
+            ApplyTolerantStatements(conn, 14, Migrations_V14.Statements);
+        }
+    }
+
+    private void ApplyMigration(
+        Microsoft.Data.Sqlite.SqliteConnection conn,
+        int version, string sql, bool tolerateDuplicateColumn)
+    {
+        _log.LogInformation("Applying migration v{Version}", version);
+
+        using var tx = conn.BeginTransaction();
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.Transaction = tx;
+            cmd.CommandText = sql;
+            try { cmd.ExecuteNonQuery(); }
+            catch (Microsoft.Data.Sqlite.SqliteException ex)
+                when (tolerateDuplicateColumn && IsDuplicateColumn(ex))
+            {
+                _log.LogInformation("Migration v{V} statement skipped (already applied)", version);
+            }
+        }
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.Transaction = tx;
+            cmd.CommandText = "INSERT INTO __schema_version (version, applied_at) VALUES ($v, $t);";
+            cmd.Parameters.AddWithValue("$v", version);
+            cmd.Parameters.AddWithValue("$t", DateTime.UtcNow.ToString("O"));
+            cmd.ExecuteNonQuery();
+        }
+        tx.Commit();
+    }
+
+    /// <summary>
+    /// Apply a list of statements with per-statement
+    /// duplicate-column tolerance. Used by V11 + V13 — both have
+    /// ALTER TABLE statements that aren't natively idempotent in
+    /// SQLite. Stamping __schema_version happens once all statements
+    /// have either succeeded or harmlessly skipped.
+    /// </summary>
+    private void ApplyTolerantStatements(
+        Microsoft.Data.Sqlite.SqliteConnection conn,
+        int version, IReadOnlyList<string> statements)
+    {
+        _log.LogInformation("Applying migration v{V} (tolerant, {Count} stmts)",
+            version, statements.Count);
+
+        foreach (var sql in statements)
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = sql;
+            try { cmd.ExecuteNonQuery(); }
+            catch (Microsoft.Data.Sqlite.SqliteException ex)
+                when (IsDuplicateColumn(ex))
+            {
+                _log.LogInformation("V{V} statement skipped (already applied)", version);
+            }
+        }
+
+        using var stamp = conn.CreateCommand();
+        stamp.CommandText = "INSERT INTO __schema_version (version, applied_at) VALUES ($v, $t);";
+        stamp.Parameters.AddWithValue("$v", version);
+        stamp.Parameters.AddWithValue("$t", DateTime.UtcNow.ToString("O"));
+        stamp.ExecuteNonQuery();
+    }
+
+    private static bool IsDuplicateColumn(Microsoft.Data.Sqlite.SqliteException ex)
+        => ex.Message.Contains("duplicate column", StringComparison.OrdinalIgnoreCase);
+
+    private static void EnsureVersionTable(SqliteConnection conn)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            CREATE TABLE IF NOT EXISTS __schema_version (
+                version    INTEGER PRIMARY KEY,
+                applied_at TEXT    NOT NULL
+            );
+        """;
+        cmd.ExecuteNonQuery();
+    }
+
+    private static HashSet<int> LoadAppliedVersions(SqliteConnection conn)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT version FROM __schema_version;";
+        using var rdr = cmd.ExecuteReader();
+        var seen = new HashSet<int>();
+        while (rdr.Read()) seen.Add(rdr.GetInt32(0));
+        return seen;
+    }
+}

@@ -1,0 +1,101 @@
+<!--
+  SPDX-License-Identifier: MIT
+  Copyright (c) 2026 Mykola Kovhanko <thuesdays@gmail.com>
+-->
+<Window x:Class="GhostShell.App.Dialogs.ConfirmDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Confirm"
+        Width="480" SizeToContent="Height"
+        WindowStartupLocation="CenterOwner"
+        WindowStyle="None"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False"
+        Background="{StaticResource BgBase}">
+
+    <Border BorderBrush="{StaticResource BorderStrong}" BorderThickness="1">
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>  <!-- title bar  -->
+                <RowDefinition Height="*"/>     <!-- body       -->
+                <RowDefinition Height="Auto"/>  <!-- footer     -->
+            </Grid.RowDefinitions>
+
+            <!-- Title bar — left accent strip + icon + text + close.
+                 The strip / icon colour are set from code-behind based
+                 on ConfirmSeverity, so the Error variant immediately
+                 reads as "this is a problem". -->
+            <Border Grid.Row="0"
+                    x:Name="HeaderBar"
+                    Background="{StaticResource BgDeep}"
+                    BorderBrush="{StaticResource Border}"
+                    BorderThickness="0,0,0,1"
+                    Padding="0">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="4"/>     <!-- accent strip -->
+                        <ColumnDefinition Width="Auto"/>  <!-- icon -->
+                        <ColumnDefinition Width="*"/>     <!-- title -->
+                        <ColumnDefinition Width="Auto"/>  <!-- close -->
+                    </Grid.ColumnDefinitions>
+
+                    <Border Grid.Column="0" x:Name="AccentStrip"
+                            Background="{StaticResource Accent}"/>
+
+                    <TextBlock Grid.Column="1"
+                               x:Name="HeaderIcon"
+                               FontFamily="Segoe MDL2 Assets"
+                               FontSize="18"
+                               Foreground="{StaticResource Accent}"
+                               Text="&#xE946;"
+                               VerticalAlignment="Center"
+                               Margin="14,12,12,12"/>
+
+                    <TextBlock Grid.Column="2"
+                               x:Name="TitleText"
+                               Foreground="{StaticResource Text}"
+                               FontSize="14" FontWeight="SemiBold"
+                               VerticalAlignment="Center"
+                               Text="Confirm"/>
+
+                    <Button Grid.Column="3"
+                            Style="{StaticResource ChromeButton}"
+                            Width="36" Height="36"
+                            Click="OnCancel"
+                            ToolTip="Close">
+                        <TextBlock FontFamily="Segoe MDL2 Assets" FontSize="10"
+                                   Text="&#xE8BB;"/>
+                    </Button>
+                </Grid>
+            </Border>
+
+            <!-- Body -->
+            <ScrollViewer Grid.Row="1" MaxHeight="280"
+                          VerticalScrollBarVisibility="Auto">
+                <TextBlock x:Name="MessageText"
+                           Margin="18,16,18,18"
+                           Foreground="{StaticResource Text}"
+                           FontSize="13"
+                           LineHeight="20"
+                           TextWrapping="Wrap"
+                           Text="Are you sure?"/>
+            </ScrollViewer>
+
+            <!-- Footer -->
+            <Border Grid.Row="2" Background="{StaticResource BgDeep}"
+                    BorderBrush="{StaticResource Border}"
+                    BorderThickness="0,1,0,0"
+                    Padding="14,10">
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                    <Button x:Name="CancelBtn"
+                            Content="Cancel" Click="OnCancel"
+                            MinWidth="84" Margin="0,0,8,0"/>
+                    <Button x:Name="ConfirmBtn"
+                            Content="Confirm" Click="OnConfirm"
+                            Style="{StaticResource ButtonPrimary}"
+                            MinWidth="84"/>
+                </StackPanel>
+            </Border>
+        </Grid>
+    </Border>
+</Window>

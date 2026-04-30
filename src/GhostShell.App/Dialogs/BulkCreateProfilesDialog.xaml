@@ -1,0 +1,188 @@
+<!--
+  SPDX-License-Identifier: MIT
+  Copyright (c) 2026 Mykola Kovhanko <thuesdays@gmail.com>
+-->
+<Window x:Class="GhostShell.App.Dialogs.BulkCreateProfilesDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Bulk create profiles"
+        Width="640" Height="640"
+        WindowStartupLocation="CenterOwner"
+        WindowStyle="None"
+        ResizeMode="CanResize"
+        ShowInTaskbar="False"
+        Background="{StaticResource BgBase}">
+
+    <Border BorderBrush="{StaticResource BorderStrong}" BorderThickness="1">
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <!-- Title bar -->
+            <Border Grid.Row="0" Background="{StaticResource BgDeep}"
+                    BorderBrush="{StaticResource Border}" BorderThickness="0,0,0,1"
+                    Padding="18,14">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                        <TextBlock Text="⚡" FontSize="16" Margin="0,0,8,0"
+                                   Foreground="{StaticResource WarnBrush}" VerticalAlignment="Center"/>
+                        <StackPanel>
+                            <TextBlock Text="Bulk create profiles"
+                                       Foreground="{StaticResource Text}"
+                                       FontSize="15" FontWeight="SemiBold"/>
+                            <TextBlock Foreground="{StaticResource TextMuted}" FontSize="11" Margin="0,2,0,0"
+                                       Text="Generate many profiles in one shot. Each gets a 3-digit suffix; collisions are auto-skipped."/>
+                        </StackPanel>
+                    </StackPanel>
+                    <Button Grid.Column="1"
+                            Style="{StaticResource ChromeButton}"
+                            Width="28" Height="28"
+                            Click="OnCancel" ToolTip="Close">
+                        <TextBlock FontFamily="Segoe MDL2 Assets" FontSize="10"
+                                   Text="&#xE8BB;"/>
+                    </Button>
+                </Grid>
+            </Border>
+
+            <!-- Body -->
+            <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+                <StackPanel Margin="22,18,22,12">
+
+                    <!-- Row 1: name prefix + count -->
+                    <Grid Margin="0,0,0,14">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="14"/>
+                            <ColumnDefinition Width="160"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0">
+                            <TextBlock Style="{StaticResource MutedText}" Text="Name prefix *"/>
+                            <TextBox x:Name="PrefixField" Margin="0,4,0,4" Text="profile_"/>
+                            <TextBlock Style="{StaticResource DimText}" TextWrapping="Wrap"
+                                       Text="Each profile gets a 3-digit suffix appended (e.g. ua_med_001, ua_med_002). Letters, digits, _ and -."/>
+                        </StackPanel>
+                        <StackPanel Grid.Column="2">
+                            <TextBlock Style="{StaticResource MutedText}" Text="How many?"/>
+                            <TextBox x:Name="CountField" Margin="0,4,0,4" Text="10"/>
+                            <TextBlock Style="{StaticResource DimText}" Text="1 – 100"/>
+                        </StackPanel>
+                    </Grid>
+
+                    <!-- Row 2: start index + language -->
+                    <Grid Margin="0,0,0,14">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="14"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0">
+                            <TextBlock Style="{StaticResource MutedText}" Text="Start index"/>
+                            <TextBox x:Name="StartField" Margin="0,4,0,4" Text="1"/>
+                            <TextBlock Style="{StaticResource DimText}"
+                                       Text="Suffix counter starts here. Auto-skips collisions."/>
+                        </StackPanel>
+                        <StackPanel Grid.Column="2">
+                            <TextBlock Style="{StaticResource MutedText}" Text="Language"/>
+                            <TextBox x:Name="LanguageField" Margin="0,4,0,4" Text="uk-UA"/>
+                            <TextBlock Style="{StaticResource DimText}"
+                                       Text="BCP-47 locale tag (Accept-Language / navigator.language)."/>
+                        </StackPanel>
+                    </Grid>
+
+                    <!-- Row 3: FP template -->
+                    <StackPanel Margin="0,0,0,14">
+                        <TextBlock Style="{StaticResource MutedText}" Text="FP template strategy"/>
+                        <ComboBox x:Name="TemplateField" Margin="0,4,0,4" SelectedIndex="0">
+                            <ComboBoxItem Content="Auto (random per profile, recommended)" Tag=""/>
+                            <ComboBoxItem Content="windows_chrome_120"  Tag="windows_chrome_120"/>
+                            <ComboBoxItem Content="windows_chrome_121"  Tag="windows_chrome_121"/>
+                            <ComboBoxItem Content="mac_chrome_120"      Tag="mac_chrome_120"/>
+                            <ComboBoxItem Content="linux_chrome_120"    Tag="linux_chrome_120"/>
+                        </ComboBox>
+                        <TextBlock Style="{StaticResource DimText}"
+                                   Text="Each profile gets a different fingerprint — looks like different physical machines."/>
+                    </StackPanel>
+
+                    <!-- Row 4: proxy pool -->
+                    <StackPanel Margin="0,0,0,14">
+                        <TextBlock Style="{StaticResource MutedText}" Text="Proxy pool (round-robin)"/>
+                        <ListBox x:Name="ProxyPoolList" Margin="0,4,0,4"
+                                 SelectionMode="Multiple"
+                                 Height="120"
+                                 ScrollViewer.VerticalScrollBarVisibility="Auto"
+                                 ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                            <ListBox.ItemTemplate>
+                                <DataTemplate>
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="{Binding Slug}" FontFamily="{StaticResource FontMono}"
+                                                   Foreground="{StaticResource Text}" Margin="0,0,8,0"/>
+                                        <TextBlock Text="{Binding Subtitle}" Style="{StaticResource DimText}"/>
+                                    </StackPanel>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+                        <TextBlock Style="{StaticResource DimText}" TextWrapping="Wrap"
+                                   Text="Hold Ctrl to select multiple. Each profile gets one proxy from the pool, round-robin. Leave empty to use no proxy."/>
+                    </StackPanel>
+
+                    <!-- Row 5: enrich on first run -->
+                    <CheckBox x:Name="EnrichCheckbox" IsChecked="True"
+                              Margin="0,4,0,0" Foreground="{StaticResource Text}">
+                        <StackPanel>
+                            <TextBlock Text="Enrich on first run"
+                                       Foreground="{StaticResource Text}"/>
+                            <TextBlock Style="{StaticResource DimText}" TextWrapping="Wrap"
+                                       Text="Seeds realistic browsing history (top sites, bookmarks) the first time each profile launches. Strongly recommended."/>
+                        </StackPanel>
+                    </CheckBox>
+
+                    <!-- Status / errors -->
+                    <Border x:Name="StatusBox"
+                            Margin="0,16,0,0"
+                            Padding="12,8"
+                            CornerRadius="6"
+                            Visibility="Collapsed"
+                            Background="{StaticResource BgRaised}"
+                            BorderBrush="{StaticResource Border}"
+                            BorderThickness="1">
+                        <TextBlock x:Name="StatusText" TextWrapping="Wrap"
+                                   FontSize="12"
+                                   Foreground="{StaticResource Text}"/>
+                    </Border>
+                </StackPanel>
+            </ScrollViewer>
+
+            <!-- Footer -->
+            <Border Grid.Row="2" Background="{StaticResource BgDeep}"
+                    BorderBrush="{StaticResource Border}" BorderThickness="0,1,0,0"
+                    Padding="18,12">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" x:Name="PreviewText"
+                               Style="{StaticResource DimText}"
+                               VerticalAlignment="Center"
+                               Text="Will create: profile_001 … profile_010"/>
+                    <StackPanel Grid.Column="1" Orientation="Horizontal">
+                        <Button Content="Cancel" Click="OnCancel"
+                                MinWidth="84" Margin="0,0,8,0"/>
+                        <Button x:Name="CreateBtn"
+                                Content="⚡ Create profiles"
+                                Click="OnCreate"
+                                Style="{StaticResource ButtonPrimary}"
+                                MinWidth="160"/>
+                    </StackPanel>
+                </Grid>
+            </Border>
+        </Grid>
+    </Border>
+</Window>

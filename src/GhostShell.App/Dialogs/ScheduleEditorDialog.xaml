@@ -1,0 +1,363 @@
+<!--
+  SPDX-License-Identifier: MIT
+  Copyright (c) 2026 Mykola Kovhanko <thuesdays@gmail.com>
+-->
+<Window x:Class="GhostShell.App.Dialogs.ScheduleEditorDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Schedule editor"
+        Width="700" Height="720"
+        WindowStartupLocation="CenterOwner"
+        WindowStyle="None"
+        ResizeMode="CanResize"
+        ShowInTaskbar="False"
+        Background="{StaticResource BgBase}">
+
+    <Border BorderBrush="{StaticResource BorderStrong}" BorderThickness="1">
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <!-- Title -->
+            <Border Grid.Row="0" Background="{StaticResource BgDeep}"
+                    BorderBrush="{StaticResource Border}" BorderThickness="0,0,0,1"
+                    Padding="18,14">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                        <TextBlock Text="🕰" FontSize="16" Margin="0,0,8,0"
+                                   Foreground="{StaticResource HueAmber}"
+                                   VerticalAlignment="Center"/>
+                        <StackPanel>
+                            <TextBlock x:Name="TitleText"
+                                       Text="✨ Create new schedule"
+                                       Foreground="{StaticResource Text}"
+                                       FontSize="15" FontWeight="SemiBold"/>
+                            <TextBlock Foreground="{StaticResource TextMuted}" FontSize="11" Margin="0,2,0,0"
+                                       Text="Pick a target (profile or group), set the trigger, optionally limit days / hours."/>
+                        </StackPanel>
+                    </StackPanel>
+                    <Button Grid.Column="1"
+                            Style="{StaticResource ChromeButton}"
+                            Width="28" Height="28"
+                            Click="OnCancel" ToolTip="Close">
+                        <TextBlock FontFamily="Segoe MDL2 Assets" FontSize="10"
+                                   Text="&#xE8BB;"/>
+                    </Button>
+                </Grid>
+            </Border>
+
+            <!-- Body -->
+            <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+                <StackPanel Margin="22,18,22,12">
+
+                    <!-- Name -->
+                    <StackPanel Margin="0,0,0,14">
+                        <TextBlock Style="{StaticResource MutedText}" Text="Name *"/>
+                        <TextBox x:Name="NameField" Margin="0,4,0,4"/>
+                        <TextBlock Style="{StaticResource DimText}"
+                                   Text="Free-form label shown in the list."/>
+                    </StackPanel>
+
+                    <!-- Target kind + value -->
+                    <StackPanel Margin="0,0,0,14">
+                        <TextBlock Style="{StaticResource MutedText}" Text="Target *"/>
+                        <Grid Margin="0,4,0,4">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="160"/>
+                                <ColumnDefinition Width="14"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <ComboBox Grid.Column="0" x:Name="TargetKindField"
+                                      SelectedIndex="0"
+                                      SelectionChanged="OnTargetKindChanged">
+                                <ComboBoxItem Content="Profile" Tag="profile"/>
+                                <ComboBoxItem Content="Group"   Tag="group"/>
+                            </ComboBox>
+                            <ComboBox Grid.Column="2" x:Name="TargetNameField"
+                                      DisplayMemberPath="."
+                                      ToolTip="Pick a profile or group to fire when the trigger matches"/>
+                        </Grid>
+                        <TextBlock Style="{StaticResource DimText}"
+                                   Text="A 'profile' schedule fires one Chrome session. A 'group' schedule fires every group member up to the group's parallelism cap."/>
+                    </StackPanel>
+
+                    <!-- Trigger kind tabs. Three options now: Simple
+                         is the human-pacing mode (runs/day + jitter
+                         range), recommended for most warmup workloads.
+                         Each radio is centred vertically with its
+                         label via the global RadioButton style. -->
+                    <TextBlock Style="{StaticResource MutedText}" Text="Trigger *"/>
+                    <Border Background="{StaticResource BgDeep}"
+                            BorderBrush="{StaticResource Border}"
+                            BorderThickness="1"
+                            CornerRadius="6"
+                            Padding="14,10"
+                            Margin="0,4,0,4">
+                        <StackPanel Orientation="Horizontal">
+                            <RadioButton x:Name="SimpleTab"
+                                         GroupName="Trigger"
+                                         IsChecked="True"
+                                         Margin="0,0,28,0"
+                                         Checked="OnTriggerKindChanged">
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Text="✨" FontSize="13" Margin="0,0,5,0"
+                                               VerticalAlignment="Center"/>
+                                    <TextBlock Text="Simple"
+                                               VerticalAlignment="Center"
+                                               FontWeight="SemiBold"/>
+                                </StackPanel>
+                            </RadioButton>
+                            <RadioButton x:Name="IntervalTab"
+                                         GroupName="Trigger"
+                                         Margin="0,0,28,0"
+                                         Checked="OnTriggerKindChanged">
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Text="⏲" FontSize="13" Margin="0,0,5,0"
+                                               VerticalAlignment="Center"/>
+                                    <TextBlock Text="Interval"
+                                               VerticalAlignment="Center"
+                                               FontWeight="SemiBold"/>
+                                </StackPanel>
+                            </RadioButton>
+                            <RadioButton x:Name="CronTab"
+                                         GroupName="Trigger"
+                                         Checked="OnTriggerKindChanged">
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Text="{}{}" FontFamily="{StaticResource FontMono}"
+                                               FontSize="13" Margin="0,0,5,0"
+                                               VerticalAlignment="Center"/>
+                                    <TextBlock Text="Cron"
+                                               VerticalAlignment="Center"
+                                               FontWeight="SemiBold"/>
+                                </StackPanel>
+                            </RadioButton>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Simple pane — runs/day + jitter range.
+                         Active hours (set further down) bound the
+                         per-day window the engine spreads fires over. -->
+                    <Border x:Name="SimplePane" Padding="0" Margin="0,4,0,16">
+                        <StackPanel>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="160"/>
+                                    <ColumnDefinition Width="14"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0">
+                                    <TextBlock Style="{StaticResource MutedText}"
+                                               Text="Runs / day"/>
+                                    <TextBox x:Name="RunsPerDayField" Text="150"
+                                             Margin="0,4,0,0"
+                                             TextChanged="OnSimpleChanged"/>
+                                </StackPanel>
+                                <StackPanel Grid.Column="2">
+                                    <TextBlock Style="{StaticResource MutedText}"
+                                               Text="Min / max gap (seconds)"/>
+                                    <Grid Margin="0,4,0,0">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="14"/>
+                                            <ColumnDefinition Width="*"/>
+                                        </Grid.ColumnDefinitions>
+                                        <TextBox Grid.Column="0" x:Name="MinJitterField"
+                                                 Text="20"
+                                                 TextChanged="OnSimpleChanged"
+                                                 ToolTip="Minimum gap between fires, seconds"/>
+                                        <TextBlock Grid.Column="1" Text="–"
+                                                   Style="{StaticResource MutedText}"
+                                                   VerticalAlignment="Center"
+                                                   HorizontalAlignment="Center"/>
+                                        <TextBox Grid.Column="2" x:Name="MaxJitterField"
+                                                 Text="180"
+                                                 TextChanged="OnSimpleChanged"
+                                                 ToolTip="Maximum gap between fires, seconds"/>
+                                    </Grid>
+                                </StackPanel>
+                            </Grid>
+                            <TextBlock x:Name="SimpleSummaryText"
+                                       Style="{StaticResource DimText}"
+                                       Margin="0,8,0,0"
+                                       TextWrapping="Wrap"
+                                       Text="Each fire waits a random 20–180s before the next. Average gap 100s ≈ 504 fires/14h window."/>
+                            <TextBlock Style="{StaticResource DimText}"
+                                       Margin="0,4,0,0"
+                                       TextWrapping="Wrap"
+                                       Text="Tip: set Active hours below to bound the firing window (e.g. 7–21 means 'between 7am and 9pm only')."/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Interval pane -->
+                    <Border x:Name="IntervalPane" Padding="0" Margin="0,4,0,16">
+                        <StackPanel>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="120"/>
+                                    <ColumnDefinition Width="14"/>
+                                    <ColumnDefinition Width="160"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBox Grid.Column="0" x:Name="IntervalField" Text="60"
+                                         TextChanged="OnIntervalChanged"/>
+                                <ComboBox Grid.Column="2" x:Name="IntervalUnitField"
+                                          SelectedIndex="1"
+                                          SelectionChanged="OnIntervalChanged">
+                                    <ComboBoxItem Content="seconds" Tag="1"/>
+                                    <ComboBoxItem Content="minutes" Tag="60"/>
+                                    <ComboBoxItem Content="hours"   Tag="3600"/>
+                                    <ComboBoxItem Content="days"    Tag="86400"/>
+                                </ComboBox>
+                                <TextBlock Grid.Column="3" x:Name="IntervalHumanText"
+                                           Margin="14,0,0,0" VerticalAlignment="Center"
+                                           Style="{StaticResource MutedText}"
+                                           Text="every 60m"/>
+                            </Grid>
+                            <TextBlock Style="{StaticResource DimText}" Margin="0,6,0,0"
+                                       Text="Fixed gap between fires. Active-window guards (below) still apply."/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Cron pane -->
+                    <Border x:Name="CronPane" Padding="0" Margin="0,4,0,16"
+                            Visibility="Collapsed">
+                        <StackPanel>
+                            <TextBox x:Name="CronField"
+                                     FontFamily="{StaticResource FontMono}"
+                                     Text="0 9 * * 1-5"
+                                     TextChanged="OnCronChanged"/>
+                            <TextBlock x:Name="CronErrorText"
+                                       Foreground="{StaticResource ErrBrush}"
+                                       FontSize="11"
+                                       Margin="0,4,0,0"
+                                       Visibility="Collapsed"/>
+                            <TextBlock Style="{StaticResource DimText}" Margin="0,6,0,4"
+                                       Text="5 fields: minute hour day-of-month month day-of-week. Examples below."/>
+                            <WrapPanel>
+                                <Button Content="every 15m"      Tag="*/15 * * * *"      Click="OnCronPreset" Margin="0,0,4,4"/>
+                                <Button Content="hourly"         Tag="0 * * * *"         Click="OnCronPreset" Margin="0,0,4,4"/>
+                                <Button Content="every 6h"       Tag="0 */6 * * *"       Click="OnCronPreset" Margin="0,0,4,4"/>
+                                <Button Content="9-5 weekdays"   Tag="0 9-17 * * 1-5"    Click="OnCronPreset" Margin="0,0,4,4"/>
+                                <Button Content="9am daily"      Tag="0 9 * * *"         Click="OnCronPreset" Margin="0,0,4,4"/>
+                                <Button Content="midnight"       Tag="0 0 * * *"         Click="OnCronPreset" Margin="0,0,4,4"/>
+                            </WrapPanel>
+
+                            <TextBlock Style="{StaticResource MutedText}" Margin="0,12,0,4"
+                                       Text="Next 5 fires"/>
+                            <Border Background="{StaticResource BgDeep}"
+                                    BorderBrush="{StaticResource Border}"
+                                    BorderThickness="1"
+                                    CornerRadius="6"
+                                    Padding="12,8"
+                                    MinHeight="80">
+                                <ItemsControl x:Name="CronPreviewList">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Text="{Binding}"
+                                                       FontFamily="{StaticResource FontMono}"
+                                                       Foreground="{StaticResource Text}"
+                                                       Margin="0,1"/>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </Border>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Active days -->
+                    <StackPanel Margin="0,0,0,14">
+                        <TextBlock Style="{StaticResource MutedText}" Text="Active days"/>
+                        <WrapPanel Margin="0,4,0,4">
+                            <ToggleButton x:Name="DayMon" Content="Mon" Margin="0,0,4,4" Padding="14,6" Tag="1"/>
+                            <ToggleButton x:Name="DayTue" Content="Tue" Margin="0,0,4,4" Padding="14,6" Tag="2"/>
+                            <ToggleButton x:Name="DayWed" Content="Wed" Margin="0,0,4,4" Padding="14,6" Tag="3"/>
+                            <ToggleButton x:Name="DayThu" Content="Thu" Margin="0,0,4,4" Padding="14,6" Tag="4"/>
+                            <ToggleButton x:Name="DayFri" Content="Fri" Margin="0,0,4,4" Padding="14,6" Tag="5"/>
+                            <ToggleButton x:Name="DaySat" Content="Sat" Margin="0,0,4,4" Padding="14,6" Tag="6"/>
+                            <ToggleButton x:Name="DaySun" Content="Sun" Margin="0,0,4,4" Padding="14,6" Tag="7"/>
+                        </WrapPanel>
+                        <TextBlock Style="{StaticResource DimText}"
+                                   Text="No days selected = every day."/>
+                    </StackPanel>
+
+                    <!-- Active hours -->
+                    <StackPanel Margin="0,0,0,14">
+                        <TextBlock Style="{StaticResource MutedText}" Text="Active hours"/>
+                        <Grid Margin="0,4,0,4">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="120"/>
+                                <ColumnDefinition Width="14"/>
+                                <ColumnDefinition Width="120"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBox Grid.Column="0" x:Name="FromHourField"
+                                     ToolTip="From hour (0-23). Leave empty for any time."/>
+                            <TextBlock Grid.Column="1" Text="–"
+                                       Style="{StaticResource MutedText}"
+                                       VerticalAlignment="Center"
+                                       HorizontalAlignment="Center"/>
+                            <TextBox Grid.Column="2" x:Name="ToHourField"
+                                     ToolTip="To hour (0-23). Leave empty for any time."/>
+                            <TextBlock Grid.Column="3" Margin="14,0,0,0"
+                                       VerticalAlignment="Center"
+                                       Style="{StaticResource DimText}"
+                                       TextWrapping="Wrap"
+                                       Text="Inclusive 0-23. Leave both empty for any time. Wrap-around supported (22-6 = 22:00 – 06:59)."/>
+                        </Grid>
+                    </StackPanel>
+
+                    <!-- Enabled checkbox -->
+                    <CheckBox x:Name="EnabledCheckbox" IsChecked="True"
+                              Margin="0,4,0,0" Foreground="{StaticResource Text}">
+                        <StackPanel>
+                            <TextBlock Text="Enabled" Foreground="{StaticResource Text}"/>
+                            <TextBlock Style="{StaticResource DimText}" TextWrapping="Wrap"
+                                       Text="Untick to pause this schedule without deleting it. The runner skips paused rows."/>
+                        </StackPanel>
+                    </CheckBox>
+
+                    <Border x:Name="StatusBox"
+                            Margin="0,16,0,0"
+                            Padding="12,8"
+                            CornerRadius="6"
+                            Visibility="Collapsed"
+                            Background="{StaticResource BgRaised}"
+                            BorderBrush="{StaticResource Border}"
+                            BorderThickness="1">
+                        <TextBlock x:Name="StatusText" TextWrapping="Wrap"
+                                   FontSize="12"
+                                   Foreground="{StaticResource Text}"/>
+                    </Border>
+                </StackPanel>
+            </ScrollViewer>
+
+            <!-- Footer -->
+            <Border Grid.Row="2" Background="{StaticResource BgDeep}"
+                    BorderBrush="{StaticResource Border}" BorderThickness="0,1,0,0"
+                    Padding="18,12">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Grid.Column="1" Orientation="Horizontal">
+                        <Button Content="Cancel" Click="OnCancel"
+                                MinWidth="84" Margin="0,0,8,0"/>
+                        <Button x:Name="SaveBtn"
+                                Content="Save"
+                                Click="OnSave"
+                                Style="{StaticResource ButtonPrimary}"
+                                MinWidth="120"/>
+                    </StackPanel>
+                </Grid>
+            </Border>
+        </Grid>
+    </Border>
+</Window>

@@ -1,0 +1,937 @@
+<!--
+  SPDX-License-Identifier: MIT
+  Copyright (c) 2026 Mykola Kovhanko <thuesdays@gmail.com>
+-->
+<Window x:Class="GhostShell.App.Dialogs.ScriptVisualEditorDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Script editor"
+        Width="1280" Height="820"
+        WindowStartupLocation="CenterOwner"
+        WindowStyle="None"
+        ResizeMode="CanResize"
+        ShowInTaskbar="False"
+        Background="{StaticResource BgBase}">
+    <Window.Resources>
+        <!-- Grid-paper background for the canvas. DrawingBrush so it
+             tiles cheaply at any zoom level. The faint dot pattern
+             matches the legacy web's "infinite-canvas" feel. -->
+        <DrawingBrush x:Key="GridDots"
+                      TileMode="Tile"
+                      ViewportUnits="Absolute"
+                      Viewport="0,0,24,24">
+            <DrawingBrush.Drawing>
+                <GeometryDrawing Brush="#1FA5B4FC">
+                    <GeometryDrawing.Geometry>
+                        <EllipseGeometry Center="12,12" RadiusX="1" RadiusY="1"/>
+                    </GeometryDrawing.Geometry>
+                </GeometryDrawing>
+            </DrawingBrush.Drawing>
+        </DrawingBrush>
+
+        <!-- Per-category accent brushes for step nodes. These map to
+             the type chips above the canvas; click a chip to toggle
+             rows of that category. Keys mirror the legacy web's
+             palette-class names. -->
+        <SolidColorBrush x:Key="CatFlow"        Color="#FF60A5FA"/>
+        <SolidColorBrush x:Key="CatFlowSoft"    Color="#3360A5FA"/>
+        <SolidColorBrush x:Key="CatAds"         Color="#FFFB923C"/>
+        <SolidColorBrush x:Key="CatAdsSoft"     Color="#33FB923C"/>
+        <SolidColorBrush x:Key="CatNav"         Color="#FFA78BFA"/>
+        <SolidColorBrush x:Key="CatNavSoft"     Color="#33A78BFA"/>
+        <SolidColorBrush x:Key="CatInteract"    Color="#FF34D399"/>
+        <SolidColorBrush x:Key="CatInteractSoft" Color="#3334D399"/>
+        <SolidColorBrush x:Key="CatData"        Color="#FF38BDF8"/>
+        <SolidColorBrush x:Key="CatDataSoft"    Color="#3338BDF8"/>
+        <SolidColorBrush x:Key="CatTiming"      Color="#FFFBBF24"/>
+        <SolidColorBrush x:Key="CatTimingSoft"  Color="#33FBBF24"/>
+        <SolidColorBrush x:Key="CatMisc"        Color="#FF94A3B8"/>
+        <SolidColorBrush x:Key="CatMiscSoft"    Color="#3394A3B8"/>
+    </Window.Resources>
+
+    <Border BorderBrush="{StaticResource BorderStrong}" BorderThickness="1">
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>  <!-- top header     -->
+                <RowDefinition Height="Auto"/>  <!-- name + flags   -->
+                <RowDefinition Height="*"/>     <!-- two-pane body  -->
+                <RowDefinition Height="Auto"/>  <!-- footer         -->
+            </Grid.RowDefinitions>
+
+            <!-- ─── HEADER ──────────────────────────────────────────
+                 "← All scripts" link · script name (big) · DEFAULT
+                 pill · Export / Reload / Save / × buttons. -->
+            <Border Grid.Row="0" Background="{StaticResource BgDeep}"
+                    BorderBrush="{StaticResource Border}" BorderThickness="0,0,0,1"
+                    Padding="20,14">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+
+                    <StackPanel Grid.Column="0">
+                        <Button Content="← All scripts" Click="OnCancel"
+                                Background="Transparent" BorderThickness="0"
+                                Foreground="{StaticResource TextMuted}"
+                                Cursor="Hand" Padding="0"
+                                FontSize="11" HorizontalAlignment="Left"/>
+                        <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
+                            <TextBlock Text="📜" FontSize="20" Margin="0,0,8,0"
+                                       Foreground="{StaticResource HueAmber}"
+                                       VerticalAlignment="Center"/>
+                            <TextBlock x:Name="HeaderTitleText"
+                                       Text="Create script"
+                                       Foreground="{StaticResource Text}"
+                                       FontSize="20" FontWeight="SemiBold"/>
+                            <Border x:Name="DefaultPill"
+                                    Background="{StaticResource WarnSoftBrush}"
+                                    BorderBrush="{StaticResource WarnBrush}"
+                                    BorderThickness="1" CornerRadius="3"
+                                    Padding="6,1" Margin="10,0,0,0"
+                                    VerticalAlignment="Center"
+                                    Visibility="Collapsed">
+                                <TextBlock Text="DEFAULT"
+                                           Foreground="{StaticResource WarnBrush}"
+                                           FontFamily="{StaticResource FontMono}"
+                                           FontSize="9" FontWeight="Bold"/>
+                            </Border>
+                        </StackPanel>
+                    </StackPanel>
+
+                    <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                        <Button Content="📋  JSON view"
+                                Click="OnJsonView" Margin="0,0,8,0"
+                                Padding="12,7"
+                                ToolTip="Switch to raw-JSON editor"/>
+                        <Button x:Name="SaveBtn" Content="💾  Save"
+                                Click="OnSave"
+                                Padding="14,7"
+                                Background="{StaticResource Accent}"
+                                Foreground="White"
+                                BorderBrush="{StaticResource Accent}"
+                                FontWeight="SemiBold"/>
+                        <Button Style="{StaticResource ChromeButton}"
+                                Width="28" Height="28" Click="OnCancel"
+                                Margin="8,0,0,0"
+                                ToolTip="Close (no save)">
+                            <TextBlock FontFamily="Segoe MDL2 Assets" FontSize="10" Text="&#xE8BB;"/>
+                        </Button>
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <!-- ─── NAME + FLAGS (top) + DESCRIPTION (below) ─── -->
+            <Border Grid.Row="1" Padding="20,12"
+                    Background="{StaticResource BgBase}"
+                    BorderBrush="{StaticResource Border}" BorderThickness="0,0,0,1">
+                <StackPanel>
+                    <!-- Row A: Name (fills) + Enabled + Default checks -->
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="20"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0">
+                            <TextBlock Style="{StaticResource MutedText}" Text="Name *"/>
+                            <TextBox x:Name="NameField" Margin="0,4,0,0"/>
+                        </StackPanel>
+                        <StackPanel Grid.Column="2" Orientation="Horizontal"
+                                    VerticalAlignment="Center" Margin="0,18,0,0">
+                            <CheckBox x:Name="EnabledCheck" Content="Enabled" IsChecked="True"
+                                      Margin="0,0,16,0" VerticalAlignment="Center"/>
+                            <CheckBox x:Name="DefaultCheck" Content="Default for new profiles"
+                                      VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Grid>
+
+                    <!-- Row B: ✎ + description block. Click flips
+                         between read-mode (highlighted block) and
+                         edit-mode (real TextBox). -->
+                    <Grid Margin="0,12,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <Button Grid.Column="0"
+                                Content="✎"
+                                Click="OnToggleDescriptionEdit"
+                                Background="Transparent"
+                                BorderThickness="0"
+                                Foreground="{StaticResource TextMuted}"
+                                FontSize="14" Padding="6,2"
+                                Margin="0,0,8,0"
+                                VerticalAlignment="Center"
+                                ToolTip="Edit description"/>
+                        <Border Grid.Column="1"
+                                x:Name="DescriptionReadBlock"
+                                Background="{StaticResource BgRaised}"
+                                BorderBrush="{StaticResource Border}"
+                                BorderThickness="1"
+                                CornerRadius="4"
+                                Padding="12,7"
+                                Cursor="Hand"
+                                MouseLeftButtonUp="OnToggleDescriptionEdit">
+                            <Border.Style>
+                                <Style TargetType="Border">
+                                    <Setter Property="Background"  Value="{StaticResource BgRaised}"/>
+                                    <Setter Property="BorderBrush" Value="{StaticResource Border}"/>
+                                    <Style.Triggers>
+                                        <Trigger Property="IsMouseOver" Value="True">
+                                            <Setter Property="BorderBrush"
+                                                    Value="{StaticResource Accent}"/>
+                                            <Setter Property="Background"
+                                                    Value="{StaticResource BgHover}"/>
+                                        </Trigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Border.Style>
+                            <TextBlock x:Name="DescriptionDisplayText"
+                                       Foreground="{StaticResource TextMuted}"
+                                       FontSize="12"
+                                       Text="Click ✎ to add a description…"
+                                       TextTrimming="CharacterEllipsis"/>
+                        </Border>
+                        <TextBox Grid.Column="1"
+                                 x:Name="DescriptionField"
+                                 Visibility="Collapsed"
+                                 FontSize="12"
+                                 LostFocus="OnDescriptionLostFocus"/>
+                    </Grid>
+                </StackPanel>
+            </Border>
+
+            <!-- ─── BODY: palette | canvas ─────────────────────────── -->
+            <Grid Grid.Row="2">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="280"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+
+                <!-- LEFT: palette with search + grouped + descriptions -->
+                <Border Grid.Column="0"
+                        Background="{StaticResource BgRaised}"
+                        BorderBrush="{StaticResource Border}"
+                        BorderThickness="0,0,1,0">
+                    <DockPanel LastChildFill="True">
+                        <Border DockPanel.Dock="Top" Padding="14,12">
+                            <StackPanel>
+                                <TextBlock Text="ACTION PALETTE"
+                                           Style="{StaticResource CardHeader}"
+                                           Margin="0,0,0,8"/>
+                                <!-- Compact search — Height 26 instead of natural input
+                                     height so the palette gets more vertical real estate
+                                     for actions. -->
+                                <Border Background="{StaticResource BgDeep}"
+                                        BorderBrush="{StaticResource Border}"
+                                        BorderThickness="1" CornerRadius="4"
+                                        Padding="8,2"
+                                        Height="26">
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="*"/>
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Grid.Column="0" Text="🔍"
+                                                   FontSize="10" Margin="0,0,6,0"
+                                                   Foreground="{StaticResource TextMuted}"
+                                                   VerticalAlignment="Center"/>
+                                        <TextBox Grid.Column="1"
+                                                 x:Name="PaletteFilterField"
+                                                 TextChanged="OnPaletteFilterChanged"
+                                                 Background="Transparent"
+                                                 BorderThickness="0"
+                                                 Padding="0"
+                                                 FontSize="11.5"
+                                                 VerticalContentAlignment="Center"
+                                                 ToolTip="Filter actions"/>
+                                    </Grid>
+                                </Border>
+                            </StackPanel>
+                        </Border>
+                        <Border DockPanel.Dock="Top" Height="1"
+                                Background="{StaticResource Border}"/>
+                        <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                      HorizontalScrollBarVisibility="Disabled">
+                            <ItemsControl x:Name="PaletteRoot"
+                                          HorizontalContentAlignment="Stretch">
+                                <!-- Without TargetType the Setter is silently
+                                     ignored — that was the reason rows looked
+                                     centered: their ContentPresenter didn't
+                                     stretch and shrank to fit content. -->
+                                <ItemsControl.ItemContainerStyle>
+                                    <Style TargetType="ContentPresenter">
+                                        <Setter Property="HorizontalAlignment" Value="Stretch"/>
+                                    </Style>
+                                </ItemsControl.ItemContainerStyle>
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <StackPanel HorizontalAlignment="Stretch">
+                                            <!-- Group header — same 10px left margin as the
+                                                 item buttons so every line in the palette
+                                                 starts at the same x. -->
+                                            <StackPanel Orientation="Horizontal" Margin="10,12,0,4">
+                                                <Ellipse Width="6" Height="6"
+                                                         Fill="{Binding HeaderDotBrush}"
+                                                         VerticalAlignment="Center"
+                                                         Margin="0,0,8,0"/>
+                                                <TextBlock Text="{Binding Header}"
+                                                           Style="{StaticResource MutedText}"
+                                                           FontWeight="SemiBold"
+                                                           FontSize="10"
+                                                           VerticalAlignment="Center"/>
+                                            </StackPanel>
+                                            <ItemsControl ItemsSource="{Binding Items}"
+                                                          HorizontalContentAlignment="Stretch">
+                                                <!-- TargetType="ContentPresenter" is REQUIRED —
+                                                     without it the setter is silently dropped
+                                                     and each row shrinks to its content (which
+                                                     is why items looked centered before). -->
+                                                <ItemsControl.ItemContainerStyle>
+                                                    <Style TargetType="ContentPresenter">
+                                                        <Setter Property="HorizontalAlignment" Value="Stretch"/>
+                                                    </Style>
+                                                </ItemsControl.ItemContainerStyle>
+                                                <ItemsControl.ItemTemplate>
+                                                    <DataTemplate>
+                                                        <!-- Border-based palette row. The default
+                                                             theme Button forces HorizontalAlignment
+                                                             =Center inside its ContentPresenter
+                                                             template, which fights any setting
+                                                             we try; using a Border bypasses that.
+                                                             Mouse handler is wired via
+                                                             MouseLeftButtonUp on the Border. -->
+                                                        <!-- Phase 19: Focusable=True + KeyDown handler
+                                                             so Tab can reach palette rows and Enter
+                                                             /Space inserts. IsFocused trigger draws
+                                                             a thin accent border so keyboard users
+                                                             can see the highlight. -->
+                                                        <Border Tag="{Binding Type}"
+                                                                MouseLeftButtonUp="OnPaletteItem"
+                                                                KeyDown="OnPaletteItemKey"
+                                                                Focusable="True"
+                                                                HorizontalAlignment="Stretch"
+                                                                Background="Transparent"
+                                                                BorderThickness="0"
+                                                                Padding="20,4,8,4"
+                                                                Margin="0,1"
+                                                                Cursor="Hand"
+                                                                ToolTip="{Binding Tooltip}">
+                                                            <Border.Style>
+                                                                <Style TargetType="Border">
+                                                                    <Setter Property="Background" Value="Transparent"/>
+                                                                    <Setter Property="BorderThickness" Value="0"/>
+                                                                    <Setter Property="BorderBrush" Value="Transparent"/>
+                                                                    <Style.Triggers>
+                                                                        <Trigger Property="IsMouseOver" Value="True">
+                                                                            <Setter Property="Background" Value="{StaticResource BgHover}"/>
+                                                                        </Trigger>
+                                                                        <Trigger Property="IsKeyboardFocusWithin" Value="True">
+                                                                            <Setter Property="Background" Value="{StaticResource BgHover}"/>
+                                                                            <Setter Property="BorderThickness" Value="1"/>
+                                                                            <Setter Property="BorderBrush" Value="{StaticResource Accent}"/>
+                                                                        </Trigger>
+                                                                    </Style.Triggers>
+                                                                </Style>
+                                                            </Border.Style>
+                                                            <Grid HorizontalAlignment="Stretch">
+                                                                <Grid.ColumnDefinitions>
+                                                                    <ColumnDefinition Width="22"/>
+                                                                    <ColumnDefinition Width="*"/>
+                                                                </Grid.ColumnDefinitions>
+                                                                <Grid.RowDefinitions>
+                                                                    <RowDefinition Height="Auto"/>
+                                                                    <RowDefinition Height="Auto"/>
+                                                                </Grid.RowDefinitions>
+                                                                <TextBlock Grid.Column="0"
+                                                                           Grid.Row="0"
+                                                                           Grid.RowSpan="2"
+                                                                           Text="{Binding Icon}"
+                                                                           FontSize="14"
+                                                                           VerticalAlignment="Center"
+                                                                           HorizontalAlignment="Left"/>
+                                                                <TextBlock Grid.Column="1" Grid.Row="0"
+                                                                           Text="{Binding Label}"
+                                                                           Foreground="{StaticResource Text}"
+                                                                           FontSize="12"
+                                                                           FontWeight="SemiBold"
+                                                                           Margin="6,0,0,0"
+                                                                           HorizontalAlignment="Left"
+                                                                           TextTrimming="CharacterEllipsis"/>
+                                                                <TextBlock Grid.Column="1" Grid.Row="1"
+                                                                           Text="{Binding Description}"
+                                                                           Foreground="{StaticResource TextMuted}"
+                                                                           FontSize="10"
+                                                                           Margin="6,0,0,0"
+                                                                           HorizontalAlignment="Left"
+                                                                           TextTrimming="CharacterEllipsis"/>
+                                                            </Grid>
+                                                        </Border>
+                                                    </DataTemplate>
+                                                </ItemsControl.ItemTemplate>
+                                            </ItemsControl>
+                                        </StackPanel>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </ScrollViewer>
+                    </DockPanel>
+                </Border>
+
+                <!-- RIGHT: canvas -->
+                <DockPanel Grid.Column="1" LastChildFill="True">
+
+                    <!-- Toolbar: type chips + step count + zoom -->
+                    <Border DockPanel.Dock="Top"
+                            Padding="14,8"
+                            Background="{StaticResource BgBase}"
+                            BorderBrush="{StaticResource Border}"
+                            BorderThickness="0,0,0,1">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <WrapPanel Grid.Column="0" Orientation="Horizontal">
+                                <Border Padding="8,3" CornerRadius="10"
+                                        Background="{StaticResource CatFlowSoft}"
+                                        BorderBrush="{StaticResource CatFlow}"
+                                        BorderThickness="1" Margin="0,0,6,0">
+                                    <StackPanel Orientation="Horizontal">
+                                        <Ellipse Width="6" Height="6" Margin="0,0,6,0"
+                                                 Fill="{StaticResource CatFlow}"
+                                                 VerticalAlignment="Center"/>
+                                        <TextBlock Text="flow" Foreground="{StaticResource CatFlow}"
+                                                   FontSize="10.5" FontWeight="SemiBold"/>
+                                    </StackPanel>
+                                </Border>
+                                <Border Padding="8,3" CornerRadius="10"
+                                        Background="{StaticResource CatAdsSoft}"
+                                        BorderBrush="{StaticResource CatAds}"
+                                        BorderThickness="1" Margin="0,0,6,0">
+                                    <StackPanel Orientation="Horizontal">
+                                        <Ellipse Width="6" Height="6" Margin="0,0,6,0"
+                                                 Fill="{StaticResource CatAds}"
+                                                 VerticalAlignment="Center"/>
+                                        <TextBlock Text="ads" Foreground="{StaticResource CatAds}"
+                                                   FontSize="10.5" FontWeight="SemiBold"/>
+                                    </StackPanel>
+                                </Border>
+                                <Border Padding="8,3" CornerRadius="10"
+                                        Background="{StaticResource CatNavSoft}"
+                                        BorderBrush="{StaticResource CatNav}"
+                                        BorderThickness="1" Margin="0,0,6,0">
+                                    <StackPanel Orientation="Horizontal">
+                                        <Ellipse Width="6" Height="6" Margin="0,0,6,0"
+                                                 Fill="{StaticResource CatNav}"
+                                                 VerticalAlignment="Center"/>
+                                        <TextBlock Text="navigation" Foreground="{StaticResource CatNav}"
+                                                   FontSize="10.5" FontWeight="SemiBold"/>
+                                    </StackPanel>
+                                </Border>
+                                <Border Padding="8,3" CornerRadius="10"
+                                        Background="{StaticResource CatInteractSoft}"
+                                        BorderBrush="{StaticResource CatInteract}"
+                                        BorderThickness="1" Margin="0,0,6,0">
+                                    <StackPanel Orientation="Horizontal">
+                                        <Ellipse Width="6" Height="6" Margin="0,0,6,0"
+                                                 Fill="{StaticResource CatInteract}"
+                                                 VerticalAlignment="Center"/>
+                                        <TextBlock Text="interaction" Foreground="{StaticResource CatInteract}"
+                                                   FontSize="10.5" FontWeight="SemiBold"/>
+                                    </StackPanel>
+                                </Border>
+                                <Border Padding="8,3" CornerRadius="10"
+                                        Background="{StaticResource CatDataSoft}"
+                                        BorderBrush="{StaticResource CatData}"
+                                        BorderThickness="1" Margin="0,0,6,0">
+                                    <StackPanel Orientation="Horizontal">
+                                        <Ellipse Width="6" Height="6" Margin="0,0,6,0"
+                                                 Fill="{StaticResource CatData}"
+                                                 VerticalAlignment="Center"/>
+                                        <TextBlock Text="data" Foreground="{StaticResource CatData}"
+                                                   FontSize="10.5" FontWeight="SemiBold"/>
+                                    </StackPanel>
+                                </Border>
+                                <Border Padding="8,3" CornerRadius="10"
+                                        Background="{StaticResource CatTimingSoft}"
+                                        BorderBrush="{StaticResource CatTiming}"
+                                        BorderThickness="1" Margin="0,0,6,0">
+                                    <StackPanel Orientation="Horizontal">
+                                        <Ellipse Width="6" Height="6" Margin="0,0,6,0"
+                                                 Fill="{StaticResource CatTiming}"
+                                                 VerticalAlignment="Center"/>
+                                        <TextBlock Text="timing" Foreground="{StaticResource CatTiming}"
+                                                   FontSize="10.5" FontWeight="SemiBold"/>
+                                    </StackPanel>
+                                </Border>
+                            </WrapPanel>
+
+                            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                <TextBlock x:Name="StepsCountText"
+                                           Style="{StaticResource MutedText}"
+                                           FontSize="11"
+                                           VerticalAlignment="Center"
+                                           Margin="0,0,16,0"
+                                           Text="0 steps"/>
+                                <Button Content="−" Click="OnZoomOut"
+                                        Width="28" Padding="0"
+                                        ToolTip="Zoom out"/>
+                                <TextBlock x:Name="ZoomLabel"
+                                           Text="100%"
+                                           Foreground="{StaticResource Text}"
+                                           FontFamily="{StaticResource FontMono}"
+                                           FontSize="11"
+                                           Width="44"
+                                           TextAlignment="Center"
+                                           VerticalAlignment="Center"/>
+                                <Button Content="+" Click="OnZoomIn"
+                                        Width="28" Padding="0" Margin="0,0,4,0"
+                                        ToolTip="Zoom in"/>
+                                <Button Content="⌂" Click="OnZoomReset"
+                                        Width="28" Padding="0"
+                                        ToolTip="Reset zoom"/>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+
+                    <!-- Canvas surface. The DOTTED-GRID background sits
+                         on the ScrollViewer chrome itself so it ALWAYS
+                         covers the visible viewport regardless of the
+                         inner Grid's ScaleTransform. Earlier versions
+                         attached the grid to the scaling Grid, which
+                         meant zoom-out shrank the dotted area to a
+                         sub-region of the viewport — visible black
+                         emptiness around it. ScrollViewer Background
+                         is render-time-fixed: it tiles to the chrome
+                         size, not the content size, so the grid stays
+                         constant while only the content scales. -->
+                    <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                  HorizontalScrollBarVisibility="Auto"
+                                  Background="{StaticResource GridDots}">
+                        <Grid x:Name="CanvasGrid"
+                              MinWidth="600"
+                              MinHeight="600"
+                              Background="Transparent"
+                              RenderTransformOrigin="0,0">
+                            <Grid.RenderTransform>
+                                <ScaleTransform x:Name="CanvasZoom"
+                                                ScaleX="1.0" ScaleY="1.0"/>
+                            </Grid.RenderTransform>
+                            <ItemsControl x:Name="StepList"
+                                          Margin="32,24,32,32">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <StackPanel>
+                                            <!-- Connector arrow above (except first) — thicker
+                                                 line + filled triangle tip so the flow direction
+                                                 is unambiguous against the dotted grid. -->
+                                            <Grid HorizontalAlignment="Center"
+                                                  Visibility="{Binding ShowConnector,
+                                                               Converter={StaticResource BoolToVis}}">
+                                                <StackPanel HorizontalAlignment="Center">
+                                                    <Border Width="3" Height="20"
+                                                            Background="{StaticResource BorderStrong}"/>
+                                                    <Path Fill="{StaticResource BorderStrong}"
+                                                          Margin="0,-1,0,0"
+                                                          HorizontalAlignment="Center">
+                                                        <Path.Data>
+                                                            <PathGeometry>
+                                                                <PathFigure StartPoint="0,0" IsClosed="True">
+                                                                    <LineSegment Point="10,0"/>
+                                                                    <LineSegment Point="5,7"/>
+                                                                </PathFigure>
+                                                            </PathGeometry>
+                                                        </Path.Data>
+                                                    </Path>
+                                                </StackPanel>
+                                            </Grid>
+                                            <!-- The node card. Solid raised-surface bg so it
+                                                 stands clearly off the dotted grid; the category
+                                                 colour only paints the LEFT stripe + index pill +
+                                                 outer border, keeping the body readable. -->
+                                            <Border CornerRadius="6"
+                                                    BorderThickness="2"
+                                                    Background="{StaticResource BgRaised}"
+                                                    BorderBrush="{Binding CategoryBrush}"
+                                                    HorizontalAlignment="Stretch"
+                                                    Width="540"
+                                                    Cursor="Hand"
+                                                    MouseLeftButtonDown="OnStepClick"
+                                                    Tag="{Binding}"
+                                                    SnapsToDevicePixels="True">
+                                                <!-- Outer glow effect: solid 2px coloured border
+                                                     + matching shadow underneath via DropShadowEffect.
+                                                     Makes the node stand off the dotted grid + reads
+                                                     as "this is the colour for this category". -->
+                                                <Border.Effect>
+                                                    <DropShadowEffect Color="Black"
+                                                                      BlurRadius="14"
+                                                                      ShadowDepth="2"
+                                                                      Opacity="0.55"/>
+                                                </Border.Effect>
+                                                <Grid>
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="6"/>
+                                                        <ColumnDefinition Width="32"/>
+                                                        <ColumnDefinition Width="*"/>
+                                                        <ColumnDefinition Width="Auto"/>
+                                                    </Grid.ColumnDefinitions>
+
+                                                    <!-- Solid coloured left stripe: full
+                                                         category brush, full height. -->
+                                                    <Border Grid.Column="0"
+                                                            Background="{Binding CategoryBrush}"
+                                                            CornerRadius="4,0,0,4"
+                                                            Margin="-2,-2,0,-2"/>
+
+                                                    <Border Grid.Column="1"
+                                                            CornerRadius="3" Padding="0"
+                                                            Width="22" Height="22"
+                                                            VerticalAlignment="Top"
+                                                            Margin="6,8,0,0"
+                                                            Background="{Binding CategoryBrush}">
+                                                        <TextBlock Text="{Binding Index}"
+                                                                   Foreground="White"
+                                                                   FontFamily="{StaticResource FontMono}"
+                                                                   FontSize="11" FontWeight="Bold"
+                                                                   HorizontalAlignment="Center"
+                                                                   VerticalAlignment="Center"/>
+                                                    </Border>
+
+                                                    <StackPanel Grid.Column="2" Margin="10,8,0,8">
+                                                        <StackPanel Orientation="Horizontal">
+                                                            <TextBlock Text="{Binding Icon}"
+                                                                       FontSize="13"
+                                                                       Margin="0,0,6,0"
+                                                                       VerticalAlignment="Center"/>
+                                                            <TextBlock Text="{Binding TypeLabel}"
+                                                                       Foreground="{StaticResource Text}"
+                                                                       FontSize="13" FontWeight="SemiBold"
+                                                                       VerticalAlignment="Center"/>
+                                                            <Border Background="{StaticResource AccentSoft}"
+                                                                    CornerRadius="3" Padding="6,1"
+                                                                    Margin="8,0,0,0"
+                                                                    Visibility="{Binding HasNested,
+                                                                                 Converter={StaticResource BoolToVis}}">
+                                                                <TextBlock Text="{Binding NestedSummary}"
+                                                                           Foreground="{StaticResource Accent}"
+                                                                           FontFamily="{StaticResource FontMono}"
+                                                                           FontSize="9.5"/>
+                                                            </Border>
+                                                        </StackPanel>
+                                                        <TextBlock Text="{Binding ParamSummary}"
+                                                                   Foreground="{StaticResource TextMuted}"
+                                                                   FontSize="11"
+                                                                   Margin="0,4,0,0"
+                                                                   TextWrapping="Wrap"/>
+                                                    </StackPanel>
+
+                                                    <!-- Toolbar pinned to the RIGHT edge (Grid.Column="3");
+                                                         was "2" before which collided with the
+                                                         content column and overlapped the type label. -->
+                                                    <StackPanel Grid.Column="3" Orientation="Horizontal"
+                                                                VerticalAlignment="Top"
+                                                                Margin="0,8,8,0">
+                                                        <ToggleButton Content="▾"
+                                                                      IsChecked="{Binding IsExpanded, Mode=TwoWay}"
+                                                                      Visibility="{Binding ShowExpandToggle,
+                                                                                   Converter={StaticResource BoolToVis}}"
+                                                                      MinWidth="26" Padding="0" Margin="0,0,3,0"
+                                                                      ToolTip="Expand / collapse nested steps"/>
+                                                        <Button Content="↑" Tag="{Binding}"
+                                                                Click="OnMoveUp" MinWidth="26"
+                                                                Padding="0" Margin="0,0,3,0"
+                                                                IsEnabled="{Binding CanMoveUp}"/>
+                                                        <Button Content="↓" Tag="{Binding}"
+                                                                Click="OnMoveDown" MinWidth="26"
+                                                                Padding="0" Margin="0,0,3,0"
+                                                                IsEnabled="{Binding CanMoveDown}"/>
+                                                        <Button Content="✎" Tag="{Binding}"
+                                                                Click="OnEditStep" MinWidth="26"
+                                                                Padding="0" Margin="0,0,3,0"
+                                                                ToolTip="Edit params"/>
+                                                        <!-- ⚙ flags button. Foreground turns
+                                                             accent when HasAdvancedFlags so
+                                                             the user can see at a glance
+                                                             which steps have non-default
+                                                             gates / filters. -->
+                                                        <Button Content="⚙" Tag="{Binding}"
+                                                                Click="OnStepFlags" MinWidth="26"
+                                                                Padding="0" Margin="0,0,3,0"
+                                                                ToolTip="Probability gate, error policy, ad-domain filters">
+                                                            <Button.Style>
+                                                                <Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+                                                                    <Style.Triggers>
+                                                                        <DataTrigger Binding="{Binding HasAdvancedFlags}" Value="True">
+                                                                            <Setter Property="Foreground" Value="{StaticResource Accent}"/>
+                                                                        </DataTrigger>
+                                                                    </Style.Triggers>
+                                                                </Style>
+                                                            </Button.Style>
+                                                        </Button>
+                                                        <Button Content="×" Tag="{Binding}"
+                                                                Click="OnDeleteStep" MinWidth="26"
+                                                                Padding="0"
+                                                                Foreground="{StaticResource ErrBrush}"
+                                                                ToolTip="Remove step"/>
+                                                    </StackPanel>
+                                                </Grid>
+                                            </Border>
+
+                                            <!-- Nested-branches CONTAINER. Renders the
+                                                 parent's then/else/body steps as full mini-
+                                                 cards inside a coloured "block" so the user
+                                                 can see the structure at a glance. The
+                                                 outer Border is dashed in the parent's
+                                                 category colour, with a thicker top edge
+                                                 to read as a "container ⊃ children" frame. -->
+                                            <Border Margin="40,6,8,6" Padding="0"
+                                                    CornerRadius="6"
+                                                    Background="#0A000000"
+                                                    BorderBrush="{Binding CategoryBrush}"
+                                                    BorderThickness="2"
+                                                    HorizontalAlignment="Stretch"
+                                                    Visibility="{Binding ShowNested,
+                                                                 Converter={StaticResource BoolToVis}}">
+                                                <Border.Effect>
+                                                    <DropShadowEffect Color="Black"
+                                                                      BlurRadius="10"
+                                                                      ShadowDepth="1"
+                                                                      Opacity="0.4"/>
+                                                </Border.Effect>
+                                                <StackPanel>
+                                                    <!-- Header strip with the container kind
+                                                         + an inline + button to add nested
+                                                         steps directly into this container. -->
+                                                    <Border Background="{Binding CategoryBrush}"
+                                                            CornerRadius="4,4,0,0"
+                                                            Padding="10,4">
+                                                        <Grid>
+                                                            <Grid.ColumnDefinitions>
+                                                                <ColumnDefinition Width="*"/>
+                                                                <ColumnDefinition Width="Auto"/>
+                                                            </Grid.ColumnDefinitions>
+                                                            <TextBlock Grid.Column="0"
+                                                                       Text="{Binding ContainerHeader}"
+                                                                       Foreground="White"
+                                                                       FontSize="10"
+                                                                       FontWeight="Bold"
+                                                                       VerticalAlignment="Center"
+                                                                       FontFamily="{StaticResource FontMono}"/>
+                                                            <StackPanel Grid.Column="1" Orientation="Horizontal">
+                                                                <!-- if container: separate THEN / ELSE buttons -->
+                                                                <Button Content="+ then"
+                                                                        Tag="{Binding}"
+                                                                        Click="OnContainerAddThen"
+                                                                        Background="#22000000"
+                                                                        Foreground="White"
+                                                                        BorderThickness="0"
+                                                                        Padding="8,2"
+                                                                        FontSize="10"
+                                                                        FontWeight="SemiBold"
+                                                                        Cursor="Hand"
+                                                                        Margin="0,0,4,0"
+                                                                        ToolTip="Add nested step to the THEN branch"
+                                                                        Visibility="{Binding IsIfContainer, Converter={StaticResource BoolToVis}}"/>
+                                                                <Button Content="+ else"
+                                                                        Tag="{Binding}"
+                                                                        Click="OnContainerAddElse"
+                                                                        Background="#22000000"
+                                                                        Foreground="White"
+                                                                        BorderThickness="0"
+                                                                        Padding="8,2"
+                                                                        FontSize="10"
+                                                                        FontWeight="SemiBold"
+                                                                        Cursor="Hand"
+                                                                        ToolTip="Add nested step to the ELSE branch"
+                                                                        Visibility="{Binding IsIfContainer, Converter={StaticResource BoolToVis}}"/>
+                                                                <!-- foreach / while container: single body add -->
+                                                                <Button Content="+ add step"
+                                                                        Tag="{Binding}"
+                                                                        Click="OnContainerAddInside"
+                                                                        Background="#22000000"
+                                                                        Foreground="White"
+                                                                        BorderThickness="0"
+                                                                        Padding="8,2"
+                                                                        FontSize="10"
+                                                                        FontWeight="SemiBold"
+                                                                        Cursor="Hand"
+                                                                        ToolTip="Add nested step to this loop body"
+                                                                        Visibility="{Binding IsLoopContainer, Converter={StaticResource BoolToVis}}"/>
+                                                            </StackPanel>
+                                                        </Grid>
+                                                    </Border>
+                                                    <!-- Nested step list — proper mini-cards -->
+                                                    <ItemsControl ItemsSource="{Binding NestedRows}"
+                                                                  Margin="6,6,6,6">
+                                                        <ItemsControl.ItemContainerStyle>
+                                                            <Style TargetType="ContentPresenter">
+                                                                <Setter Property="HorizontalAlignment" Value="Stretch"/>
+                                                            </Style>
+                                                        </ItemsControl.ItemContainerStyle>
+                                                        <ItemsControl.ItemTemplate>
+                                                            <DataTemplate>
+                                                                <StackPanel>
+                                                                    <!-- Group divider (then/else/body) -->
+                                                                    <Border Margin="0,4,0,4"
+                                                                            Padding="6,2"
+                                                                            HorizontalAlignment="Left"
+                                                                            CornerRadius="3"
+                                                                            Background="{StaticResource AccentSoft}"
+                                                                            Visibility="{Binding ShowGroup,
+                                                                                         Converter={StaticResource BoolToVis}}">
+                                                                        <TextBlock Text="{Binding Group}"
+                                                                                   Foreground="{StaticResource Accent}"
+                                                                                   FontSize="9"
+                                                                                   FontWeight="Bold"
+                                                                                   FontFamily="{StaticResource FontMono}"/>
+                                                                    </Border>
+                                                                    <!-- Mini step card with toolbar.
+                                                                         Coloured stripe on the left
+                                                                         echoes the action's category;
+                                                                         right-side toolbar gives the
+                                                                         user the full ✎/×/↑/↓ control
+                                                                         set (Phase 18). -->
+                                                                    <Border Background="{StaticResource BgRaised}"
+                                                                            BorderBrush="{Binding CategoryBrush}"
+                                                                            BorderThickness="2,1,1,1"
+                                                                            CornerRadius="4"
+                                                                            Padding="10,6"
+                                                                            Margin="0,2,0,2">
+                                                                        <Grid>
+                                                                            <Grid.ColumnDefinitions>
+                                                                                <ColumnDefinition Width="22"/>
+                                                                                <ColumnDefinition Width="*"/>
+                                                                                <ColumnDefinition Width="Auto"/>
+                                                                            </Grid.ColumnDefinitions>
+                                                                            <Grid.RowDefinitions>
+                                                                                <RowDefinition Height="Auto"/>
+                                                                                <RowDefinition Height="Auto"/>
+                                                                            </Grid.RowDefinitions>
+                                                                            <TextBlock Grid.Column="0"
+                                                                                       Grid.Row="0" Grid.RowSpan="2"
+                                                                                       Text="{Binding Icon}"
+                                                                                       FontSize="14"
+                                                                                       VerticalAlignment="Center"/>
+                                                                            <TextBlock Grid.Column="1" Grid.Row="0"
+                                                                                       Text="{Binding TypeLabel}"
+                                                                                       Foreground="{StaticResource Text}"
+                                                                                       FontSize="12"
+                                                                                       FontWeight="SemiBold"
+                                                                                       Margin="6,0,0,0"/>
+                                                                            <TextBlock Grid.Column="1" Grid.Row="1"
+                                                                                       Text="{Binding Summary}"
+                                                                                       Foreground="{StaticResource TextMuted}"
+                                                                                       FontSize="10"
+                                                                                       Margin="6,1,0,0"
+                                                                                       TextTrimming="CharacterEllipsis"/>
+                                                                            <!-- Per-row toolbar -->
+                                                                            <StackPanel Grid.Column="2"
+                                                                                        Grid.Row="0" Grid.RowSpan="2"
+                                                                                        Orientation="Horizontal"
+                                                                                        VerticalAlignment="Center"
+                                                                                        Margin="6,0,0,0">
+                                                                                <Button Content="↑" Tag="{Binding}"
+                                                                                        Click="OnNestedMoveUp"
+                                                                                        MinWidth="22" Padding="0"
+                                                                                        Margin="0,0,2,0"
+                                                                                        ToolTip="Move up within this group"/>
+                                                                                <Button Content="↓" Tag="{Binding}"
+                                                                                        Click="OnNestedMoveDown"
+                                                                                        MinWidth="22" Padding="0"
+                                                                                        Margin="0,0,2,0"
+                                                                                        ToolTip="Move down within this group"/>
+                                                                                <Button Content="✎" Tag="{Binding}"
+                                                                                        Click="OnNestedEdit"
+                                                                                        MinWidth="22" Padding="0"
+                                                                                        Margin="0,0,2,0"
+                                                                                        ToolTip="Edit params"/>
+                                                                                <Button Content="×" Tag="{Binding}"
+                                                                                        Click="OnNestedDelete"
+                                                                                        MinWidth="22" Padding="0"
+                                                                                        Foreground="{StaticResource ErrBrush}"
+                                                                                        ToolTip="Remove nested step"/>
+                                                                            </StackPanel>
+                                                                        </Grid>
+                                                                    </Border>
+                                                                </StackPanel>
+                                                            </DataTemplate>
+                                                        </ItemsControl.ItemTemplate>
+                                                    </ItemsControl>
+                                                    <!-- Empty-state hint inside the container -->
+                                                    <TextBlock Margin="10,4,10,8"
+                                                               Foreground="{StaticResource TextMuted}"
+                                                               FontSize="10"
+                                                               FontStyle="Italic"
+                                                               HorizontalAlignment="Center"
+                                                               Text="Tap '+ add step' above to insert nested actions">
+                                                        <TextBlock.Style>
+                                                            <Style TargetType="TextBlock">
+                                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                                                <Style.Triggers>
+                                                                    <DataTrigger Binding="{Binding NestedRows.Count}" Value="0">
+                                                                        <Setter Property="Visibility" Value="Visible"/>
+                                                                    </DataTrigger>
+                                                                </Style.Triggers>
+                                                            </Style>
+                                                        </TextBlock.Style>
+                                                    </TextBlock>
+                                                </StackPanel>
+                                            </Border>
+                                        </StackPanel>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+
+                            <!-- Empty-state hint shown when no steps yet -->
+                            <Border x:Name="EmptyHint"
+                                    HorizontalAlignment="Center"
+                                    VerticalAlignment="Top"
+                                    Margin="0,80,0,0"
+                                    Padding="20,16"
+                                    Background="{StaticResource BgRaised}"
+                                    BorderBrush="{StaticResource BorderStrong}"
+                                    BorderThickness="1"
+                                    CornerRadius="6">
+                                <StackPanel HorizontalAlignment="Center">
+                                    <TextBlock Text="No steps yet"
+                                               Foreground="{StaticResource Text}"
+                                               FontSize="14" FontWeight="SemiBold"
+                                               HorizontalAlignment="Center"/>
+                                    <TextBlock Text="Click an action in the palette on the left to add the first step."
+                                               Foreground="{StaticResource TextMuted}"
+                                               FontSize="11"
+                                               HorizontalAlignment="Center"
+                                               Margin="0,4,0,0"/>
+                                </StackPanel>
+                            </Border>
+                        </Grid>
+                    </ScrollViewer>
+                </DockPanel>
+            </Grid>
+
+            <!-- ─── FOOTER ─────────────────────────────────────────── -->
+            <Border Grid.Row="3" Background="{StaticResource BgDeep}"
+                    BorderBrush="{StaticResource Border}" BorderThickness="0,1,0,0"
+                    Padding="20,12">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Style="{StaticResource MutedText}"
+                               FontSize="11" VerticalAlignment="Center"
+                               Text="Up/Down arrows reorder · ✎ edits params · × removes the step · scroll to navigate the canvas"/>
+                    <StackPanel Grid.Column="1" Orientation="Horizontal">
+                        <Button Content="Cancel" Click="OnCancel" MinWidth="84" Margin="0,0,8,0"/>
+                        <Button Content="Save" Click="OnSave"
+                                Style="{StaticResource ButtonPrimary}" MinWidth="120"/>
+                    </StackPanel>
+                </Grid>
+            </Border>
+        </Grid>
+    </Border>
+</Window>
