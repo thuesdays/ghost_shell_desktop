@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Mykola Kovhanko <thuesdays@gmail.com>
 
+using System.Collections.Generic;
 using System.Diagnostics;
 using GhostShell.Core.Common;
 using GhostShell.Core.Models;
@@ -29,6 +30,9 @@ public sealed class BrowserLauncher : IBrowserLauncher
     private readonly IChromiumLocator _locator;
     private readonly IProxyService _proxies;
     private readonly IProxyAuthForwarderFactory _forwarderFactory;
+    private readonly IExtensionService? _extensions;
+    private readonly ITrafficService? _traffic;
+    private readonly ISettingsService? _settings;
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<BrowserLauncher> _log;
 
@@ -36,11 +40,17 @@ public sealed class BrowserLauncher : IBrowserLauncher
         IChromiumLocator locator,
         IProxyService proxies,
         IProxyAuthForwarderFactory forwarderFactory,
-        ILoggerFactory loggerFactory)
+        ILoggerFactory loggerFactory,
+        IExtensionService? extensions = null,
+        ITrafficService? traffic = null,
+        ISettingsService? settings = null)
     {
         _locator          = locator;
         _proxies          = proxies;
         _forwarderFactory = forwarderFactory;
+        _extensions       = extensions;
+        _traffic          = traffic;
+        _settings         = settings;
         _loggerFactory    = loggerFactory;
         _log              = loggerFactory.CreateLogger<BrowserLauncher>();
     }
@@ -145,7 +155,44 @@ public sealed class BrowserLauncher : IBrowserLauncher
         if (OperatingSystem.IsWindows())
             LaunchPreflight.Run(userDataDir, profile.Name, _log);
 
-        var options = ChromeOptionsBuilder.Build(profile, template, status.ChromePath!, chromiumProxyUrl);
+        // Phase 27 — gather the extensions the profile should load.
+        // The service is optional so this launcher remains usable in
+        // older test rigs that don't wire IExtensionService.
+        IReadOnlyList<string>? extPaths = null;
+        if (_extensions is not null)
+        {
+            try
+            {
+                var enabled = await _extensions.ListEnabledForProfileAsync(profile.Name, ct);
+                extPaths = enabled.Select(e => e.LocalPath).ToList();
+                if (extPaths.Count > 0)
+                {
+                    _log.LogInformation(
+                        "Loading {Count} extension(s) for profile '{Name}': {Names}",
+                        extPaths.Count, profile.Name,
+                        string.Join(", ", enabled.Select(e => e.Name)));
+                    // Register every extension in Default/Preferences:
+                    //   • settings[id] = { location:4, state:1, … }
+                    //     so Chrome 138+ doesn't auto-disable it as
+                    //     an unverified sideload,
+                    //   • pinned_actions / pinned_extensions / toolbar
+                    //     so the toolbar button is visible immediately
+                    //     instead of buried in the puzzle-piece menu,
+                    //   • alerts.initialized = true to skip the first-
+                    //     launch "you have new extensions" balloon.
+                    ExtensionPinWriter.RegisterAndPin(profile.Name, enabled, _log);
+                }
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex,
+                    "Couldn't resolve extensions for profile '{Name}' — launching without extensions",
+                    profile.Name);
+            }
+        }
+
+        var options = ChromeOptionsBuilder.Build(
+            profile, template, status.ChromePath!, chromiumProxyUrl, extPaths);
 
         // ChromeDriverService takes the directory + filename so we can
         // ship a chromedriver.exe with a non-default name (vendored
@@ -215,6 +262,20 @@ public sealed class BrowserLauncher : IBrowserLauncher
             throw;
         }
 
+        // Phase 30 — apply network-layer URL blocking via CDP. Reads
+        // the user's blocking toggles + custom patterns from settings,
+        // composes a deduped list, and calls Network.setBlockedURLs.
+        // Set ONCE per session; static for the session lifetime
+        // (matches the legacy web's behaviour). Failure here is non-
+        // fatal — the browser launches, just without blocking.
+        try { await ApplyResourceBlockingAsync(driver, profile.Name, ct); }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex,
+                "Resource blocking setup failed for '{Name}' — browser will load all resources",
+                profile.Name);
+        }
+
         // PID tracking for orphan-reap is intentionally omitted in
         // Phase 3. ChromeDriverService.Dispose() + driver.Quit()
         // handle the standard teardown; killing arbitrary chrome.exe
@@ -227,9 +288,78 @@ public sealed class BrowserLauncher : IBrowserLauncher
             service:     service,
             ownedPids:   Array.Empty<int>(),
             forwarder:   forwarder,
-            log:         _loggerFactory.CreateLogger<SeleniumBrowserSession>());
+            log:         _loggerFactory.CreateLogger<SeleniumBrowserSession>(),
+            traffic:     _traffic);
 
         return session;
+    }
+
+    /// <summary>Phase 30 — read blocking toggles + custom patterns
+    /// from settings and call <c>Network.setBlockedURLs</c> on the
+    /// fresh ChromeDriver. No-op when the settings service isn't
+    /// wired (test rigs / older boots) or no toggles are enabled.</summary>
+    private async Task ApplyResourceBlockingAsync(
+        ChromeDriver driver, string profileName, CancellationToken ct)
+    {
+        if (_settings is null) return;
+
+        // Resolve the active toggle set by reading each bucket flag.
+        // Defaults are OFF — users opt in deliberately. Missing keys
+        // → bool? null → treated as off.
+        var enabled = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        async Task<bool> ReadAsync(string key)
+            => (await _settings.GetBoolAsync(key, ct)) ?? false;
+        if (await ReadAsync(SettingsKeys.BlockYoutubeVideo))    enabled.Add("block_youtube_video");
+        if (await ReadAsync(SettingsKeys.BlockGoogleImages))    enabled.Add("block_google_images");
+        if (await ReadAsync(SettingsKeys.BlockGoogleMapsTiles)) enabled.Add("block_google_maps_tiles");
+        if (await ReadAsync(SettingsKeys.BlockFonts))           enabled.Add("block_fonts");
+        if (await ReadAsync(SettingsKeys.BlockAnalytics))       enabled.Add("block_analytics");
+        if (await ReadAsync(SettingsKeys.BlockSocialWidgets))   enabled.Add("block_social_widgets");
+        if (await ReadAsync(SettingsKeys.BlockVideoEverywhere)) enabled.Add("block_video_everywhere");
+
+        var customBlob = await _settings.GetStringAsync(SettingsKeys.BlockCustomPatterns, ct);
+        var patterns   = ResourceBlockingPatterns.Compose(enabled, customBlob);
+        if (patterns.Count == 0)
+        {
+            _log.LogDebug("No blocking patterns active for '{Name}'", profileName);
+            return;
+        }
+
+        // Selenium 4's ChromeDriver exposes ExecuteCdpCommand.
+        // Network.setBlockedURLs needs Network domain ENABLED first
+        // — Chrome silently ignores the call otherwise.
+        try
+        {
+            driver.ExecuteCdpCommand("Network.enable", new Dictionary<string, object>());
+            driver.ExecuteCdpCommand("Network.setBlockedURLs",
+                new Dictionary<string, object> { ["urls"] = patterns });
+            _log.LogInformation(
+                "Applied {Count} blocking pattern(s) for '{Name}' via CDP",
+                patterns.Count, profileName);
+        }
+        catch (Exception ex)
+        {
+            // Some chromedriver builds reject CDP calls with a generic
+            // error before navigation — retry once after a short wait.
+            _log.LogDebug(ex,
+                "CDP setBlockedURLs first attempt failed for '{Name}', retrying",
+                profileName);
+            await Task.Delay(250, ct);
+            try
+            {
+                driver.ExecuteCdpCommand("Network.enable", new Dictionary<string, object>());
+                driver.ExecuteCdpCommand("Network.setBlockedURLs",
+                    new Dictionary<string, object> { ["urls"] = patterns });
+                _log.LogInformation(
+                    "Applied {Count} blocking pattern(s) for '{Name}' (retry)",
+                    patterns.Count, profileName);
+            }
+            catch (Exception ex2)
+            {
+                throw new InvalidOperationException(
+                    "Could not call CDP Network.setBlockedURLs", ex2);
+            }
+        }
     }
 
     /// <summary>

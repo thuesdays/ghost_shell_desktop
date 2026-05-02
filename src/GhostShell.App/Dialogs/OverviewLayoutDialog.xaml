@@ -1,0 +1,80 @@
+<!--
+  SPDX-License-Identifier: MIT
+  Copyright (c) 2026 Mykola Kovhanko <thuesdays@gmail.com>
+-->
+<Window x:Class="GhostShell.App.Dialogs.OverviewLayoutDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Configure Overview Widgets"
+        Width="520" SizeToContent="Height"
+        WindowStartupLocation="CenterOwner"
+        WindowStyle="None"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False"
+        Background="{StaticResource BgBase}">
+
+    <Border BorderBrush="{StaticResource BorderStrong}" BorderThickness="1">
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>  <!-- title bar  -->
+                <RowDefinition Height="*"/>     <!-- body       -->
+                <RowDefinition Height="Auto"/>  <!-- footer     -->
+            </Grid.RowDefinitions>
+
+            <!-- Title bar -->
+            <Border Grid.Row="0"
+                    Background="{StaticResource BgDeep}"
+                    BorderBrush="{StaticResource Border}"
+                    BorderThickness="0,0,0,1"
+                    Padding="0">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="4"/>     <!-- accent strip -->
+                        <ColumnDefinition Width="*"/>     <!-- title -->
+                        <ColumnDefinition Width="Auto"/>  <!-- close -->
+                    </Grid.ColumnDefinitions>
+                    <Border Grid.Column="0" Background="{StaticResource Accent}"/>
+                    <TextBlock Grid.Column="1" Padding="14,12,14,12"
+                               Text="Configure Overview Widgets"
+                               FontSize="13" FontWeight="SemiBold"
+                               Foreground="{StaticResource Text}"/>
+                    <Button Grid.Column="2" Padding="8" Margin="0" Background="Transparent"
+                            Click="OnCloseClick" Foreground="{StaticResource TextMuted}">
+                        ✕
+                    </Button>
+                </Grid>
+            </Border>
+
+            <!-- Body: scrollable list of widgets. StackPanel doesn't
+                 have a Padding property (only Border does), so we wrap
+                 the list in a Border for the inner gutter. -->
+            <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" MaxHeight="400">
+                <Border Padding="14,12">
+                    <StackPanel x:Name="WidgetList"/>
+                </Border>
+            </ScrollViewer>
+
+            <!-- Footer buttons -->
+            <Border Grid.Row="2"
+                    BorderBrush="{StaticResource Border}"
+                    BorderThickness="0,1,0,0"
+                    Padding="14,12"
+                    Background="{StaticResource BgDeep}">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <Button Grid.Column="1" Content="Reset to Defaults"
+                            Click="OnResetClick" Padding="12,6" Margin="0,0,8,0"/>
+                    <Button Grid.Column="2" Content="Cancel"
+                            Click="OnCancelClick" Padding="12,6" Margin="0,0,8,0"/>
+                    <Button Grid.Column="3" Content="Save" IsDefault="True"
+                            Click="OnSaveClick" Padding="12,6"/>
+                </Grid>
+            </Border>
+        </Grid>
+    </Border>
+</Window>

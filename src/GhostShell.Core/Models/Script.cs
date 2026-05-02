@@ -22,6 +22,41 @@ public sealed record Script
     /// <summary>JSON-array of <see cref="ScriptStep"/>. Default "[]".</summary>
     public string StepsJson { get; init; } = "[]";
 
+    // ─── Phase 21: Graph-mode editor ─────────────────────────────
+    //
+    // Two execution models live side-by-side:
+    //   • list   — StepsJson interpreted top-to-bottom (legacy).
+    //   • graph  — NodesJson + EdgesJson; runtime traverses outgoing
+    //              edges from the entry node (one with no inbound).
+    //
+    // Switching modes is destructive — the editor warns the user
+    // before flipping, and the unselected payload is preserved on
+    // the row so the user can flip back without losing work.
+
+    /// <summary>Layout / execution mode. <c>"list"</c> (default) or
+    /// <c>"graph"</c>. The runner picks the correct traversal based
+    /// on this value.</summary>
+    public string LayoutMode { get; init; } = "list";
+
+    /// <summary>
+    /// JSON array of graph nodes when <see cref="LayoutMode"/>=graph.
+    /// Each node:
+    /// <code>
+    ///   { "id": "n1", "x": 100, "y": 200,
+    ///     "type": "navigate", "params": {...}, "enabled": true }
+    /// </code>
+    /// Null when layout=list.
+    /// </summary>
+    public string? NodesJson { get; init; }
+
+    /// <summary>
+    /// JSON array of graph edges when <see cref="LayoutMode"/>=graph.
+    /// Each edge: <code>{ "from": "n1", "to": "n2", "label": "then" }</code>.
+    /// The optional <c>label</c> distinguishes branch outputs from an
+    /// <c>if</c> node ("then" / "else"). Null when layout=list.
+    /// </summary>
+    public string? EdgesJson { get; init; }
+
     public bool Enabled { get; init; } = true;
 
     /// <summary>
@@ -98,6 +133,14 @@ public sealed record ScriptStep
     /// <summary>Run ONLY when the current ad is on one of the
     /// profile's own domains (skip otherwise).</summary>
     public bool OnlyOnMyDomain { get; init; } = false;
+
+    /// <summary>Skip when the current ad's domain is in the block list
+    /// (domains to ignore entirely).</summary>
+    public bool SkipOnBlocked { get; init; } = false;
+
+    /// <summary>Run ONLY when the current ad is on the block list
+    /// (debug-only inverse; rare usage).</summary>
+    public bool OnlyOnBlocked { get; init; } = false;
 
     /// <summary>Human-readable label shown in the editor; optional.</summary>
     public string? Label { get; init; }

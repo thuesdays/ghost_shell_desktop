@@ -44,14 +44,22 @@ namespace GhostShell.Runtime.Browser;
 /// </summary>
 public sealed class SessionWatchdog : IAsyncDisposable
 {
-    /// <summary>How often the loop ticks.</summary>
-    public static readonly TimeSpan TickInterval = TimeSpan.FromSeconds(3);
+    /// <summary>How often the loop ticks. Tightened in Phase 29 from
+    /// 3s → 1s so the UI status updates within ~2s of the user
+    /// closing the Chromium window. The probe itself is a Selenium
+    /// title fetch and stays cheap (single-digit milliseconds), so a
+    /// 1s cadence is well within budget.</summary>
+    public static readonly TimeSpan TickInterval = TimeSpan.FromSeconds(1);
 
-    /// <summary>How often heartbeat is written to DB.
-    /// Matches the legacy 30s cadence — every 10 ticks.</summary>
+    /// <summary>How often heartbeat is written to DB. Kept at 30s —
+    /// SQLite writes shouldn't tick every second even though the probe
+    /// does.</summary>
     public static readonly TimeSpan HeartbeatInterval = TimeSpan.FromSeconds(30);
 
-    /// <summary>Consecutive null-title probes that count as "dead".</summary>
+    /// <summary>Consecutive null-title probes that count as "dead".
+    /// At 1s tick × 2 probes = ~2s detection ceiling for external
+    /// close. The debounce avoids flapping during page navigations
+    /// where the title can momentarily be null.</summary>
     public const int FailuresUntilDead = 2;
 
     private readonly string _profileName;
@@ -218,16 +226,27 @@ public sealed class SessionWatchdog : IAsyncDisposable
                         "Watchdog: '{Profile}' window closed externally " +
                         "(consecutive null-title probes = {N}) → tearing down",
                         _profileName, consecutiveNulls);
-                    try
+                    // Phase 29 deadlock fix — fire the takedown on a
+                    // separate task and exit the loop IMMEDIATELY.
+                    // _onExternalClose calls back through
+                    // StopInternalAsync → Watchdog.StopAsync, which
+                    // awaits _loop to finish. If we awaited the
+                    // callback INLINE here, _loop wouldn't return
+                    // until the callback returned, and the callback
+                    // wouldn't return until _loop returned — a 5-second
+                    // WaitAsync timeout used to break the deadlock.
+                    // Returning here lets _loop complete; StopAsync
+                    // observes that and unwinds cleanly.
+                    _ = Task.Run(async () =>
                     {
-                        await _onExternalClose(_profileName, CancellationToken.None);
-                    }
-                    catch (Exception ex)
-                    {
-                        _log.LogError(ex,
-                            "Watchdog teardown handler threw for '{Profile}'",
-                            _profileName);
-                    }
+                        try { await _onExternalClose(_profileName, CancellationToken.None); }
+                        catch (Exception ex)
+                        {
+                            _log.LogError(ex,
+                                "Watchdog teardown handler threw for '{Profile}'",
+                                _profileName);
+                        }
+                    });
                     return;
                 }
                 // Don't update heartbeat on a failed probe — fresh

@@ -17,8 +17,13 @@
   </compatibility>
   <application xmlns="urn:schemas-microsoft-com:asm.v3">
     <windowsSettings>
-      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/PM</dpiAware>
-      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
+      <!-- Phase 38 — `<dpiAware>` and `<dpiAwareness>` removed because
+           `<UseWindowsForms>true</UseWindowsForms>` triggers WFAC010
+           when those keys live in the manifest. WPF + the WinForms
+           runtime now configure DPI via project properties:
+             <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+           in GhostShell.App.csproj. The longPathAware key stays — it
+           has nothing to do with DPI and silences no warning. -->
       <longPathAware xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">true</longPathAware>
     </windowsSettings>
   </application>

@@ -28,10 +28,14 @@ on it.
 - [x] **BrowserLauncher** — Selenium 4 + ChromeDriver, per-profile user-data-dir
 - [x] **RealProfileRunner** — replaces stub, manages session lifecycle + watchdog
 - [x] Settings page shows browser engine status (success / error banner)
-- [ ] Action runner (Phase 4) — port 49 hand­lers from legacy actions/runner.py
-- [ ] Vault (Phase 5) — Windows Credential Manager integration
-- [ ] Auto-update (Phase 6) — Velopack
-- [ ] Installer (Phase 7) — WiX MSI with bundled Chromium
+- [x] Action runner — full port (Phase 12-14)
+- [x] Vault — encrypted SQLite + master password (Phase 24-26)
+- [x] Browser extensions library (Phase 27)
+- [x] Traffic / Notifications / Settings / Resource blocking (Phases 28-30)
+- [x] Overview redesign + external fingerprint testers (Phases 31-33)
+- [x] Advertisement section: Domains + Competitors + Ad density (Phase 34)
+- [x] **Inno Setup installer + dual-build pipeline** (Phase 35)
+- [ ] Auto-update — Velopack (deferred)
 
 ## Logs
 
@@ -50,6 +54,34 @@ dotnet run --project src/GhostShell.App
 ```
 
 In Visual Studio 2022 17.8+: just open `GhostShell.sln` and F5.
+
+## Producing an installer
+
+The Inno Setup pipeline lives in a sibling private repo, `ghost_shell_browser_inno`. From there:
+
+```bat
+cd F:\projects\ghost_shell_browser_inno
+build.bat                  REM builds BOTH installers (web + desktop)
+build.bat --desktop-only   REM just the desktop one
+```
+
+The desktop pipeline (`build_desktop.bat` in the installer repo):
+
+1. Runs `sync_chromium.bat` to refresh `..\ghost_shell_browser\chrome_win64\` from the patched Chromium build dir.
+2. Runs `dotnet publish src/GhostShell.App/GhostShell.App.csproj -c Release -r win-x64 --self-contained true` against this repo. Output lands in `publish\desktop\` (gitignored).
+3. Bundles both into `output\GhostShellDesktopSetup.exe` (~250-300 MB total).
+
+What the installer ships:
+
+- `GhostShell.exe` and the .NET 8 self-contained runtime (no separate runtime install needed by the user)
+- The whole `Assets\` tree (icons, fonts, themes)
+- `chrome_win64\` — the patched Chromium binary that `ChromiumLocator` finds at startup
+- A stop-app helper (`installer-tools\stop_desktop.ps1`) used during update / uninstall
+
+Default install location: `%LocalAppData%\GhostShellDesktop\`.
+User data (DB, profiles, vault, logs): `%LocalAppData%\GhostShell\` (controlled by `AppPaths.DataDir`).
+
+The installer offers three modes when an existing install is detected: **Update** (replace program files, keep data), **Repair** (re-extract same version, keep data), and **Reinstall fresh** (back up `ghost_shell.db` to `%LocalAppData%\GhostShellDesktop\backup\` then wipe profiles/DB/vault before laying down the new build).
 
 ## Solution layout
 

@@ -4,12 +4,31 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
     <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
     <AssemblyName>GhostShell</AssemblyName>
     <RootNamespace>GhostShell.App</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\AppIcon.ico</ApplicationIcon>
     <Description>WPF main app: window, sidebar, navigation, page views.</Description>
+    <!-- Phase 38 — DPI mode declared via project property (replacing
+         the deprecated <dpiAware>/<dpiAwareness> keys in app.manifest)
+         to silence WFAC010. The Windows Forms runtime calls
+         Application.SetHighDpiMode under the hood when this property
+         is set. PerMonitorV2 matches the previous manifest behaviour. -->
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
   </PropertyGroup>
+
+  <!-- Phase 38 — `<UseWindowsForms>true</UseWindowsForms>` above is needed
+       for the system-tray NotifyIcon, but the SDK's WindowsDesktop targets
+       ALSO add `System.Windows.Forms` and `System.Drawing` to the implicit
+       global usings. That collides with WPF's `System.Windows`, and every
+       UserControl/TextBox/Brush/Color/etc. in the project becomes ambiguous.
+       Strip the two namespaces from implicit usings here so only TrayIconHost
+       (which fully-qualifies its Forms types) sees them. -->
+  <ItemGroup>
+    <Using Remove="System.Drawing" />
+    <Using Remove="System.Windows.Forms" />
+  </ItemGroup>
 
   <ItemGroup>
     <Resource Include="Assets\AppIcon.ico" />

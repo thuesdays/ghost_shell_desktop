@@ -25,6 +25,9 @@ namespace GhostShell.Runtime.Scripts;
 public sealed class ScriptRunner : IScriptRunner
 {
     private readonly IScriptService _scripts;
+    private readonly IDomainListService _domainLists;
+    private readonly IAdDensityService _adDensity;
+    private readonly ICompetitorService _competitors;
     private readonly ICaptchaSolver? _captcha;
     private readonly ILogger<ScriptRunner> _log;
     private readonly ConditionEvaluator _conditions = new();
@@ -37,10 +40,16 @@ public sealed class ScriptRunner : IScriptRunner
 
     public ScriptRunner(
         IScriptService scripts,
+        IDomainListService domainLists,
+        IAdDensityService adDensity,
+        ICompetitorService competitors,
         ILogger<ScriptRunner> log,
         ICaptchaSolver? captcha = null)
     {
         _scripts = scripts;
+        _domainLists = domainLists;
+        _adDensity = adDensity;
+        _competitors = competitors;
         _captcha = captcha;
         _log     = log;
     }
@@ -49,7 +58,8 @@ public sealed class ScriptRunner : IScriptRunner
         Script script, IBrowserSession session, string profileName,
         CancellationToken ct = default,
         IEnumerable<string>? myDomains = null,
-        IEnumerable<string>? targetDomains = null)
+        IEnumerable<string>? targetDomains = null,
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>>? vault = null)
     {
         var startedAt = DateTime.UtcNow;
         var stepLog = new List<Dictionary<string, object?>>();
@@ -69,6 +79,39 @@ public sealed class ScriptRunner : IScriptRunner
                 var n = NormaliseDomain(d);
                 if (!string.IsNullOrEmpty(n)) ctx.TargetDomains.Add(n);
             }
+        // Phase 34: merge global domain lists from IDomainListService.
+        // Profile-specific CSV stays as overrides; these provide the
+        // baseline for all profiles from the Domains page.
+        try
+        {
+            var globalDomains = await _domainLists.ListAllAsync(ct);
+            foreach (var entry in globalDomains)
+            {
+                var normalised = NormaliseDomain(entry.Domain);
+                if (string.IsNullOrEmpty(normalised)) continue;
+                switch (entry.Kind)
+                {
+                    case DomainListKind.My:
+                        ctx.MyDomains.Add(normalised);
+                        break;
+                    case DomainListKind.Target:
+                        ctx.TargetDomains.Add(normalised);
+                        break;
+                    case DomainListKind.Block:
+                        ctx.BlockDomains.Add(normalised);
+                        break;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "Failed to load global domain lists; script continues with profile-only domains");
+        }
+        // Phase 24 — pre-resolved vault references. The caller (the
+        // profile runner) decrypts the items the script needs before
+        // we start executing, so the runner never holds the master key.
+        if (vault is not null)
+            foreach (var kv in vault) ctx.Vault[kv.Key] = kv.Value;
         var counters = new RunCounters();
         string? lastError = null;
         var aborted = false;
@@ -82,22 +125,48 @@ public sealed class ScriptRunner : IScriptRunner
         };
         var runId = await _scripts.RecordRunAsync(run, ct);
 
+        // Phase 21: choose execution model from script.LayoutMode.
+        // Default ("list", null, or any unknown value) → existing
+        // sequential traversal. "graph" → parse Nodes+Edges and
+        // walk the graph from the entry node.
+        var layoutMode = (script.LayoutMode ?? "list").ToLowerInvariant();
+        var isGraph = layoutMode == "graph";
+
         IReadOnlyList<ScriptStep> steps;
-        try
+        GraphTraverser.ParsedGraph? graph = null;
+
+        if (isGraph)
         {
-            steps = JsonSerializer.Deserialize<List<ScriptStep>>(script.StepsJson, JsonOpts)
-                    ?? new List<ScriptStep>();
+            graph = GraphTraverser.Parse(script.NodesJson, script.EdgesJson);
+            if (graph is null)
+            {
+                _log.LogError("Script #{Id} layout=graph but nodes_json invalid/empty", script.Id);
+                return Finalise(runId, startedAt, "failed", counters,
+                    "graph nodes_json missing or invalid", stepLog, ctx);
+            }
+            steps = Array.Empty<ScriptStep>(); // unused in graph mode
         }
-        catch (Exception ex)
+        else
         {
-            _log.LogError(ex, "Script #{Id} steps_json invalid", script.Id);
-            return Finalise(runId, startedAt, "failed", counters,
-                "steps_json deserialise failed: " + ex.Message, stepLog, ctx);
+            try
+            {
+                steps = JsonSerializer.Deserialize<List<ScriptStep>>(script.StepsJson, JsonOpts)
+                        ?? new List<ScriptStep>();
+            }
+            catch (Exception ex)
+            {
+                _log.LogError(ex, "Script #{Id} steps_json invalid", script.Id);
+                return Finalise(runId, startedAt, "failed", counters,
+                    "steps_json deserialise failed: " + ex.Message, stepLog, ctx);
+            }
         }
 
         try
         {
-            await ExecuteStepsAsync(steps, session, ctx, counters, stepLog, ct);
+            if (isGraph)
+                await ExecuteGraphAsync(graph!, session, ctx, counters, stepLog, runId, profileName, ct);
+            else
+                await ExecuteStepsAsync(steps, session, ctx, counters, stepLog, runId, profileName, ct);
         }
         catch (OperationCanceledException)
         {
@@ -142,7 +211,7 @@ public sealed class ScriptRunner : IScriptRunner
     private async Task<StepFlow> ExecuteStepsAsync(
         IReadOnlyList<ScriptStep> steps, IBrowserSession session,
         RunContext ctx, RunCounters counters,
-        List<Dictionary<string, object?>> log, CancellationToken ct)
+        List<Dictionary<string, object?>> log, long runId, string profileName, CancellationToken ct)
     {
         for (var i = 0; i < steps.Count; i++)
         {
@@ -155,16 +224,31 @@ public sealed class ScriptRunner : IScriptRunner
                 ["ok"]   = false,
             };
 
+            var skipReason = "";
             if (!step.Enabled)
             {
                 entry["skipped"] = "disabled";
+                skipReason = "disabled";
                 log.Add(entry);
+                // Record ActionEvent for skipped click_ad steps.
+                if (string.Equals(step.Type, "click_ad", StringComparison.OrdinalIgnoreCase))
+                {
+                    await RecordActionEventAsync(
+                        step, ctx, runId, profileName, "skipped", skipReason, 0, null, ct);
+                }
                 continue;
             }
             if (step.Probability < 1.0 && Random.Shared.NextDouble() > step.Probability)
             {
                 entry["skipped"] = "probability";
+                skipReason = "probability";
                 log.Add(entry);
+                // Record ActionEvent for skipped click_ad steps.
+                if (string.Equals(step.Type, "click_ad", StringComparison.OrdinalIgnoreCase))
+                {
+                    await RecordActionEventAsync(
+                        step, ctx, runId, profileName, "skipped", skipReason, 0, null, ct);
+                }
                 continue;
             }
 
@@ -174,10 +258,16 @@ public sealed class ScriptRunner : IScriptRunner
             // outside an ad loop the filters resolve to "no domain to
             // test", which we treat as "skip the only_on_* gates and
             // pass the skip_on_* gates" (matches web semantics).
-            if (TryDomainFilterSkip(step, ctx, out var skipReason))
+            if (TryDomainFilterSkip(step, ctx, out skipReason))
             {
                 entry["skipped"] = skipReason;
                 log.Add(entry);
+                // Record ActionEvent for skipped click_ad steps.
+                if (string.Equals(step.Type, "click_ad", StringComparison.OrdinalIgnoreCase))
+                {
+                    await RecordActionEventAsync(
+                        step, ctx, runId, profileName, "skipped", skipReason, 0, null, ct);
+                }
                 continue;
             }
 
@@ -200,9 +290,11 @@ public sealed class ScriptRunner : IScriptRunner
             }
 
             var t0 = DateTime.UtcNow;
+            var stepOutcome = "ran";
+            string? stepError = null;
             try
             {
-                var flow = await DispatchAsync(step, session, ctx, counters, log, ct);
+                var flow = await DispatchAsync(step, session, ctx, counters, log, runId, profileName, ct);
                 entry["ok"] = true;
                 counters.Executed++;
                 if (flow != StepFlow.Normal)
@@ -225,7 +317,24 @@ public sealed class ScriptRunner : IScriptRunner
             {
                 counters.Failed++;
                 entry["err"] = ex.Message;
+                stepError = ex.Message;
+                stepOutcome = "error";
                 _log.LogWarning(ex, "Script step #{I} ({Type}) failed", i, step.Type);
+                // Phase 23 hot-fix — bail immediately on a dead browser
+                // session. Selenium throws "invalid session id" or
+                // "session deleted" once the user closes the window or
+                // the watchdog tears it down. Continuing to dispatch
+                // more steps just spams identical exceptions in the log
+                // and confuses the user about the actual failure point.
+                if (IsDeadSession(ex))
+                {
+                    _log.LogWarning(
+                        "Browser session is dead — aborting remaining {Left} step(s)",
+                        steps.Count - i - 1);
+                    entry["dur_ms"] = (int)(DateTime.UtcNow - t0).TotalMilliseconds;
+                    log.Add(entry);
+                    throw new ScriptAbortException("browser session closed mid-run");
+                }
                 if (step.AbortOnError)
                 {
                     entry["dur_ms"] = (int)(DateTime.UtcNow - t0).TotalMilliseconds;
@@ -236,15 +345,359 @@ public sealed class ScriptRunner : IScriptRunner
             }
             entry["dur_ms"] = (int)(DateTime.UtcNow - t0).TotalMilliseconds;
             log.Add(entry);
+
+            // Record ActionEvent for click_ad steps (Phase 34 analytics).
+            if (string.Equals(step.Type, "click_ad", StringComparison.OrdinalIgnoreCase))
+            {
+                await RecordActionEventAsync(
+                    step, ctx, runId, profileName, stepOutcome, skipReason: "",
+                    (int)(DateTime.UtcNow - t0).TotalMilliseconds, stepError, ct);
+            }
         }
         return StepFlow.Normal;
+    }
+
+    /// <summary>
+    /// Phase 21 — graph traversal entry. Picks the entry node, then
+    /// follows outgoing edges until exhaustion or the visit cap. Each
+    /// node's <see cref="ScriptStep"/> goes through the same
+    /// <see cref="DispatchAsync"/> pipeline as list mode, so all
+    /// actions / per-step gates / interpolation behave identically.
+    /// </summary>
+    private async Task ExecuteGraphAsync(
+        GraphTraverser.ParsedGraph graph, IBrowserSession s,
+        RunContext ctx, RunCounters counters,
+        List<Dictionary<string, object?>> log, long runId, string profileName, CancellationToken ct)
+    {
+        var entry = GraphTraverser.FindEntry(graph);
+        if (entry is null)
+        {
+            _log.LogWarning("Graph has no entry node (every node has an inbound edge)");
+            return;
+        }
+
+        var visits = 0;
+        var current = entry;
+        while (current is not null)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (++visits > GraphTraverser.MaxNodeVisits)
+            {
+                _log.LogWarning(
+                    "Graph traversal hit max node visits ({Cap}) — bailing to prevent runaway cycle",
+                    GraphTraverser.MaxNodeVisits);
+                break;
+            }
+
+            var step = current.Step;
+            var entry2 = new Dictionary<string, object?>
+            {
+                ["idx"]     = visits - 1,
+                ["node_id"] = current.Id,
+                ["type"]    = step.Type,
+                ["ok"]      = false,
+            };
+
+            // ── Per-node gates (same semantics as list mode) ──
+            if (!step.Enabled)
+            {
+                entry2["skipped"] = "disabled";
+                log.Add(entry2);
+                current = StepNextNode(graph, current, branchHint: null);
+                continue;
+            }
+            if (step.Probability < 1.0
+                && Random.Shared.NextDouble() > step.Probability)
+            {
+                entry2["skipped"] = "probability";
+                log.Add(entry2);
+                current = StepNextNode(graph, current, branchHint: null);
+                continue;
+            }
+            if (TryDomainFilterSkip(step, ctx, out var skipReason))
+            {
+                entry2["skipped"] = skipReason;
+                log.Add(entry2);
+                current = StepNextNode(graph, current, branchHint: null);
+                continue;
+            }
+
+            // ── Direct-handled control words ──
+            if (string.Equals(step.Type, "break",    StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(step.Type, "continue", StringComparison.OrdinalIgnoreCase))
+            {
+                // In graph mode break/continue have no enclosing loop
+                // semantics — they just terminate the traversal early.
+                // (Loop nodes in graph mode are first-class — they
+                //  iterate via self-edges.)
+                entry2["ok"] = true;
+                entry2["loop_ctrl"] = step.Type.ToLowerInvariant();
+                log.Add(entry2);
+                break;
+            }
+
+            string? branchHint = null;
+            var t0 = DateTime.UtcNow;
+            try
+            {
+                // Phase 21 audit fix #6 — graph-mode loop semantics.
+                // foreach / foreach_ad / while_loop nodes don't have a
+                // nested Body in graph mode; instead they have two
+                // outgoing edges: "body" (into the loop body) and
+                // "next" (after the loop). We iterate (items / ads /
+                // condition) and per-iteration walk the body sub-graph
+                // until it terminates or re-enters this loop node.
+                var typeKey = step.Type.ToLowerInvariant();
+                if (typeKey is "foreach" or "foreach_ad" or "while_loop")
+                {
+                    await ExecuteGraphLoopAsync(graph, current, step, s, ctx, counters, log, runId, profileName, ct);
+                    entry2["ok"] = true;
+                    counters.Executed++;
+                    // After the loop, follow the "next" labelled edge
+                    // (or any edge that isn't "body").
+                    entry2["dur_ms"] = (int)(DateTime.UtcNow - t0).TotalMilliseconds;
+                    log.Add(entry2);
+                    current = StepNextNode(graph, current, branchHint: "next");
+                    continue;
+                }
+                // For if-nodes, evaluate the condition here so we can
+                // pick the matching outgoing edge label. The dispatch
+                // path for "if" assumes nested then/else lists, which
+                // graph mode replaces with edge labels.
+                if (string.Equals(step.Type, "if", StringComparison.OrdinalIgnoreCase))
+                {
+                    var matched = await _conditions.EvaluateAsync(step.Condition, s, ctx, ct);
+                    branchHint = matched ? "then" : "else";
+                    entry2["ok"] = true;
+                    entry2["branch"] = branchHint;
+                    counters.Executed++;
+                }
+                else
+                {
+                    await DispatchAsync(step, s, ctx, counters, log, runId, profileName, ct);
+                    entry2["ok"] = true;
+                    counters.Executed++;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                entry2["err"] = "cancelled";
+                entry2["dur_ms"] = (int)(DateTime.UtcNow - t0).TotalMilliseconds;
+                log.Add(entry2);
+                throw;
+            }
+            catch (Exception ex)
+            {
+                counters.Failed++;
+                entry2["err"] = ex.Message;
+                // current is guaranteed non-null inside the while-body
+                // (loop condition: `while (current is not null)`); the
+                // null-forgiving suppresses CS8602 in the catch handler
+                // where the compiler's flow analysis loses that fact.
+                _log.LogWarning(ex, "Graph node '{Id}' ({Type}) failed", current!.Id, step.Type);
+                if (IsDeadSession(ex))
+                {
+                    _log.LogWarning("Browser session is dead — aborting graph traversal");
+                    entry2["dur_ms"] = (int)(DateTime.UtcNow - t0).TotalMilliseconds;
+                    log.Add(entry2);
+                    throw new ScriptAbortException("browser session closed mid-run");
+                }
+                if (step.AbortOnError)
+                {
+                    entry2["dur_ms"] = (int)(DateTime.UtcNow - t0).TotalMilliseconds;
+                    log.Add(entry2);
+                    throw new ScriptAbortException(
+                        $"node '{current.Id}' ({step.Type}) threw — abort_on_error=true: {ex.Message}");
+                }
+            }
+            entry2["dur_ms"] = (int)(DateTime.UtcNow - t0).TotalMilliseconds;
+            log.Add(entry2);
+
+            current = StepNextNode(graph, current, branchHint);
+        }
+    }
+
+    /// <summary>Walk one outgoing edge from <paramref name="from"/>.
+    /// Returns null when there's no outgoing edge (terminal node).</summary>
+    private static GraphTraverser.GraphNode? StepNextNode(
+        GraphTraverser.ParsedGraph g, GraphTraverser.GraphNode from, string? branchHint)
+    {
+        var outs = g.Outgoing[from.Id];
+        var edge = GraphTraverser.PickNextEdge(outs, branchHint);
+        if (edge is null) return null;
+        return g.NodeIndex.TryGetValue(edge.To, out var next) ? next : null;
+    }
+
+    /// <summary>
+    /// Phase 21 audit fix #6 — execute a loop node's body sub-graph
+    /// once per iteration. The loop node's outgoing edges should be
+    /// labelled: "body" goes into the loop body, "next" goes after
+    /// the loop completes. If the user only drew one edge (no labels),
+    /// we treat it as the body and stop traversal there.
+    ///
+    /// Per-iteration we walk from the body-target node, following
+    /// edges, until either:
+    ///   • the path terminates (no outgoing edge), or
+    ///   • the path returns to <paramref name="loopNode"/> (back-edge).
+    /// </summary>
+    private async Task ExecuteGraphLoopAsync(
+        GraphTraverser.ParsedGraph g,
+        GraphTraverser.GraphNode loopNode,
+        ScriptStep loopStep,
+        IBrowserSession s, RunContext ctx, RunCounters counters,
+        List<Dictionary<string, object?>> log, long runId, string profileName, CancellationToken ct)
+    {
+        // Pick body edge (label "body" preferred; fall back to first
+        // outgoing edge that isn't "next").
+        var outs = g.Outgoing[loopNode.Id];
+        var bodyEdge = outs.FirstOrDefault(
+            e => string.Equals(e.Label, "body", StringComparison.OrdinalIgnoreCase));
+        if (bodyEdge is null)
+            bodyEdge = outs.FirstOrDefault(
+                e => !string.Equals(e.Label, "next", StringComparison.OrdinalIgnoreCase));
+        if (bodyEdge is null) return; // empty loop body — nothing to iterate
+        if (!g.NodeIndex.TryGetValue(bodyEdge.To, out var bodyStart)) return;
+
+        var typeKey = loopStep.Type.ToLowerInvariant();
+        if (typeKey == "while_loop")
+        {
+            // Bounded condition loop. max_iterations defaults to 1000.
+            var maxIter = ParamInt(loopStep, "max_iterations", 1000);
+            if (maxIter <= 0) maxIter = 1000;
+            var iter = 0;
+            while (iter++ < maxIter)
+            {
+                ct.ThrowIfCancellationRequested();
+                var ok = await _conditions.EvaluateAsync(loopStep.Condition, s, ctx, ct);
+                if (!ok) break;
+                await ExecuteSubGraphAsync(g, bodyStart, loopNode.Id, s, ctx, counters, log, runId, profileName, ct);
+            }
+            if (iter >= maxIter)
+                _log.LogWarning("graph while_loop hit max_iterations={Max} — bailing", maxIter);
+        }
+        else if (typeKey == "foreach")
+        {
+            var items = ResolveItemList(loopStep, ctx);
+            var itemVar = ParamString(loopStep, "var") ?? "item";
+            foreach (var it in items)
+            {
+                ct.ThrowIfCancellationRequested();
+                ctx.Vars[itemVar] = it;
+                await ExecuteSubGraphAsync(g, bodyStart, loopNode.Id, s, ctx, counters, log, runId, profileName, ct);
+            }
+        }
+        else // foreach_ad
+        {
+            ctx.AdLoopDepth++;
+            try
+            {
+                if (ctx.Ads.Count == 0)
+                {
+                    var parsed = await AdParser.ParseAsync(s, ct);
+                    ctx.Ads.AddRange(parsed);
+                }
+                var snapshot = ctx.Ads.ToList();
+                foreach (var ad in snapshot)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    ctx.Vars["ad_href"]  = ad.Href;
+                    ctx.Vars["ad_title"] = ad.Title ?? "";
+                    ctx.Vars["ad_id"]    = ad.StampId.ToString();
+                    ctx.CurrentAdHref    = ad.Href;
+                    await ExecuteSubGraphAsync(g, bodyStart, loopNode.Id, s, ctx, counters, log, runId, profileName, ct);
+                    await Humanizer.IdleAsync(800, 2200, ct);
+                }
+                ctx.CurrentAdHref = "";
+            }
+            finally { ctx.AdLoopDepth--; }
+        }
+    }
+
+    /// <summary>
+    /// Walk the body sub-graph starting at <paramref name="start"/>,
+    /// following edges until either the path terminates or returns to
+    /// <paramref name="stopAtNodeId"/> (the enclosing loop node, used
+    /// as a back-edge sentinel). Each node goes through the same
+    /// per-step gate + dispatch pipeline as the top-level traversal,
+    /// minus its own loop-iteration logic — sub-graphs may contain
+    /// nested loops which recurse here naturally.
+    /// </summary>
+    private async Task ExecuteSubGraphAsync(
+        GraphTraverser.ParsedGraph g,
+        GraphTraverser.GraphNode start,
+        string stopAtNodeId,
+        IBrowserSession s, RunContext ctx, RunCounters counters,
+        List<Dictionary<string, object?>> log, long runId, string profileName, CancellationToken ct)
+    {
+        var current = start;
+        var visits = 0;
+        while (current is not null)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (string.Equals(current.Id, stopAtNodeId, StringComparison.Ordinal))
+                return; // back-edge to loop node — iteration boundary
+            if (++visits > GraphTraverser.MaxNodeVisits) return; // safety
+            var step = current.Step;
+
+            // Per-step gates (skipped → just step to next node).
+            if (!step.Enabled
+                || (step.Probability < 1.0 && Random.Shared.NextDouble() > step.Probability)
+                || TryDomainFilterSkip(step, ctx, out _))
+            {
+                current = StepNextNode(g, current, branchHint: null);
+                continue;
+            }
+
+            // Direct break/continue — terminate this body iteration.
+            if (string.Equals(step.Type, "break",    StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(step.Type, "continue", StringComparison.OrdinalIgnoreCase))
+                return;
+
+            string? hint = null;
+            try
+            {
+                var typeKey = step.Type.ToLowerInvariant();
+                if (typeKey == "if")
+                {
+                    var matched = await _conditions.EvaluateAsync(step.Condition, s, ctx, ct);
+                    hint = matched ? "then" : "else";
+                }
+                else if (typeKey is "foreach" or "foreach_ad" or "while_loop")
+                {
+                    // Nested loop — recurse. After it finishes, follow
+                    // its "next" edge.
+                    await ExecuteGraphLoopAsync(g, current, step, s, ctx, counters, log, runId, profileName, ct);
+                    current = StepNextNode(g, current, branchHint: "next");
+                    continue;
+                }
+                else
+                {
+                    await DispatchAsync(step, s, ctx, counters, log, runId, profileName, ct);
+                }
+                counters.Executed++;
+            }
+            catch (Exception ex)
+            {
+                counters.Failed++;
+                // current is guaranteed non-null inside the while-body
+                // (loop condition: `while (current is not null)`); the
+                // null-forgiving suppresses CS8602 in the catch handler
+                // where the compiler's flow analysis loses that fact.
+                if (step.AbortOnError)
+                    throw new ScriptAbortException(
+                        $"node '{current!.Id}' ({step.Type}) threw — abort_on_error=true: {ex.Message}");
+                _log.LogWarning(ex, "Sub-graph node '{Id}' failed", current!.Id);
+            }
+
+            current = StepNextNode(g, current, hint);
+        }
     }
 
     // ─── Dispatcher — full v1 catalog ─────────────────────────────
 
     private async Task<StepFlow> DispatchAsync(
         ScriptStep step, IBrowserSession s, RunContext ctx, RunCounters counters,
-        List<Dictionary<string, object?>> log, CancellationToken ct)
+        List<Dictionary<string, object?>> log, long runId, string profileName, CancellationToken ct)
     {
         var type = step.Type.ToLowerInvariant();
         switch (type)
@@ -256,7 +709,7 @@ public sealed class ScriptRunner : IScriptRunner
                 var branch = matched ? step.Then : step.Else;
                 if (branch.Count > 0)
                 {
-                    var flow = await ExecuteStepsAsync(branch, s, ctx, counters, log, ct);
+                    var flow = await ExecuteStepsAsync(branch, s, ctx, counters, log, runId, profileName, ct);
                     if (flow != StepFlow.Normal) return flow;
                 }
                 break;
@@ -272,7 +725,7 @@ public sealed class ScriptRunner : IScriptRunner
                     ct.ThrowIfCancellationRequested();
                     ctx.Vars[itemVar] = it;
                     if (step.Body.Count == 0) continue;
-                    var flow = await ExecuteStepsAsync(step.Body, s, ctx, counters, log, ct);
+                    var flow = await ExecuteStepsAsync(step.Body, s, ctx, counters, log, runId, profileName, ct);
                     if (flow == StepFlow.Break) break;
                     // continue: just step to next item (no special action)
                 }
@@ -307,7 +760,7 @@ public sealed class ScriptRunner : IScriptRunner
                         // it here so the filter sees a host while the
                         // body executes.
                         ctx.CurrentAdHref = ad.Href;
-                        var flow = await ExecuteStepsAsync(step.Body, s, ctx, counters, log, ct);
+                        var flow = await ExecuteStepsAsync(step.Body, s, ctx, counters, log, runId, profileName, ct);
                         if (flow == StepFlow.Break) break;
                         // Inter-ad pause to look organic.
                         await Humanizer.IdleAsync(800, 2200, ct);
@@ -337,6 +790,36 @@ public sealed class ScriptRunner : IScriptRunner
                 }
                 ctx.Ads.Clear();
                 ctx.Ads.AddRange(await AdParser.ParseAsync(s, ct));
+
+                // Phase 34: record competitor observations, excluding blocked domains.
+                try
+                {
+                    var batch = new List<CompetitorRecord>();
+                    var capturedAt = DateTime.UtcNow;
+                    foreach (var ad in ctx.Ads)
+                    {
+                        var host = ExtractHost(ad.Href);
+                        if (string.IsNullOrEmpty(host)) continue;
+                        if (DomainMatches(host, ctx.BlockDomains)) continue;
+                        batch.Add(new CompetitorRecord
+                        {
+                            RunId = runId,
+                            ProfileName = profileName,
+                            CapturedAt = capturedAt,
+                            Query = ctx.Vars.TryGetValue("current_query", out var q) ? q : "",
+                            Domain = host,
+                            AdTitle = ad.Title,
+                            DisplayUrl = ad.DisplayUrl,
+                            ClickUrl = ad.Href,
+                        });
+                    }
+                    if (batch.Count > 0)
+                        _ = _competitors.RecordBatchAsync(batch, ct);
+                }
+                catch (Exception ex)
+                {
+                    _log.LogWarning(ex, "Failed to record competitor batch for parse_ads");
+                }
                 break;
             }
             case "click_ad":
@@ -560,6 +1043,13 @@ public sealed class ScriptRunner : IScriptRunner
             {
                 var name  = ParamString(step, "name")
                     ?? throw new ArgumentException("missing 'name'");
+                // Phase 21 audit fix — reject reserved names so user
+                // scripts can't poison ad context (ad_href / ad_title /
+                // ad_id) or extension lifecycle (_ext_origin_tab) by
+                // overwriting them mid-iteration.
+                if (ScriptSecurityGuards.IsReservedVarName(name))
+                    throw new ArgumentException(
+                        $"'{name}' is a reserved variable — use a different name");
                 var value = ParamString(step, "value") ?? "";
                 ctx.Vars[name] = InterpolateVars(value, ctx);
                 break;
@@ -679,7 +1169,7 @@ public sealed class ScriptRunner : IScriptRunner
                     var ok = await _conditions.EvaluateAsync(step.Condition, s, ctx, ct);
                     if (!ok) break;
                     if (step.Body.Count == 0) break;
-                    var flow = await ExecuteStepsAsync(step.Body, s, ctx, counters, log, ct);
+                    var flow = await ExecuteStepsAsync(step.Body, s, ctx, counters, log, runId, profileName, ct);
                     if (flow == StepFlow.Break) break;
                     iter++;
                 }
@@ -760,7 +1250,7 @@ public sealed class ScriptRunner : IScriptRunner
                     throw new ArgumentException("http_request: not an absolute URL");
                 if (u.Scheme != Uri.UriSchemeHttp && u.Scheme != Uri.UriSchemeHttps)
                     throw new ArgumentException("http_request: only http(s) allowed");
-                if (IsBlockedHost(u))
+                if (ScriptSecurityGuards.IsBlockedHost(u))
                     throw new InvalidOperationException(
                         $"http_request: host blocked by SSRF policy ({u.Host})");
 
@@ -840,7 +1330,16 @@ public sealed class ScriptRunner : IScriptRunner
                 var timeout = ParamInt(step, "timeout_sec", 15) * 1000;
                 if (string.IsNullOrEmpty(extId))
                     throw new ArgumentException("missing 'extension_id' (32-char Chrome Web Store id)");
-                var url = $"chrome-extension://{extId}/{InterpolateVars(page, ctx)}";
+                // Phase 21 audit fix — extension ID + page path
+                // sanitization. extId must be a Chrome 32-char a–p
+                // identifier; page must be a single safe filename
+                // (no ".." / "/" / "\"). See ScriptSecurityGuards for
+                // the implementation; tests cover both rules there.
+                if (!ScriptSecurityGuards.IsValidExtensionId(extId))
+                    throw new ArgumentException(
+                        "invalid 'extension_id' — expected 32-char Chrome Web Store id");
+                var safePage = ScriptSecurityGuards.SanitiseExtensionPage(InterpolateVars(page, ctx));
+                var url = $"chrome-extension://{extId}/{safePage}";
                 // Stash the current tab id so extension_close can flip
                 // back, then open the extension page in a new window.
                 await s.ExecuteScriptAsync(
@@ -989,7 +1488,8 @@ public sealed class ScriptRunner : IScriptRunner
         reason = "";
         // Fast path: no filters set → no work.
         if (!step.SkipOnMyDomain && !step.SkipOnTarget
-            && !step.OnlyOnMyDomain && !step.OnlyOnTarget) return false;
+            && !step.OnlyOnMyDomain && !step.OnlyOnTarget
+            && !step.SkipOnBlocked && !step.OnlyOnBlocked) return false;
 
         var host = ExtractHost(ctx.CurrentAdHref);
         var hasAd = !string.IsNullOrEmpty(host);
@@ -1000,6 +1500,8 @@ public sealed class ScriptRunner : IScriptRunner
         { reason = "only_on_my_domain"; return true; }
         if (step.OnlyOnTarget && !(hasAd && DomainMatches(host, ctx.TargetDomains)))
         { reason = "only_on_target"; return true; }
+        if (step.OnlyOnBlocked && !(hasAd && DomainMatches(host, ctx.BlockDomains)))
+        { reason = "only_on_blocked"; return true; }
 
         // skip_on_* gates: only fire when there IS an ad and it
         // matches. With no ad, policy doesn't apply → don't skip.
@@ -1007,8 +1509,71 @@ public sealed class ScriptRunner : IScriptRunner
         { reason = "skip_on_my_domain"; return true; }
         if (step.SkipOnTarget && hasAd && DomainMatches(host, ctx.TargetDomains))
         { reason = "skip_on_target"; return true; }
+        if (step.SkipOnBlocked && hasAd && DomainMatches(host, ctx.BlockDomains))
+        { reason = "blocked"; return true; }
 
         return false;
+    }
+
+    /// <summary>
+    /// Record one click_ad action outcome to the ad_density table for
+    /// CTR / skip-reason analytics. Wraps in try-catch so analytics
+    /// failures don't disrupt the script.
+    /// </summary>
+    private async Task RecordActionEventAsync(
+        ScriptStep step, RunContext ctx, long runId, string profileName,
+        string outcome, string skipReason, int durationMs, string? error,
+        CancellationToken ct)
+    {
+        try
+        {
+            var host = ExtractHost(ctx.CurrentAdHref);
+            string adClass;
+            if (string.IsNullOrEmpty(host))
+            {
+                adClass = "unknown";
+            }
+            else if (DomainMatches(host, ctx.BlockDomains))
+            {
+                adClass = "blocked";
+                // Skip recording if the ad is blocked — blocked sites
+                // should not pollute analytics.
+                return;
+            }
+            else if (DomainMatches(host, ctx.MyDomains))
+            {
+                adClass = "my_domain";
+            }
+            else if (DomainMatches(host, ctx.TargetDomains))
+            {
+                adClass = "target";
+            }
+            else
+            {
+                adClass = "competitor";
+            }
+
+            var ev = new ActionEvent
+            {
+                RunId = runId,
+                ProfileName = profileName,
+                CapturedAt = DateTime.UtcNow,
+                Query = ctx.Vars.TryGetValue("current_query", out var q) ? q : null,
+                AdDomain = host,
+                AdClass = adClass,
+                ActionType = "click_ad",
+                Outcome = outcome,
+                SkipReason = outcome == "skipped" ? skipReason : null,
+                DurationSec = durationMs > 0 ? durationMs / 1000.0 : null,
+                Error = error != null ? error[..Math.Min(error.Length, 200)] : null,
+            };
+
+            await _adDensity.RecordActionAsync(ev, ct);
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "Failed to record action_event for click_ad");
+        }
     }
 
     /// <summary>
@@ -1059,43 +1624,11 @@ public sealed class ScriptRunner : IScriptRunner
         return false;
     }
 
-    /// <summary>
-    /// SSRF guard for <c>http_request</c>. Rejects loopback (127.*,
-    /// ::1, "localhost"), link-local (169.254.*), and the three
-    /// RFC1918 blocks (10.*, 172.16-31.*, 192.168.*). Hostnames
-    /// resolve via <see cref="Uri.IsLoopback"/> for IP literals; for
-    /// DNS hostnames we reject only the obvious "localhost" string —
-    /// a determined attacker could still hit private IPs via DNS
-    /// rebinding, but that's out of scope for v1.
-    /// </summary>
-    private static bool IsBlockedHost(Uri u)
-    {
-        var host = u.Host.ToLowerInvariant();
-        if (host == "localhost") return true;
-        if (u.IsLoopback) return true;
-        if (System.Net.IPAddress.TryParse(host, out var ip))
-        {
-            var b = ip.GetAddressBytes();
-            if (ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
-            {
-                if (b[0] == 10) return true;                                 // 10.0.0.0/8
-                if (b[0] == 127) return true;                                // 127.0.0.0/8
-                if (b[0] == 169 && b[1] == 254) return true;                 // 169.254.0.0/16
-                if (b[0] == 172 && b[1] >= 16 && b[1] <= 31) return true;    // 172.16.0.0/12
-                if (b[0] == 192 && b[1] == 168) return true;                 // 192.168.0.0/16
-            }
-            else
-            {
-                // ::1 already covered by IsLoopback.
-                // fc00::/7 (ULA) — first byte 0xfc or 0xfd.
-                if ((b[0] & 0xfe) == 0xfc) return true;
-                // fe80::/10 (link-local) — first 10 bits == 1111111010.
-                // High byte 0xfe and second byte's top 2 bits == 10.
-                if (b[0] == 0xfe && (b[1] & 0xc0) == 0x80) return true;
-            }
-        }
-        return false;
-    }
+    // Phase 21: SanitiseExtensionPage / IsBlockedHost / IsReservedVarName
+    // moved to public <see cref="ScriptSecurityGuards"/> so the unit-
+    // test suite can exercise them. ScriptRunner now calls those
+    // helpers directly — see "open_extension_*" / "http_request" /
+    // "save_var" cases above.
 
     private static IEnumerable<string> ResolveItemList(ScriptStep step, RunContext ctx)
     {
@@ -1154,6 +1687,31 @@ public sealed class ScriptRunner : IScriptRunner
         // Expand %USERPROFILE% / %APPDATA% / etc. so users can give us
         // portable paths instead of hard-coded C:\Users\... values.
         path = Environment.ExpandEnvironmentVariables(path);
+
+        // Phase 21 audit fix: sandbox CSV reads to a fixed root under
+        // %LocalAppData%\GhostShell\csv-data\. Without this a malicious
+        // script could read arbitrary files (config\SAM, NTUSER.DAT,
+        // etc.). UNC paths, symlinks pointing outside the root, and
+        // ".." traversal all get rejected by the StartsWith() check
+        // after Path.GetFullPath() resolves them.
+        var dataDir = Environment.GetFolderPath(
+            Environment.SpecialFolder.LocalApplicationData);
+        var sandboxRoot = Path.GetFullPath(
+            Path.Combine(dataDir, "GhostShell", "csv-data"));
+        try { Directory.CreateDirectory(sandboxRoot); } catch { /* best-effort */ }
+
+        // If user supplies a rooted path, only its filename is honoured;
+        // otherwise it's joined under the sandbox root.
+        var leaf = Path.IsPathRooted(path) ? Path.GetFileName(path) : path;
+        var candidate = Path.GetFullPath(Path.Combine(sandboxRoot, leaf));
+        if (!candidate.StartsWith(
+                sandboxRoot + Path.DirectorySeparatorChar,
+                StringComparison.OrdinalIgnoreCase)
+            && !candidate.Equals(sandboxRoot, StringComparison.OrdinalIgnoreCase))
+        {
+            return Array.Empty<string>();  // path escapes sandbox → drop silently
+        }
+        path = candidate;
         if (!File.Exists(path)) return Array.Empty<string>();
 
         var col       = ParamString(step, "csv_column") ?? "0";
@@ -1231,6 +1789,24 @@ public sealed class ScriptRunner : IScriptRunner
         return fields;
     }
 
+    /// <summary>
+    /// Phase 23 hot-fix — Selenium throws WebDriverException with one
+    /// of these messages once the Chrome window is gone (user closed
+    /// it, or the watchdog tore it down). Continuing to dispatch
+    /// further steps spams identical exceptions and obscures the real
+    /// first-failure cause; we abort the run instead.
+    /// </summary>
+    private static bool IsDeadSession(Exception ex)
+    {
+        var msg = ex.Message ?? "";
+        return msg.Contains("invalid session id", StringComparison.OrdinalIgnoreCase)
+            || msg.Contains("session deleted", StringComparison.OrdinalIgnoreCase)
+            || msg.Contains("not connected to DevTools", StringComparison.OrdinalIgnoreCase)
+            || msg.Contains("chrome not reachable", StringComparison.OrdinalIgnoreCase)
+            || msg.Contains("disconnected: not connected", StringComparison.OrdinalIgnoreCase)
+            || msg.Contains("no such window", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static bool ParamBool(ScriptStep step, string key, bool def)
     {
         if (!step.Params.TryGetValue(key, out var v) || v is null) return def;
@@ -1267,13 +1843,42 @@ public sealed class ScriptRunner : IScriptRunner
         @"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}",
         System.Text.RegularExpressions.RegexOptions.Compiled,
         TimeSpan.FromMilliseconds(200));
+    /// <summary>
+    /// Phase 24 — vault placeholder regex. Matches
+    /// <c>{{vault.&lt;numeric-id&gt;.&lt;field&gt;}}</c> with optional
+    /// whitespace inside the braces. Field names follow the same
+    /// identifier rules as save_var.
+    /// </summary>
+    private static readonly System.Text.RegularExpressions.Regex VaultPattern = new(
+        @"\{\{\s*vault\.([0-9]+)\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}",
+        System.Text.RegularExpressions.RegexOptions.Compiled,
+        TimeSpan.FromMilliseconds(200));
 
     private static string InterpolateVars(string src, RunContext ctx)
     {
-        if (string.IsNullOrEmpty(src) || ctx.Vars.Count == 0) return src;
+        if (string.IsNullOrEmpty(src)) return src;
         if (src.Length > MaxInterpolationInput) return src;
         try
         {
+            // Phase 24: resolve {{vault.id.field}} first so subsequent
+            // variable interpolation can chain (e.g. someone might
+            // save a vault value into a regular var). Failed lookups
+            // leave the placeholder verbatim — easier to debug than
+            // a silent empty string.
+            if (ctx.Vault.Count > 0)
+            {
+                src = VaultPattern.Replace(src, m =>
+                {
+                    var id    = m.Groups[1].Value;
+                    var field = m.Groups[2].Value;
+                    if (!ctx.Vault.TryGetValue(id, out var bag)) return m.Value;
+                    if (!bag.TryGetValue(field, out var v))      return m.Value;
+                    if (v.Length > MaxInterpolatedValue)
+                        v = v[..MaxInterpolatedValue];
+                    return v;
+                });
+            }
+            if (ctx.Vars.Count == 0) return src;
             return VarPattern.Replace(src, m =>
             {
                 if (!ctx.Vars.TryGetValue(m.Groups[1].Value, out var v)) return m.Value;
@@ -1286,6 +1891,28 @@ public sealed class ScriptRunner : IScriptRunner
         {
             return src;
         }
+    }
+
+    /// <summary>
+    /// Public surface for the profile-runner: scan a script's JSON
+    /// payload (StepsJson and/or NodesJson) and pluck out every
+    /// (vault-id, field) reference. The caller passes that to
+    /// <c>IVaultService.ResolveAsync</c> at run start to materialise
+    /// the live vault values once, off the dispatch hot path.
+    /// </summary>
+    public static IReadOnlyList<(long Id, string Field)> CollectVaultRefs(params string?[] jsonPayloads)
+    {
+        var seen = new HashSet<(long, string)>();
+        foreach (var json in jsonPayloads)
+        {
+            if (string.IsNullOrEmpty(json)) continue;
+            foreach (System.Text.RegularExpressions.Match m in VaultPattern.Matches(json))
+            {
+                if (long.TryParse(m.Groups[1].Value, out var id))
+                    seen.Add((id, m.Groups[2].Value));
+            }
+        }
+        return seen.Select(x => (x.Item1, x.Item2)).ToList();
     }
 
     private static string? ParamString(ScriptStep step, string key)
@@ -1324,6 +1951,14 @@ public sealed class ScriptRunner : IScriptRunner
         var finishedAt = DateTime.UtcNow;
         var dur = (finishedAt - startedAt).TotalSeconds;
         var logJson = JsonSerializer.Serialize(log, JsonOpts);
+        // Phase 24 audit fix — drop vault references so the cleartext
+        // bag becomes eligible for GC the moment ExecuteAsync returns.
+        // C# string immutability prevents true memory-zeroing, but
+        // releasing the reference is the strongest mitigation that
+        // doesn't require a SecureString rewrite. The bags themselves
+        // hold only references; the strings live in the heap intern
+        // pool until GC reclaims them.
+        ctx.Vault.Clear();
         return new ScriptRun
         {
             Id            = runId,

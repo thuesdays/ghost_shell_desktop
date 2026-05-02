@@ -101,6 +101,14 @@
                     </StackPanel>
 
                     <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                        <!-- Phase 21: flip the script into graph mode.
+                             ScriptsViewModel converts the current list
+                             into a vertical-chain graph skeleton and
+                             opens the graph editor. -->
+                        <Button Content="🔀  Graph mode"
+                                Click="OnGraphView" Margin="0,0,8,0"
+                                Padding="12,7"
+                                ToolTip="Convert this script to a free-form node graph"/>
                         <Button Content="📋  JSON view"
                                 Click="OnJsonView" Margin="0,0,8,0"
                                 Padding="12,7"
@@ -927,6 +935,13 @@
                                Text="Up/Down arrows reorder · ✎ edits params · × removes the step · scroll to navigate the canvas"/>
                     <StackPanel Grid.Column="1" Orientation="Horizontal">
                         <Button Content="Cancel" Click="OnCancel" MinWidth="84" Margin="0,0,8,0"/>
+                        <!-- ▶ Run on… : saves first, then opens a
+                             profile-picker dialog and kicks the runner
+                             against each chosen profile. The save flow
+                             validates Name like the Save button does. -->
+                        <Button Content="▶  Run on…" Click="OnRunOnProfile"
+                                MinWidth="110" Margin="0,0,8,0"
+                                ToolTip="Save and run the script against one or more profiles"/>
                         <Button Content="Save" Click="OnSave"
                                 Style="{StaticResource ButtonPrimary}" MinWidth="120"/>
                     </StackPanel>

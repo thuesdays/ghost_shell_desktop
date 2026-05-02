@@ -1,0 +1,253 @@
+<!--
+  SPDX-License-Identifier: MIT
+  Copyright (c) 2026 Mykola Kovhanko <thuesdays@gmail.com>
+
+  Phase 23 — script templates gallery. Left rail: category filter +
+  search. Centre: template tiles for the active filter. Right pane:
+  preview (steps + description) of the selected template. Footer:
+  Cancel / Use template.
+-->
+<Window x:Class="GhostShell.App.Dialogs.ScriptTemplatesDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Script templates"
+        Width="1100" Height="700"
+        WindowStartupLocation="CenterOwner"
+        WindowStyle="None"
+        ResizeMode="CanResize"
+        ShowInTaskbar="False"
+        Background="{StaticResource BgBase}">
+    <Border BorderBrush="{StaticResource BorderStrong}" BorderThickness="1">
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <!-- Header -->
+            <Border Grid.Row="0" Background="{StaticResource BgDeep}"
+                    BorderBrush="{StaticResource Border}" BorderThickness="0,0,0,1"
+                    Padding="20,14">
+                <StackPanel>
+                    <TextBlock Text="Script templates"
+                               Foreground="{StaticResource Text}"
+                               FontSize="14" FontWeight="SemiBold"/>
+                    <TextBlock Style="{StaticResource PageSubtitle}"
+                               Text="Pick a starting point — logins, social warmups, search queries, shopping, news, utilities. Selectors and credentials are placeholders; the editor opens after you pick so you can tweak them."/>
+                </StackPanel>
+            </Border>
+
+            <!-- Body -->
+            <Grid Grid.Row="1">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="200"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="320"/>
+                </Grid.ColumnDefinitions>
+
+                <!-- Left rail: search + categories -->
+                <Border Grid.Column="0"
+                        Background="{StaticResource BgRaised}"
+                        BorderBrush="{StaticResource Border}"
+                        BorderThickness="0,0,1,0">
+                    <DockPanel LastChildFill="True">
+                        <Border DockPanel.Dock="Top" Padding="12,12,12,8">
+                            <StackPanel>
+                                <TextBlock Text="SEARCH"
+                                           Style="{StaticResource CardHeader}"
+                                           Margin="0,0,0,4"/>
+                                <Border Background="{StaticResource BgDeep}"
+                                        BorderBrush="{StaticResource Border}"
+                                        BorderThickness="1" CornerRadius="4"
+                                        Padding="8,2"
+                                        Height="28">
+                                    <TextBox x:Name="SearchField"
+                                             TextChanged="OnSearchChanged"
+                                             Background="Transparent"
+                                             BorderThickness="0"
+                                             Padding="0"
+                                             FontSize="12"
+                                             VerticalContentAlignment="Center"/>
+                                </Border>
+                            </StackPanel>
+                        </Border>
+                        <Border DockPanel.Dock="Top" Padding="12,8,12,4">
+                            <TextBlock Text="CATEGORIES"
+                                       Style="{StaticResource CardHeader}"/>
+                        </Border>
+                        <ItemsControl x:Name="CategoryList"
+                                      HorizontalContentAlignment="Stretch"
+                                      Padding="6,0,6,12">
+                            <ItemsControl.ItemContainerStyle>
+                                <Style TargetType="ContentPresenter">
+                                    <Setter Property="HorizontalAlignment" Value="Stretch"/>
+                                </Style>
+                            </ItemsControl.ItemContainerStyle>
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Border Tag="{Binding}"
+                                            MouseLeftButtonUp="OnCategoryClick"
+                                            Padding="14,7"
+                                            Margin="0,1"
+                                            Cursor="Hand">
+                                        <Border.Style>
+                                            <Style TargetType="Border">
+                                                <Setter Property="Background" Value="Transparent"/>
+                                                <Style.Triggers>
+                                                    <Trigger Property="IsMouseOver" Value="True">
+                                                        <Setter Property="Background" Value="{StaticResource BgHover}"/>
+                                                    </Trigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </Border.Style>
+                                        <TextBlock Text="{Binding}"
+                                                   Foreground="{StaticResource Text}"
+                                                   FontSize="12"/>
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </DockPanel>
+                </Border>
+
+                <!-- Centre: template tiles -->
+                <ScrollViewer Grid.Column="1"
+                              VerticalScrollBarVisibility="Auto"
+                              HorizontalScrollBarVisibility="Disabled"
+                              Padding="20">
+                    <ItemsControl x:Name="TemplateList">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <WrapPanel Orientation="Horizontal"/>
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Border Tag="{Binding}"
+                                        MouseLeftButtonUp="OnTileClick"
+                                        Width="280" MinHeight="120"
+                                        Margin="0,0,12,12"
+                                        Padding="14,12"
+                                        Background="{StaticResource BgRaised}"
+                                        BorderBrush="{StaticResource Border}"
+                                        BorderThickness="1"
+                                        CornerRadius="6"
+                                        Cursor="Hand">
+                                    <Border.Style>
+                                        <Style TargetType="Border">
+                                            <Setter Property="Background" Value="{StaticResource BgRaised}"/>
+                                            <Setter Property="BorderBrush" Value="{StaticResource Border}"/>
+                                            <Style.Triggers>
+                                                <Trigger Property="IsMouseOver" Value="True">
+                                                    <Setter Property="Background" Value="{StaticResource BgHover}"/>
+                                                    <Setter Property="BorderBrush" Value="{StaticResource Accent}"/>
+                                                </Trigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Border.Style>
+                                    <StackPanel>
+                                        <StackPanel Orientation="Horizontal">
+                                            <TextBlock Text="{Binding Icon}"
+                                                       FontSize="20"
+                                                       Margin="0,0,8,0"
+                                                       VerticalAlignment="Center"/>
+                                            <StackPanel>
+                                                <TextBlock Text="{Binding Name}"
+                                                           Foreground="{StaticResource Text}"
+                                                           FontSize="13" FontWeight="SemiBold"/>
+                                                <TextBlock Text="{Binding Category}"
+                                                           Foreground="{StaticResource Accent}"
+                                                           FontSize="10"
+                                                           FontFamily="{StaticResource FontMono}"/>
+                                            </StackPanel>
+                                        </StackPanel>
+                                        <TextBlock Text="{Binding Description}"
+                                                   Foreground="{StaticResource TextMuted}"
+                                                   FontSize="11"
+                                                   TextWrapping="Wrap"
+                                                   Margin="0,8,0,0"
+                                                   MaxHeight="48"
+                                                   TextTrimming="CharacterEllipsis"/>
+                                    </StackPanel>
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </ScrollViewer>
+
+                <!-- Right pane: preview -->
+                <Border Grid.Column="2"
+                        Background="{StaticResource BgRaised}"
+                        BorderBrush="{StaticResource Border}"
+                        BorderThickness="1,0,0,0">
+                    <DockPanel LastChildFill="True">
+                        <Border DockPanel.Dock="Top" Padding="14,12">
+                            <StackPanel>
+                                <TextBlock Text="PREVIEW"
+                                           Style="{StaticResource CardHeader}"
+                                           Margin="0,0,0,8"/>
+                                <TextBlock x:Name="PreviewName"
+                                           Foreground="{StaticResource Text}"
+                                           FontSize="14" FontWeight="SemiBold"
+                                           Text="(pick a template)"/>
+                                <TextBlock x:Name="PreviewDesc"
+                                           Foreground="{StaticResource TextMuted}"
+                                           FontSize="11"
+                                           TextWrapping="Wrap"
+                                           Margin="0,4,0,0"/>
+                            </StackPanel>
+                        </Border>
+                        <Border DockPanel.Dock="Top" Height="1"
+                                Background="{StaticResource Border}"/>
+                        <Border DockPanel.Dock="Top" Padding="14,8,14,8"
+                                Background="{StaticResource BgDeep}">
+                            <TextBlock x:Name="PreviewSteps"
+                                       Foreground="{StaticResource Accent}"
+                                       FontSize="10"
+                                       FontFamily="{StaticResource FontMono}"
+                                       Text="0 steps"/>
+                        </Border>
+                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                            <TextBox x:Name="PreviewJson"
+                                     IsReadOnly="True"
+                                     AcceptsReturn="True"
+                                     Background="Transparent"
+                                     BorderThickness="0"
+                                     FontFamily="{StaticResource FontMono}"
+                                     FontSize="11"
+                                     Padding="14,10"
+                                     TextWrapping="NoWrap"/>
+                        </ScrollViewer>
+                    </DockPanel>
+                </Border>
+            </Grid>
+
+            <!-- Footer -->
+            <Border Grid.Row="2" Background="{StaticResource BgDeep}"
+                    BorderBrush="{StaticResource Border}" BorderThickness="0,1,0,0"
+                    Padding="20,12">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Style="{StaticResource MutedText}"
+                               x:Name="StatusText"
+                               VerticalAlignment="Center"
+                               Text="Pick a template, customize after creation"/>
+                    <StackPanel Grid.Column="1" Orientation="Horizontal">
+                        <Button Content="Cancel" Click="OnCancel"
+                                MinWidth="84" Margin="0,0,8,0"/>
+                        <Button x:Name="UseBtn"
+                                Content="Use template"
+                                Click="OnUse"
+                                Style="{StaticResource ButtonPrimary}"
+                                MinWidth="140"
+                                IsEnabled="False"/>
+                    </StackPanel>
+                </Grid>
+            </Border>
+        </Grid>
+    </Border>
+</Window>

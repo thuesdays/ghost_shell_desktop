@@ -39,11 +39,28 @@ public sealed class RealProfileRunner : IProfileRunner, IAsyncDisposable
     private readonly SessionLifecycle _sessionLifecycle;
     private readonly IScriptService? _scripts;       // optional — null in tests
     private readonly IScriptRunner?  _scriptRunner;  // optional — null in tests
+    private readonly IVaultService?  _vault;         // optional — null in tests / vault not yet enabled
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<RealProfileRunner> _log;
 
     private readonly ConcurrentDictionary<string, ActiveSession> _sessions =
         new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Phase 29 audit fix — set of profiles whose teardown is
+    /// in flight. The watchdog's external-close path TryRemoves the
+    /// session early (so the UI flips to "not running") then awaits
+    /// the slow chromedriver.Quit / forwarder dispose. During that
+    /// window, an immediate Start on the same profile would race
+    /// against the dying chromedriver process. We add the profile
+    /// here on entry to StopInternalAsync and remove it once the
+    /// teardown has fully unwound.</summary>
+    private readonly HashSet<string> _stopping =
+        new(StringComparer.OrdinalIgnoreCase);
+    private readonly object _stoppingLock = new();
+    private bool IsStopping(string profileName)
+    {
+        lock (_stoppingLock) return _stopping.Contains(profileName);
+    }
 
     /// <summary>
     /// Per-profile cancellation source for in-flight script runs.
@@ -59,19 +76,25 @@ public sealed class RealProfileRunner : IProfileRunner, IAsyncDisposable
 
     private bool _disposed;
 
+    private readonly ISelfCheckService? _selfCheck;
+
     public RealProfileRunner(
         IBrowserLauncher launcher,
         IRunService runs,
         SessionLifecycle sessionLifecycle,
         ILoggerFactory loggerFactory,
         IScriptService? scripts = null,
-        IScriptRunner?  scriptRunner = null)
+        IScriptRunner?  scriptRunner = null,
+        IVaultService?  vault = null,
+        ISelfCheckService? selfCheck = null)
     {
         _launcher         = launcher;
         _runs             = runs;
         _sessionLifecycle = sessionLifecycle;
         _scripts          = scripts;
         _scriptRunner     = scriptRunner;
+        _vault            = vault;
+        _selfCheck        = selfCheck;
         _loggerFactory    = loggerFactory;
         _log              = loggerFactory.CreateLogger<RealProfileRunner>();
     }
@@ -81,6 +104,15 @@ public sealed class RealProfileRunner : IProfileRunner, IAsyncDisposable
     public IReadOnlySet<string> ActiveProfileNames =>
         _sessions.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase);
 
+    public IBrowserSession? TryGetActiveSession(string profileName)
+    {
+        // Refuse during teardown so the caller can't drive a session
+        // that's about to dispose. The _stopping marker is set BEFORE
+        // we tear down the watchdog, so this is the right gate.
+        if (IsStopping(profileName)) return null;
+        return _sessions.TryGetValue(profileName, out var active) ? active.Session : null;
+    }
+
     public event EventHandler? ActiveChanged;
 
     public async Task<long> StartAsync(Profile profile, CancellationToken ct = default)
@@ -89,6 +121,14 @@ public sealed class RealProfileRunner : IProfileRunner, IAsyncDisposable
         if (_sessions.ContainsKey(profile.Name))
             throw new InvalidOperationException(
                 $"Profile '{profile.Name}' is already running.");
+        // Phase 29 audit fix — refuse to start while a previous
+        // teardown is still unwinding (chromedriver Quit + forwarder
+        // dispose + DB finalize). Otherwise a fast re-click after
+        // closing the window would race the dying chromedriver and
+        // produce a "DevToolsActivePort missing" launch failure.
+        if (IsStopping(profile.Name))
+            throw new InvalidOperationException(
+                $"Profile '{profile.Name}' is still finishing the previous run — try again in a moment.");
 
         // Stamp a row in `runs` BEFORE the launch — that way if the
         // launch crashes we still have a record (caller's catch block
@@ -154,6 +194,38 @@ public sealed class RealProfileRunner : IProfileRunner, IAsyncDisposable
         // and cancels cleanly.
         var scriptCts = new CancellationTokenSource();
         _scriptCts[profile.Name] = scriptCts;
+
+        // Phase 29 fix — fire the self-check probes in the background
+        // so the Fingerprint page's "Runtime self-check" panel actually
+        // populates after each launch. Previously the service was
+        // wired in DI but no caller invoked it, so the panel always
+        // read "No selfcheck data yet". The probes need a live session
+        // so we schedule them after the navigate-to-about:blank that
+        // chromedriver does at startup has settled (~3s). Fire-and-
+        // forget; failures only affect the panel, not the run itself.
+        if (_selfCheck is not null)
+        {
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(3), scriptCts.Token);
+                    await _selfCheck.RunAsync(
+                        session, profile.Name, runId,
+                        expectedTimezone: null,
+                        ct: scriptCts.Token);
+                    _log.LogInformation(
+                        "Self-check completed for '{Name}' (run #{Run})",
+                        profile.Name, runId);
+                }
+                catch (OperationCanceledException) { /* user stopped */ }
+                catch (Exception ex)
+                {
+                    _log.LogWarning(ex,
+                        "Self-check probes failed for '{Name}'", profile.Name);
+                }
+            });
+        }
 
         // Auto-restore the latest snapshot (Phase 4.2). Fire-and-
         // forget — restore can take a few seconds (per-origin
@@ -246,9 +318,31 @@ public sealed class RealProfileRunner : IProfileRunner, IAsyncDisposable
                 // domain filters and ad-aware conditions actually fire.
                 var myDomains = SplitDomainCsv(profile.MyDomainsCsv);
                 var tgDomains = SplitDomainCsv(profile.TargetDomainsCsv);
+                // Phase 24: pre-resolve vault refs from the script's
+                // payload (StepsJson + NodesJson). Decryption happens
+                // ONCE off the dispatch hot path, the runner then
+                // consults a small in-memory bag for {{vault.id.field}}
+                // expansion. If the vault is locked or the script
+                // references no items, the bag is empty — placeholders
+                // fall through to the literal text.
+                IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>>? vault = null;
+                if (_vault is not null && _vault.IsUnlocked)
+                {
+                    var refs = GhostShell.Runtime.Scripts.ScriptRunner.CollectVaultRefs(
+                        script.StepsJson, script.NodesJson);
+                    if (refs.Count > 0)
+                    {
+                        try { vault = await _vault.ResolveAsync(refs, cts.Token); }
+                        catch (Exception vex)
+                        {
+                            _log.LogWarning(vex,
+                                "Vault resolve failed; vault placeholders will fall through to literal text");
+                        }
+                    }
+                }
                 await _scriptRunner.ExecuteAsync(
                     script, session, profile.Name, cts.Token,
-                    myDomains, tgDomains);
+                    myDomains, tgDomains, vault);
             }
         }
         catch (OperationCanceledException)
@@ -304,9 +398,33 @@ public sealed class RealProfileRunner : IProfileRunner, IAsyncDisposable
     {
         if (!_sessions.TryRemove(profileName, out var active)) return false;
 
+        // Phase 29 audit fix — mark the profile as "teardown in
+        // progress" so a user clicking Start within the 5–10s
+        // chromedriver-quit window can be rejected (or queued) instead
+        // of racing the dying process. Cleared in the finally block.
+        lock (_stoppingLock) _stopping.Add(profileName);
+
         _log.LogInformation(
             "Stopping profile '{Name}' (run #{Run}, reason={Reason})",
             profileName, active.RunId, stopReason);
+
+        // Phase 29 fix — fire ActiveChanged IMMEDIATELY after the
+        // session leaves the active dict so the UI can flip the
+        // profile card out of "running" within a tick of the watchdog
+        // detecting the close. The previous behaviour fired the event
+        // ONLY at the end of teardown, which can take 5–10s while
+        // chromedriver.Quit() unwinds. Subscribers re-evaluate
+        // IsRunning by checking _sessions, so an early fire is safe.
+        try { ActiveChanged?.Invoke(this, EventArgs.Empty); }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "Early ActiveChanged subscriber threw for '{Name}'", profileName);
+        }
+
+        // Wrap the rest of teardown in try/finally so the _stopping
+        // marker is ALWAYS cleared, even if dispose throws.
+        try
+        {
 
         // Cancel the in-flight script (Phase 13). The script runner
         // observes ct.IsCancellationRequested between steps and
@@ -378,6 +496,16 @@ public sealed class RealProfileRunner : IProfileRunner, IAsyncDisposable
 
         ActiveChanged?.Invoke(this, EventArgs.Empty);
         return true;
+        }
+        finally
+        {
+            // Phase 29 audit fix — clear the teardown marker so the
+            // user can launch this profile again. Doing it here (after
+            // disposing the session, the watchdog, and finalising the
+            // run row) is the safest moment because chromedriver and
+            // the auth-proxy forwarder have fully unwound.
+            lock (_stoppingLock) _stopping.Remove(profileName);
+        }
     }
 
     public async Task StopAllAsync(CancellationToken ct = default)

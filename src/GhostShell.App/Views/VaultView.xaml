@@ -1,0 +1,232 @@
+<!--
+  SPDX-License-Identifier: MIT
+  Copyright (c) 2026 Mykola Kovhanko <thuesdays@gmail.com>
+
+  Phase 25 — Credential Vault page.
+
+  Header: title + subtitle + toolbar (Lock / Unlock / + Add).
+  Locked state: empty state with single "Unlock vault" CTA.
+  Unlocked state: search + kind filter + DataGrid of items with
+  edit / delete actions.
+-->
+<UserControl x:Class="GhostShell.App.Views.VaultView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="clr-namespace:GhostShell.App.ViewModels"
+             xmlns:m="clr-namespace:GhostShell.Core.Models;assembly=GhostShell.Core"
+             d:DataContext="{d:DesignInstance vm:VaultViewModel}"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d"
+             Background="{StaticResource BgBase}">
+    <Grid Margin="24,20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>  <!-- header -->
+            <RowDefinition Height="Auto"/>  <!-- filter bar -->
+            <RowDefinition Height="*"/>     <!-- list -->
+        </Grid.RowDefinitions>
+
+        <!-- ─── Header + toolbar ───
+             Title + buttons share row 0; subtitle gets the full width
+             on row 1 so long descriptions don't get squeezed by the
+             toolbar at narrow window sizes. -->
+        <Grid Grid.Row="0" Margin="0,0,0,12">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            <Grid Grid.Row="0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" Style="{StaticResource PageTitle}"
+                           Text="🔐  Credential Vault"
+                           VerticalAlignment="Center"
+                           TextTrimming="CharacterEllipsis"/>
+                <WrapPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button Content="🔑  Change password"
+                            Command="{Binding ChangeMasterPasswordCommand}"
+                            Margin="0,0,8,4"
+                            ToolTip="Rotate the master passphrase. Re-encrypts every item in one transaction."
+                            Visibility="{Binding IsUnlocked, Converter={StaticResource BoolToVis}}"/>
+                    <Button Content="🔒  Lock"
+                            Command="{Binding LockCommand}"
+                            Margin="0,0,8,4"
+                            ToolTip="Drop the in-memory master key. Items stay encrypted on disk."
+                            Visibility="{Binding IsUnlocked, Converter={StaticResource BoolToVis}}"/>
+                    <Button Content="🔓  Unlock"
+                            Command="{Binding UnlockCommand}"
+                            Margin="0,0,8,4"
+                            Style="{StaticResource ButtonPrimary}"
+                            Visibility="{Binding IsUnlocked, Converter={StaticResource InverseBoolToVis}}"/>
+                    <Button Content="+  Add item"
+                            Command="{Binding AddCommand}"
+                            Style="{StaticResource ButtonPrimary}"
+                            MinWidth="120" Margin="0,0,0,4"
+                            Visibility="{Binding IsUnlocked, Converter={StaticResource BoolToVis}}"/>
+                </WrapPanel>
+            </Grid>
+            <Border Grid.Row="1" Style="{StaticResource Card}"
+                    Padding="14,10" Margin="0,12,0,0">
+                <TextBlock Style="{StaticResource PageSubtitle}"
+                           TextWrapping="Wrap"
+                           Text="Encrypted credentials referenced from scripts as {{vault.id.field}}. Every secret is wrapped with AES-256-GCM under your master passphrase. Lock the vault any time to drop the in-memory key."/>
+            </Border>
+        </Grid>
+
+        <!-- ─── Filter bar (only when unlocked) ─── -->
+        <Border Grid.Row="1" Style="{StaticResource Card}" Padding="14,10" Margin="0,0,0,8"
+                Visibility="{Binding IsUnlocked, Converter={StaticResource BoolToVis}}">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <TextBox Grid.Column="0"
+                         Text="{Binding SearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                         ToolTip="Filter by name, identifier, notes, tags"/>
+                <ComboBox Grid.Column="1" Margin="12,0,0,0"
+                          MinWidth="160"
+                          ItemsSource="{Binding KindFilters}"
+                          SelectedItem="{Binding KindFilter}"
+                          ToolTip="Filter by kind"/>
+                <StackPanel Grid.Column="2" Orientation="Horizontal" Margin="16,0,0,0"
+                            VerticalAlignment="Center"
+                            ToolTip="Lock the vault automatically after this many minutes of idle time. 0 = never auto-lock.">
+                    <TextBlock Text="Auto-lock (min):" VerticalAlignment="Center"
+                               Margin="0,0,8,0"
+                               Foreground="{StaticResource TextDim}" FontSize="11"/>
+                    <TextBox Width="60" Text="{Binding AutoLockMinutes, Mode=TwoWay, UpdateSourceTrigger=LostFocus}"
+                             VerticalContentAlignment="Center"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- ─── Locked state ─── -->
+        <Border Grid.Row="2" Style="{StaticResource Card}" Padding="40"
+                HorizontalAlignment="Center" VerticalAlignment="Center"
+                MaxWidth="520"
+                Visibility="{Binding IsUnlocked, Converter={StaticResource InverseBoolToVis}}">
+            <StackPanel HorizontalAlignment="Center">
+                <TextBlock FontSize="44" HorizontalAlignment="Center"
+                           Foreground="{StaticResource TextDim}" Text="🔒"/>
+                <TextBlock Margin="0,10,0,6" HorizontalAlignment="Center"
+                           Style="{StaticResource PageTitle}" FontSize="16"
+                           Text="Vault locked"
+                           Visibility="{Binding IsInitialized, Converter={StaticResource BoolToVis}}"/>
+                <TextBlock Margin="0,10,0,6" HorizontalAlignment="Center"
+                           Style="{StaticResource PageTitle}" FontSize="16"
+                           Text="First-time setup"
+                           Visibility="{Binding IsInitialized, Converter={StaticResource InverseBoolToVis}}"/>
+                <TextBlock HorizontalAlignment="Center"
+                           Style="{StaticResource MutedText}"
+                           Margin="0,0,0,16"
+                           TextWrapping="Wrap"
+                           Text="Enter the master passphrase to decrypt your stored credentials. The key only lives in memory while the vault is unlocked — Lock any time to wipe it."/>
+                <Button Content="🔓  Unlock vault"
+                        Command="{Binding UnlockCommand}"
+                        Style="{StaticResource ButtonPrimary}"
+                        HorizontalAlignment="Center"
+                        MinWidth="180"/>
+            </StackPanel>
+        </Border>
+
+        <!-- ─── Items grid ─── -->
+        <Grid Grid.Row="2"
+              Visibility="{Binding IsUnlocked, Converter={StaticResource BoolToVis}}">
+            <!-- Empty state when unlocked + zero items -->
+            <Border Style="{StaticResource Card}" Padding="40"
+                    HorizontalAlignment="Center" VerticalAlignment="Center"
+                    Visibility="{Binding IsEmpty, Converter={StaticResource BoolToVis}}">
+                <StackPanel HorizontalAlignment="Center">
+                    <TextBlock FontSize="44" HorizontalAlignment="Center"
+                               Foreground="{StaticResource TextDim}" Text="∅"/>
+                    <TextBlock Margin="0,10,0,6" HorizontalAlignment="Center"
+                               Style="{StaticResource PageTitle}" FontSize="16"
+                               Text="No vault items yet"/>
+                    <TextBlock HorizontalAlignment="Center"
+                               Style="{StaticResource MutedText}"
+                               Margin="0,0,0,16"
+                               TextWrapping="Wrap"
+                               Text="Add your first credential. Reference it from scripts via {{vault.&lt;id&gt;.&lt;field&gt;}}."/>
+                    <Button Content="+  Add first item"
+                            Command="{Binding AddCommand}"
+                            Style="{StaticResource ButtonPrimary}"
+                            MinWidth="160"/>
+                </StackPanel>
+            </Border>
+
+            <DataGrid ItemsSource="{Binding Items}"
+                      AutoGenerateColumns="False"
+                      CanUserAddRows="False"
+                      CanUserDeleteRows="False"
+                      CanUserResizeRows="False"
+                      HeadersVisibility="Column"
+                      SelectionMode="Single"
+                      Visibility="{Binding IsEmpty, Converter={StaticResource InverseBoolToVis}}">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="Name"
+                                        Binding="{Binding Name}" Width="*"/>
+                    <DataGridTextColumn Header="Kind"
+                                        Binding="{Binding Kind}" Width="120"/>
+                    <DataGridTextColumn Header="Service"
+                                        Binding="{Binding Service}" Width="120"/>
+                    <DataGridTextColumn Header="Identifier"
+                                        Binding="{Binding Identifier}" Width="200"/>
+                    <DataGridTextColumn Header="Profile"
+                                        Binding="{Binding ProfileName}" Width="140"/>
+                    <DataGridTextColumn Header="Status"
+                                        Binding="{Binding Status}" Width="100"/>
+                    <!-- Phase 26 — TOTP code + countdown for totp_only rows.
+                         Empty for non-TOTP rows; the per-second timer in
+                         VaultViewModel re-fires .RefreshTotp() so the
+                         display updates live. -->
+                    <DataGridTemplateColumn Header="TOTP" Width="120">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <StackPanel Orientation="Horizontal"
+                                            Visibility="{Binding IsTotp, Converter={StaticResource BoolToVis}}"
+                                            ToolTip="Live RFC 6238 code — rolls over every 30 seconds.">
+                                    <TextBlock Text="{Binding TotpCode}"
+                                               FontFamily="Consolas" FontSize="13"
+                                               Foreground="{StaticResource Accent}"
+                                               VerticalAlignment="Center"/>
+                                    <TextBlock Text="{Binding TotpRemaining, StringFormat='  ({0}s)'}"
+                                               FontSize="10"
+                                               Foreground="{StaticResource TextDim}"
+                                               VerticalAlignment="Center"
+                                               Margin="0,0,0,0"/>
+                                </StackPanel>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                    <DataGridTextColumn Header="Updated"
+                                        Binding="{Binding UpdatedAt, StringFormat='yyyy-MM-dd HH:mm'}"
+                                        Width="140"/>
+                    <DataGridTemplateColumn Header="" Width="120">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                                    <Button Content="✎"
+                                            Style="{StaticResource RowActionButton}"
+                                            Command="{Binding DataContext.EditCommand,
+                                                      RelativeSource={RelativeSource AncestorType=DataGrid}}"
+                                            CommandParameter="{Binding}"
+                                            ToolTip="Edit"/>
+                                    <Button Content="🗑"
+                                            Style="{StaticResource RowActionDanger}"
+                                            Command="{Binding DataContext.DeleteCommand,
+                                                      RelativeSource={RelativeSource AncestorType=DataGrid}}"
+                                            CommandParameter="{Binding}"
+                                            ToolTip="Delete"/>
+                                </StackPanel>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                </DataGrid.Columns>
+            </DataGrid>
+        </Grid>
+    </Grid>
+</UserControl>

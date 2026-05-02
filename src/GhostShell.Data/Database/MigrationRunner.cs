@@ -40,6 +40,10 @@ public sealed class MigrationRunner
         (12, Migrations_V12.Sql),
     ];
 
+    // Phase 37 audit fix #4: All known migration versions including tolerant ones (11, 13-23).
+    // Used to detect downgrade scenario where DB schema is newer than binary's knowledge.
+    private static readonly int[] KnownVersions = new[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23 };
+
     public void Run()
     {
         var conn = _db.Get();
@@ -47,6 +51,28 @@ public sealed class MigrationRunner
         EnsureVersionTable(conn);
 
         var applied = LoadAppliedVersions(conn);
+
+        // Phase 37 audit fix #4: Detect downgrade (DB newer than binary).
+        // If the DB has schema versions this binary doesn't know about,
+        // log a warning but proceed read/write (don't abort).
+        if (applied.Count > 0)
+        {
+            var maxAppliedVersion = applied.Max();
+            var maxKnownVersion = KnownVersions.Max();
+            if (maxAppliedVersion > maxKnownVersion)
+            {
+                // CA2017 — one named placeholder per arg. The previous form
+                // referenced {Known} twice but only passed maxKnownVersion
+                // once. Roslyn's logging analyzer counts ALL occurrences
+                // of a placeholder. Rename the second to {Known2} so we
+                // can supply it explicitly.
+                _log.LogWarning(
+                    "Database is at schema version {Applied} but this binary only knows up to {Known}. " +
+                    "You may have downgraded — proceeding read/write but DB schema features beyond v{Known2} are inaccessible.",
+                    maxAppliedVersion, maxKnownVersion, maxKnownVersion);
+            }
+        }
+
         foreach (var (version, sql) in Migrations)
         {
             if (applied.Contains(version)) continue;
@@ -71,6 +97,66 @@ public sealed class MigrationRunner
         if (!applied.Contains(14))
         {
             ApplyTolerantStatements(conn, 14, Migrations_V14.Statements);
+        }
+
+        // V15 — profiles.my_domains + target_domains (Phase 20).
+        if (!applied.Contains(15))
+        {
+            ApplyTolerantStatements(conn, 15, Migrations_V15.Statements);
+        }
+
+        // V16 — scripts.layout_mode + nodes_json + edges_json (Phase 21).
+        if (!applied.Contains(16))
+        {
+            ApplyTolerantStatements(conn, 16, Migrations_V16.Statements);
+        }
+
+        // V17 — vault_items + vault_config (Phase 24, Credential Vault).
+        if (!applied.Contains(17))
+        {
+            ApplyTolerantStatements(conn, 17, Migrations_V17.Statements);
+        }
+
+        // V18 — extensions + profile_extensions + extension_store_cache
+        // (Phase 27, Browser Extensions).
+        if (!applied.Contains(18))
+        {
+            ApplyTolerantStatements(conn, 18, Migrations_V18.Statements);
+        }
+
+        // V19 — traffic_stats hourly bandwidth accounting (Phase 28).
+        if (!applied.Contains(19))
+        {
+            ApplyTolerantStatements(conn, 19, Migrations_V19.Statements);
+        }
+
+        // V20 — app_settings + notifications (Phase 29).
+        if (!applied.Contains(20))
+        {
+            ApplyTolerantStatements(conn, 20, Migrations_V20.Statements);
+        }
+
+        // V21 — external tester results (Phase 31 follow-up).
+        if (!applied.Contains(21))
+        {
+            ApplyTolerantStatements(conn, 21, Migrations_V21.Statements);
+        }
+
+        // V22 — Advertisement section (Phase 34): domain_lists,
+        // competitor_records, action_events, runs.ip_used,
+        // overview_widgets.
+        if (!applied.Contains(22))
+        {
+            ApplyTolerantStatements(conn, 22, Migrations_V22.Statements);
+        }
+
+        // V23 — drop+recreate competitor_records + action_events to
+        // fix dev-machine DBs that landed an early V22 with a
+        // different column shape. See Migrations_V23.cs for the full
+        // rationale. Cheap on fresh installs (drops are no-ops).
+        if (!applied.Contains(23))
+        {
+            ApplyTolerantStatements(conn, 23, Migrations_V23.Statements);
         }
     }
 

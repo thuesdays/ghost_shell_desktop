@@ -70,7 +70,16 @@ public sealed class ConditionEvaluator
                 var name = ParamString(cond.Params, "name") ?? "";
                 var pat  = ParamString(cond.Params, "pattern") ?? "";
                 if (!ctx.Vars.TryGetValue(name, out var v)) return false;
-                try { return System.Text.RegularExpressions.Regex.IsMatch(v, pat); }
+                // Phase 21 audit fix: defend against ReDoS (catastrophic
+                // backtracking on a malicious pattern + non-matching
+                // input). 200ms is generous for any reasonable regex.
+                try
+                {
+                    return System.Text.RegularExpressions.Regex.IsMatch(
+                        v, pat,
+                        System.Text.RegularExpressions.RegexOptions.None,
+                        TimeSpan.FromMilliseconds(200));
+                }
                 catch { return false; }
             }
 
@@ -91,7 +100,14 @@ public sealed class ConditionEvaluator
             {
                 var pat = ParamString(cond.Params, "pattern") ?? "";
                 var url = await GetUrlAsync(session, ct);
-                try { return System.Text.RegularExpressions.Regex.IsMatch(url, pat); }
+                // Phase 21 audit fix: regex timeout (ReDoS guard).
+                try
+                {
+                    return System.Text.RegularExpressions.Regex.IsMatch(
+                        url, pat,
+                        System.Text.RegularExpressions.RegexOptions.None,
+                        TimeSpan.FromMilliseconds(200));
+                }
                 catch { return false; }
             }
 

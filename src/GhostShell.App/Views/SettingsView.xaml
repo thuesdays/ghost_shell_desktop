@@ -1,6 +1,12 @@
 <!--
   SPDX-License-Identifier: MIT
   Copyright (c) 2026 Mykola Kovhanko <thuesdays@gmail.com>
+
+  Phase 30 — tabbed Settings layout. Left rail lists every section;
+  click flips ActiveTab on the VM. The body shows ONE section at a
+  time using StringEqualsVis converter so the page stays compact and
+  the long forms (Performance / Auto-enrich) don't drown out the
+  high-traffic ones (Build info / UA spoof).
 -->
 <UserControl x:Class="GhostShell.App.Views.SettingsView"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -12,203 +18,293 @@
              mc:Ignorable="d"
              Background="Transparent">
 
-    <ScrollViewer VerticalScrollBarVisibility="Auto">
-        <StackPanel Margin="24,20" MaxWidth="900" HorizontalAlignment="Stretch">
+    <Grid Margin="24,20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <!-- Header -->
+        <StackPanel Grid.Row="0" Margin="0,0,0,16">
             <TextBlock Style="{StaticResource PageTitle}" Text="Settings"/>
-            <TextBlock Style="{StaticResource PageSubtitle}"
-                       Margin="0,2,0,16"
-                       Text="Application paths, version, and integration."/>
-
-            <!-- ─── STORAGE ─── -->
-            <Border Style="{StaticResource Card}" Margin="0,0,0,12">
-                <StackPanel>
-                    <Grid>
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="Auto"/>
-                        </Grid.ColumnDefinitions>
-                        <TextBlock Grid.Column="0" Style="{StaticResource CardHeader}" Text="STORAGE"/>
-                        <Button Grid.Column="1" Content="Open data folder"
-                                Command="{Binding OpenDataFolderCommand}"
-                                Margin="0,0,0,4"/>
-                    </Grid>
-                    <Grid Margin="0,4,0,0">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="160"/>
-                            <ColumnDefinition Width="*"/>
-                        </Grid.ColumnDefinitions>
-                        <Grid.RowDefinitions>
-                            <RowDefinition/>
-                            <RowDefinition/>
-                        </Grid.RowDefinitions>
-                        <TextBlock Style="{StaticResource MutedText}" Text="Data directory" Grid.Row="0" Grid.Column="0" Margin="0,4,0,4"/>
-                        <TextBlock Style="{StaticResource MonoText}" Text="{Binding DataDirectory}"
-                                   TextWrapping="Wrap" Grid.Row="0" Grid.Column="1" Margin="0,4,0,4"/>
-                        <TextBlock Style="{StaticResource MutedText}" Text="Database" Grid.Row="1" Grid.Column="0" Margin="0,4,0,4"/>
-                        <TextBlock Style="{StaticResource MonoText}" Text="{Binding DatabasePath}"
-                                   TextWrapping="Wrap" Grid.Row="1" Grid.Column="1" Margin="0,4,0,4"/>
-                    </Grid>
-                </StackPanel>
-            </Border>
-
-            <!-- ─── LOGS ─── -->
-            <Border Style="{StaticResource Card}" Margin="0,0,0,12">
-                <StackPanel>
-                    <Grid>
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="Auto"/>
-                        </Grid.ColumnDefinitions>
-                        <TextBlock Grid.Column="0" Style="{StaticResource CardHeader}" Text="LOGS"/>
-                        <Button Grid.Column="1" Content="Open logs folder"
-                                Command="{Binding OpenLogsFolderCommand}"
-                                Margin="0,0,0,4"/>
-                    </Grid>
-                    <Grid Margin="0,4,0,0">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="160"/>
-                            <ColumnDefinition Width="*"/>
-                        </Grid.ColumnDefinitions>
-                        <Grid.RowDefinitions>
-                            <RowDefinition/>
-                            <RowDefinition/>
-                            <RowDefinition/>
-                        </Grid.RowDefinitions>
-                        <TextBlock Style="{StaticResource MutedText}" Text="Logs directory" Grid.Row="0" Grid.Column="0" Margin="0,4,0,4"/>
-                        <TextBlock Style="{StaticResource MonoText}" Text="{Binding LogsDirectory}"
-                                   TextWrapping="Wrap" Grid.Row="0" Grid.Column="1" Margin="0,4,0,4"/>
-                        <TextBlock Style="{StaticResource MutedText}" Text="Today's log" Grid.Row="1" Grid.Column="0" Margin="0,4,0,4"/>
-                        <TextBlock Style="{StaticResource MonoText}" Text="{Binding CurrentLogFile}"
-                                   TextWrapping="Wrap" Grid.Row="1" Grid.Column="1" Margin="0,4,0,4"/>
-                        <TextBlock Style="{StaticResource MutedText}" Text="Retention" Grid.Row="2" Grid.Column="0" Margin="0,4,0,4"/>
-                        <TextBlock Style="{StaticResource MonoText}" Text="14 days, 50 MB / file (rolls daily + on cap)"
-                                   Grid.Row="2" Grid.Column="1" Margin="0,4,0,4"/>
-                    </Grid>
-                </StackPanel>
-            </Border>
-
-            <!-- ─── BROWSER ENGINE (patched Chromium status) ─── -->
-            <Border Style="{StaticResource Card}" Margin="0,0,0,12">
-                <StackPanel>
-                    <Grid>
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="Auto"/>
-                        </Grid.ColumnDefinitions>
-                        <TextBlock Grid.Column="0" Style="{StaticResource CardHeader}" Text="BROWSER ENGINE"/>
-                        <StackPanel Grid.Column="1" Orientation="Horizontal">
-                            <Button Content="Probe again"
-                                    Command="{Binding ProbeChromiumCommand}"
-                                    Margin="0,0,8,0"/>
-                            <Button Content="Open folder"
-                                    Command="{Binding OpenChromiumFolderCommand}"
-                                    IsEnabled="{Binding ChromiumFound}"/>
-                        </StackPanel>
-                    </Grid>
-
-                    <!-- Status banner — success when located, error otherwise -->
-                    <Border Margin="0,8,0,12"
-                            Style="{StaticResource InfoBannerSuccess}"
-                            Visibility="{Binding ChromiumFound, Converter={StaticResource BoolToVis}}">
-                        <Grid>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="Auto"/>
-                                <ColumnDefinition Width="*"/>
-                            </Grid.ColumnDefinitions>
-                            <TextBlock Grid.Column="0"
-                                       FontFamily="Segoe MDL2 Assets" FontSize="18"
-                                       Foreground="{StaticResource OkBrush}"
-                                       Text="&#xE73E;"
-                                       VerticalAlignment="Center" Margin="0,0,12,0"/>
-                            <StackPanel Grid.Column="1">
-                                <TextBlock Style="{StaticResource InfoBannerTitle}"
-                                           Text="{Binding ChromiumStatusMessage}"/>
-                                <TextBlock Style="{StaticResource InfoBannerBody}"
-                                           Text="Profile launches will use this Chromium build."/>
-                            </StackPanel>
-                        </Grid>
-                    </Border>
-                    <Border Margin="0,8,0,12"
-                            Style="{StaticResource InfoBannerError}"
-                            Visibility="{Binding ChromiumFound, Converter={StaticResource InverseBoolToVis}}">
-                        <Grid>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="Auto"/>
-                                <ColumnDefinition Width="*"/>
-                            </Grid.ColumnDefinitions>
-                            <TextBlock Grid.Column="0"
-                                       FontFamily="Segoe MDL2 Assets" FontSize="18"
-                                       Foreground="{StaticResource ErrBrush}"
-                                       Text="&#xE783;"
-                                       VerticalAlignment="Center" Margin="0,0,12,0"/>
-                            <StackPanel Grid.Column="1">
-                                <TextBlock Style="{StaticResource InfoBannerTitle}"
-                                           Text="Patched Chromium not found"/>
-                                <TextBlock Style="{StaticResource InfoBannerBody}"
-                                           Text="{Binding ChromiumStatusMessage}"/>
-                            </StackPanel>
-                        </Grid>
-                    </Border>
-
-                    <Grid>
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="160"/>
-                            <ColumnDefinition Width="*"/>
-                        </Grid.ColumnDefinitions>
-                        <Grid.RowDefinitions>
-                            <RowDefinition/>
-                            <RowDefinition/>
-                            <RowDefinition/>
-                            <RowDefinition/>
-                            <RowDefinition/>
-                        </Grid.RowDefinitions>
-                        <TextBlock Style="{StaticResource MutedText}" Text="Chrome binary"
-                                   Grid.Row="0" Grid.Column="0" Margin="0,4,0,4"/>
-                        <TextBlock Style="{StaticResource MonoText}" Text="{Binding ChromiumPath}"
-                                   TextWrapping="Wrap"
-                                   Grid.Row="0" Grid.Column="1" Margin="0,4,0,4"/>
-                        <TextBlock Style="{StaticResource MutedText}" Text="ChromeDriver"
-                                   Grid.Row="1" Grid.Column="0" Margin="0,4,0,4"/>
-                        <TextBlock Style="{StaticResource MonoText}" Text="{Binding ChromedriverPath}"
-                                   TextWrapping="Wrap"
-                                   Grid.Row="1" Grid.Column="1" Margin="0,4,0,4"/>
-                        <TextBlock Style="{StaticResource MutedText}" Text="Version"
-                                   Grid.Row="2" Grid.Column="0" Margin="0,4,0,4"/>
-                        <TextBlock Style="{StaticResource MonoText}" Text="{Binding ChromiumVersion}"
-                                   Grid.Row="2" Grid.Column="1" Margin="0,4,0,4"/>
-                        <TextBlock Style="{StaticResource MutedText}" Text="Source"
-                                   Grid.Row="3" Grid.Column="0" Margin="0,4,0,4"/>
-                        <TextBlock Style="{StaticResource MonoText}" Text="{Binding ChromiumProbedFrom}"
-                                   Grid.Row="3" Grid.Column="1" Margin="0,4,0,4"/>
-                        <TextBlock Style="{StaticResource MutedText}" Text="Override env"
-                                   Grid.Row="4" Grid.Column="0" Margin="0,4,0,4"/>
-                        <TextBlock Style="{StaticResource MonoText}"
-                                   Text="GHOSTSHELL_CHROMIUM_DIR"
-                                   Grid.Row="4" Grid.Column="1" Margin="0,4,0,4"/>
-                    </Grid>
-                </StackPanel>
-            </Border>
-
-            <!-- ─── ABOUT ─── -->
-            <Border Style="{StaticResource Card}">
-                <StackPanel>
-                    <TextBlock Style="{StaticResource CardHeader}" Text="ABOUT"/>
-                    <Grid Margin="0,4,0,0">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="160"/>
-                            <ColumnDefinition Width="*"/>
-                        </Grid.ColumnDefinitions>
-                        <Grid.RowDefinitions>
-                            <RowDefinition/>
-                            <RowDefinition/>
-                        </Grid.RowDefinitions>
-                        <TextBlock Style="{StaticResource MutedText}" Text="App version" Grid.Row="0" Grid.Column="0" Margin="0,4,0,4"/>
-                        <TextBlock Style="{StaticResource MonoText}" Text="{Binding AppVersion}" Grid.Row="0" Grid.Column="1" Margin="0,4,0,4"/>
-                        <TextBlock Style="{StaticResource MutedText}" Text="Phase" Grid.Row="1" Grid.Column="0" Margin="0,4,0,4"/>
-                        <TextBlock Style="{StaticResource MonoText}" Text="2 — CRUD + logging" Grid.Row="1" Grid.Column="1" Margin="0,4,0,4"/>
-                    </Grid>
-                </StackPanel>
+            <Border Style="{StaticResource Card}" Padding="14,10" Margin="0,12,0,0">
+                <TextBlock Style="{StaticResource PageSubtitle}"
+                           TextWrapping="Wrap"
+                           Text="Build info, UA spoof, performance, backup &amp; restore."/>
             </Border>
         </StackPanel>
-    </ScrollViewer>
+
+        <!-- Two-column body: rail + content -->
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="220"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- ─── LEFT RAIL ─── -->
+            <Border Grid.Column="0" Style="{StaticResource Card}" Padding="6"
+                    VerticalAlignment="Top" Margin="0,0,12,0">
+                <ItemsControl ItemsSource="{Binding Tabs}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Button Command="{Binding DataContext.SetActiveTabCommand,
+                                              RelativeSource={RelativeSource AncestorType=ItemsControl}}"
+                                    CommandParameter="{Binding Id}"
+                                    HorizontalContentAlignment="Left"
+                                    Padding="12,8"
+                                    Margin="2"
+                                    BorderThickness="0"
+                                    Cursor="Hand">
+                                <Button.Style>
+                                    <Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+                                        <Setter Property="Background" Value="Transparent"/>
+                                        <Setter Property="Foreground" Value="{StaticResource Text}"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Value="True">
+                                                <DataTrigger.Binding>
+                                                    <MultiBinding Converter="{StaticResource StringEqualsBool}">
+                                                        <Binding Path="DataContext.ActiveTab"
+                                                                 RelativeSource="{RelativeSource AncestorType=ItemsControl}"/>
+                                                        <Binding Path="Id"/>
+                                                    </MultiBinding>
+                                                </DataTrigger.Binding>
+                                                <Setter Property="Background" Value="{StaticResource AccentSoft}"/>
+                                                <Setter Property="Foreground" Value="{StaticResource Accent}"/>
+                                                <Setter Property="FontWeight" Value="SemiBold"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Button.Style>
+                                <TextBlock Text="{Binding Label}" FontSize="12"/>
+                            </Button>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </Border>
+
+            <!-- ─── CONTENT ─── -->
+            <ScrollViewer Grid.Column="1" VerticalScrollBarVisibility="Auto">
+                <StackPanel>
+
+                    <!-- BUILD INFO -->
+                    <StackPanel Visibility="{Binding ActiveTab, Converter={StaticResource StringEqualsVis}, ConverterParameter=build-info}">
+                        <Border Style="{StaticResource Card}" Margin="0,0,0,12">
+                            <StackPanel>
+                                <TextBlock Style="{StaticResource CardHeader}" Text="🚀  BUILD INFO"/>
+                                <TextBlock Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,4,0,10"
+                                           Text="Versions baked into the custom Chromium binary. The engine is whatever Chromium source you compiled — that's what the browser actually runs. The UA spoof is what Ghost Shell claims it is to the outside world."/>
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="160"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition/><RowDefinition/>
+                                    </Grid.RowDefinitions>
+                                    <TextBlock Style="{StaticResource MutedText}" Text="Chromium engine"  Grid.Row="0" Grid.Column="0" Margin="0,4"/>
+                                    <TextBlock Style="{StaticResource MonoText}" Text="{Binding ChromiumVersion}" Grid.Row="0" Grid.Column="1" Margin="0,4"/>
+                                    <TextBlock Style="{StaticResource MutedText}" Text="App version"      Grid.Row="1" Grid.Column="0" Margin="0,4"/>
+                                    <TextBlock Style="{StaticResource MonoText}" Text="{Binding AppVersion}" Grid.Row="1" Grid.Column="1" Margin="0,4"/>
+                                </Grid>
+                            </StackPanel>
+                        </Border>
+                        <Border Style="{StaticResource Card}">
+                            <StackPanel>
+                                <TextBlock Style="{StaticResource CardHeader}" Text="STORAGE"/>
+                                <Grid Margin="0,4,0,0">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="160"/>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition/><RowDefinition/><RowDefinition/>
+                                    </Grid.RowDefinitions>
+                                    <TextBlock Style="{StaticResource MutedText}" Text="Data directory" Grid.Row="0" Grid.Column="0" Margin="0,4"/>
+                                    <TextBlock Style="{StaticResource MonoText}" Text="{Binding DataDirectory}" Grid.Row="0" Grid.Column="1" Margin="0,4" TextWrapping="Wrap"/>
+                                    <Button Grid.Row="0" Grid.Column="2" Content="Open" Command="{Binding OpenDataFolderCommand}" Margin="8,2,0,0"/>
+                                    <TextBlock Style="{StaticResource MutedText}" Text="Database" Grid.Row="1" Grid.Column="0" Margin="0,4"/>
+                                    <TextBlock Style="{StaticResource MonoText}" Text="{Binding DatabasePath}" Grid.Row="1" Grid.Column="1" Margin="0,4" TextWrapping="Wrap"/>
+                                    <TextBlock Style="{StaticResource MutedText}" Text="Logs directory" Grid.Row="2" Grid.Column="0" Margin="0,4"/>
+                                    <TextBlock Style="{StaticResource MonoText}" Text="{Binding LogsDirectory}" Grid.Row="2" Grid.Column="1" Margin="0,4" TextWrapping="Wrap"/>
+                                    <Button Grid.Row="2" Grid.Column="2" Content="Open" Command="{Binding OpenLogsFolderCommand}" Margin="8,2,0,0"/>
+                                </Grid>
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+
+                    <!-- UA SPOOF -->
+                    <Border Style="{StaticResource Card}"
+                            Visibility="{Binding ActiveTab, Converter={StaticResource StringEqualsVis}, ConverterParameter=ua-spoof}">
+                        <StackPanel>
+                            <TextBlock Style="{StaticResource CardHeader}" Text="🎭  UA SPOOF RANGE"/>
+                            <TextBlock Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,4,0,10"
+                                       Text="When Ghost Shell generates a fingerprint, it picks a Chrome major version from this range. Newer stable versions are picked more often — keep close to the current Chrome stable."/>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0" Margin="0,0,8,0">
+                                    <TextBlock Style="{StaticResource MutedText}" Text="Minimum major"/>
+                                    <TextBox Text="{Binding UaSpoofMin, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" Margin="0,4,0,0"/>
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" Margin="8,0,0,0">
+                                    <TextBlock Style="{StaticResource MutedText}" Text="Maximum major"/>
+                                    <TextBox Text="{Binding UaSpoofMax, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" Margin="0,4,0,0"/>
+                                </StackPanel>
+                            </Grid>
+                            <TextBlock Style="{StaticResource MutedText}" Text="Current pool (preview)" Margin="0,12,0,4"/>
+                            <TextBlock Style="{StaticResource MonoText}" Text="{Binding UaPoolPreview}"
+                                       TextWrapping="Wrap" FontSize="10"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- SERP ENGAGEMENT -->
+                    <Border Style="{StaticResource Card}"
+                            Visibility="{Binding ActiveTab, Converter={StaticResource StringEqualsVis}, ConverterParameter=serp}">
+                        <StackPanel>
+                            <TextBlock Style="{StaticResource CardHeader}" Text="🍯  SERP ENGAGEMENT"/>
+                            <TextBlock Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,4,0,10"
+                                       Text="After a search, Ghost Shell can simulate realistic user behaviour (scroll, dwell, click an organic result) before moving on."/>
+                            <CheckBox Content="Scroll the SERP — 3-6 steps with reading pauses" IsChecked="{Binding SerpScroll, Mode=TwoWay}" Margin="0,4,0,0"/>
+                            <CheckBox Content="Dwell on SERP (3-9s with micro-scrolls)" IsChecked="{Binding SerpDwell, Mode=TwoWay}" Margin="0,4,0,0"/>
+                            <CheckBox Content="Occasionally click an organic result and read it" IsChecked="{Binding OrganicClick, Mode=TwoWay}" Margin="0,4,0,8"/>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0" Margin="0,0,6,0">
+                                    <TextBlock Style="{StaticResource MutedText}" Text="Click probability (0..1)"/>
+                                    <TextBox Text="{Binding OrganicClickProb, Mode=TwoWay, UpdateSourceTrigger=LostFocus, StringFormat=F2}" Margin="0,4,0,0"/>
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" Margin="6,0,6,0">
+                                    <TextBlock Style="{StaticResource MutedText}" Text="Dwell min (sec)"/>
+                                    <TextBox Text="{Binding OrganicDwellMin, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" Margin="0,4,0,0"/>
+                                </StackPanel>
+                                <StackPanel Grid.Column="2" Margin="6,0,0,0">
+                                    <TextBlock Style="{StaticResource MutedText}" Text="Dwell max (sec)"/>
+                                    <TextBox Text="{Binding OrganicDwellMax, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" Margin="0,4,0,0"/>
+                                </StackPanel>
+                            </Grid>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- PERFORMANCE — RESOURCE BLOCKING -->
+                    <Border Style="{StaticResource Card}"
+                            Visibility="{Binding ActiveTab, Converter={StaticResource StringEqualsVis}, ConverterParameter=performance}">
+                        <StackPanel>
+                            <TextBlock Style="{StaticResource CardHeader}" Text="⚡  PERFORMANCE — RESOURCE BLOCKING"/>
+                            <TextBlock Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,4,0,10"
+                                       Text="Ghost Shell uses Chrome DevTools Protocol to block heavyweight URL patterns at the network layer. Ad detection works from the initial HTML — images, fonts, video, and trackers can be safely dropped to cut page-load time on slow proxies. SAFETY: none of these patterns touch google.com SERP HTML, core JS, or anything the ad parser needs."/>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                </Grid.RowDefinitions>
+                                <CheckBox Grid.Row="0" Grid.Column="0" Content="🎬 YouTube video &amp; thumbnails" IsChecked="{Binding BlockYoutube, Mode=TwoWay}"        Margin="0,4,8,4"/>
+                                <CheckBox Grid.Row="0" Grid.Column="1" Content="🖼 Google image thumbnails"        IsChecked="{Binding BlockGoogleImages, Mode=TwoWay}"   Margin="8,4,0,4"/>
+                                <CheckBox Grid.Row="1" Grid.Column="0" Content="🚞 Google Maps tiles"              IsChecked="{Binding BlockMapsTiles, Mode=TwoWay}"      Margin="0,4,8,4"/>
+                                <CheckBox Grid.Row="1" Grid.Column="1" Content="🅰 Web fonts"                      IsChecked="{Binding BlockFonts, Mode=TwoWay}"          Margin="8,4,0,4"/>
+                                <CheckBox Grid.Row="2" Grid.Column="0" Content="📊 Analytics &amp; tracking beacons" IsChecked="{Binding BlockAnalytics, Mode=TwoWay}"     Margin="0,4,8,4"/>
+                                <CheckBox Grid.Row="2" Grid.Column="1" Content="💬 Social widgets"                  IsChecked="{Binding BlockSocialWidgets, Mode=TwoWay}" Margin="8,4,0,4"/>
+                                <CheckBox Grid.Row="3" Grid.Column="0" Content="🎞 All video files (any site)"      IsChecked="{Binding BlockVideoEverywhere, Mode=TwoWay}" Margin="0,4,8,4"/>
+                            </Grid>
+                            <TextBlock Style="{StaticResource MutedText}" Text="Custom patterns (advanced)" Margin="0,12,0,4"/>
+                            <TextBox Text="{Binding BlockCustomPatterns, Mode=TwoWay, UpdateSourceTrigger=LostFocus}"
+                                     AcceptsReturn="True"
+                                     MinHeight="90"
+                                     VerticalScrollBarVisibility="Auto"
+                                     FontFamily="{StaticResource FontMono}"
+                                     FontSize="11"/>
+                            <TextBlock Style="{StaticResource MutedText}" FontSize="10" Margin="0,4,0,0"
+                                       Text="One pattern per line. CDP wildcard syntax: * matches any chars. Examples: *://annoying-tracker.example.com/* · *.ico · *://slow-widget.example.org/script.js"/>
+                            <Border Margin="0,10,0,0" Padding="10,6"
+                                    Background="{StaticResource BgRaised}"
+                                    CornerRadius="4">
+                                <TextBlock Text="{Binding BlockingSummary}"
+                                           FontSize="11"
+                                           Foreground="{StaticResource Accent}"/>
+                            </Border>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- AUTO-ENRICH -->
+                    <Border Style="{StaticResource Card}"
+                            Visibility="{Binding ActiveTab, Converter={StaticResource StringEqualsVis}, ConverterParameter=auto-enrich}">
+                        <StackPanel>
+                            <TextBlock Style="{StaticResource CardHeader}" Text="🔴  AUTO-ENRICH FROM HOST CHROME"/>
+                            <TextBlock TextWrapping="Wrap" Margin="0,4,0,10"
+                                       Foreground="{StaticResource WarnBrush}"
+                                       Text="⚠  Reads YOUR personal Chrome history + bookmarks. On a fresh profile's first launch, copies up to N URLs / N days (with privacy-sensitive domains filtered). Off by default."/>
+                            <CheckBox Content="Enable auto-enrich for fresh profiles"
+                                      IsChecked="{Binding AutoEnrichEnabled, Mode=TwoWay}" Margin="0,4,0,8"/>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0" Margin="0,0,8,0">
+                                    <TextBlock Style="{StaticResource MutedText}" Text="Max days (1..365)"/>
+                                    <TextBox Text="{Binding AutoEnrichMaxDays, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" Margin="0,4,0,0"/>
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" Margin="8,0,0,0">
+                                    <TextBlock Style="{StaticResource MutedText}" Text="Max URLs (10..10000)"/>
+                                    <TextBox Text="{Binding AutoEnrichMaxUrls, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" Margin="0,4,0,0"/>
+                                </StackPanel>
+                            </Grid>
+                            <TextBlock Style="{StaticResource MutedText}" Text="Source Chrome profile path (optional)" Margin="0,12,0,4"/>
+                            <TextBox Text="{Binding AutoEnrichSrcPath, Mode=TwoWay, UpdateSourceTrigger=LostFocus}"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- EXPORT / IMPORT -->
+                    <Border Style="{StaticResource Card}"
+                            Visibility="{Binding ActiveTab, Converter={StaticResource StringEqualsVis}, ConverterParameter=export-import}">
+                        <StackPanel>
+                            <TextBlock Style="{StaticResource CardHeader}" Text="📦  EXPORT / IMPORT CONFIG"/>
+                            <TextBlock Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,4,0,10"
+                                       Text="Export creates a JSON bundle containing settings + profiles + scripts. Run history, traffic stats, and logs are NOT included. Import merges by default; tick Replace mode to wipe existing settings before importing."/>
+                            <StackPanel Orientation="Horizontal" Margin="0,4,0,8">
+                                <Button Content="⬇  Export bundle"
+                                        Command="{Binding ExportConfigCommand}"
+                                        Margin="0,0,8,0"/>
+                                <Button Content="⬆  Import bundle"
+                                        Command="{Binding ImportConfigCommand}"
+                                        Style="{StaticResource ButtonPrimary}"/>
+                            </StackPanel>
+                            <CheckBox Content="Replace mode (wipe existing settings before importing)"
+                                      IsChecked="{Binding ReplaceMode, Mode=TwoWay}"
+                                      Foreground="{StaticResource WarnBrush}"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- DANGER ZONE -->
+                    <Border Style="{StaticResource Card}"
+                            BorderBrush="{StaticResource ErrBrush}" BorderThickness="1"
+                            Visibility="{Binding ActiveTab, Converter={StaticResource StringEqualsVis}, ConverterParameter=danger-zone}">
+                        <StackPanel>
+                            <TextBlock Style="{StaticResource CardHeader}"
+                                       Foreground="{StaticResource ErrBrush}"
+                                       Text="⚠  DANGER ZONE"/>
+                            <TextBlock Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,4,0,10"
+                                       Text="Reset wipes run history + traffic stats + notifications. Profiles, scripts, vault, and settings are preserved."/>
+                            <Button Content="↻  Reset stats counters"
+                                    Command="{Binding ResetStatsCommand}"
+                                    HorizontalAlignment="Left"/>
+                        </StackPanel>
+                    </Border>
+
+                </StackPanel>
+            </ScrollViewer>
+        </Grid>
+    </Grid>
 </UserControl>

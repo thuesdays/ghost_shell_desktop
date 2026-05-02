@@ -44,6 +44,20 @@ public interface IProxyAuthForwarder : IAsyncDisposable
     /// return value). Null until the listener is bound.
     /// </summary>
     string? LocalUrl { get; }
+
+    /// <summary>
+    /// Phase 28 — atomically read AND zero the per-host byte/request
+    /// counters accumulated since the last call. Returned dict is
+    /// keyed by hostname (lowercased) and each value is a tuple of
+    /// (bytes downloaded + uploaded, request count). The collector
+    /// drains this every flush window (~30s) and rolls the values up
+    /// into <c>traffic_stats</c>.
+    ///
+    /// Implementations that don't track counters (no proxy in use,
+    /// older builds) may return an empty dictionary — the collector
+    /// treats that as "no data, fall back to PerformanceObserver".
+    /// </summary>
+    IReadOnlyDictionary<string, (long Bytes, long Requests)> DrainCounters();
 }
 
 /// <summary>

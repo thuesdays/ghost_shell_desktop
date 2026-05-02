@@ -60,26 +60,55 @@ public sealed class SelfCheckService : ISelfCheckService
         var notes = new List<string>();
 
         // ─── Probe 1: exit IP + geo via ipinfo.io ──────────────
-        // We navigate the browser there directly so the request
-        // goes through whatever proxy is configured for the
-        // session — the ipinfo response IS the exit-side IP.
+        // We navigate the browser to about:blank then fetch from
+        // inside the page — the FETCH goes through whatever proxy
+        // is configured for the session, so the ipinfo response IS
+        // the exit-side IP. fetch() is way more robust than
+        // navigating to ipinfo.io/json and reading document.body —
+        // Chrome 138+ wraps JSON responses in a viewer DOM ("file:
+        // …", "Pretty-print" toggle, etc.), and innerText starts
+        // with "F" (the path of the URL bar) which is exactly the
+        // "'F' is an invalid start of a value" parser error we hit.
         try
         {
-            await session.NavigateAsync("https://ipinfo.io/json", ct);
-            // The response is rendered into a <pre> by Chrome's
-            // JSON viewer; readout via document.body.innerText.
-            var jsonText = await session.ExecuteScriptAsync(
-                "return document.body && document.body.innerText || '';",
-                null, ct) as string;
+            const string FetchJs = """
+                return new Promise((resolve) => {
+                  fetch('https://ipinfo.io/json', {cache: 'no-store'})
+                    .then(r => r.text())
+                    .then(t => resolve(t))
+                    .catch(e => resolve('{"_err":"' + (e && e.message || e) + '"}'));
+                  setTimeout(() => resolve('{"_err":"timeout"}'), 8000);
+                });
+            """;
+            var jsonText = await session.ExecuteScriptAsync(FetchJs, null, ct) as string;
             if (!string.IsNullOrWhiteSpace(jsonText))
             {
-                using var doc = JsonDocument.Parse(jsonText);
-                if (doc.RootElement.TryGetProperty("ip", out var ipEl))
-                    exitIp = ipEl.GetString();
-                if (doc.RootElement.TryGetProperty("country", out var cEl))
-                    geoCountry = cEl.GetString();
-                if (doc.RootElement.TryGetProperty("city", out var cyEl))
-                    geoCity = cyEl.GetString();
+                try
+                {
+                    using var doc = JsonDocument.Parse(jsonText);
+                    if (doc.RootElement.TryGetProperty("_err", out var errEl))
+                    {
+                        notes.Add("ipinfo fetch: " + (errEl.GetString() ?? "?"));
+                    }
+                    else
+                    {
+                        if (doc.RootElement.TryGetProperty("ip", out var ipEl))
+                            exitIp = ipEl.GetString();
+                        if (doc.RootElement.TryGetProperty("country", out var cEl))
+                            geoCountry = cEl.GetString();
+                        if (doc.RootElement.TryGetProperty("city", out var cyEl))
+                            geoCity = cyEl.GetString();
+                    }
+                }
+                catch (JsonException jx)
+                {
+                    // Non-JSON body — log a snippet for diagnosis but
+                    // don't fail the whole self-check.
+                    var snippet = jsonText.Length > 80 ? jsonText[..80] + "…" : jsonText;
+                    notes.Add("ipinfo body not JSON: " + snippet);
+                    _log.LogDebug(jx, "ipinfo response wasn't JSON for '{P}': {Snippet}",
+                        profileName, snippet);
+                }
             }
             else
             {

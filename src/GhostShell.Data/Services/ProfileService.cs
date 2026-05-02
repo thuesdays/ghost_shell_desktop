@@ -35,7 +35,9 @@ internal sealed class ProfileService : IProfileService
         updated_at           AS UpdatedAt,
         fp_regen_salt        AS FpRegenSalt,
         fp_noise_salt        AS FpNoiseSalt,
-        assigned_script_id   AS AssignedScriptId
+        assigned_script_id   AS AssignedScriptId,
+        my_domains           AS MyDomainsCsv,
+        target_domains       AS TargetDomainsCsv
     """;
 
     public async Task<IReadOnlyList<Profile>> ListAsync(CancellationToken ct = default)
@@ -79,11 +81,13 @@ internal sealed class ProfileService : IProfileService
             INSERT INTO profiles
                 (name, group_name, template_id, language, proxy_slug,
                  is_ready, enrich_on_first_run, last_run_at, run_count,
-                 note, created_at, updated_at)
+                 note, created_at, updated_at,
+                 my_domains, target_domains)
             VALUES
                 (@Name, @GroupName, @TemplateId, @Language, @ProxySlug,
                  @IsReady, @EnrichOnFirstRun, @LastRunAt, @RunCount,
-                 @Note, @CreatedAt, @UpdatedAt);
+                 @Note, @CreatedAt, @UpdatedAt,
+                 @MyDomainsCsv, @TargetDomainsCsv);
         """;
         await _db.Get().ExecuteAsync(sql, p);
         _log.LogInformation(
@@ -108,7 +112,9 @@ internal sealed class ProfileService : IProfileService
                    last_run_at          = @LastRunAt,
                    run_count            = @RunCount,
                    note                 = @Note,
-                   updated_at           = @UpdatedAt
+                   updated_at           = @UpdatedAt,
+                   my_domains           = @MyDomainsCsv,
+                   target_domains       = @TargetDomainsCsv
              WHERE name                 = @Name;
         """;
         await _db.Get().ExecuteAsync(sql, p);
@@ -117,9 +123,37 @@ internal sealed class ProfileService : IProfileService
 
     public async Task DeleteAsync(string name, CancellationToken ct = default)
     {
-        var rows = await _db.Get().ExecuteAsync(
-            "DELETE FROM profiles WHERE name = @name;", new { name });
-        _log.LogInformation("Deleted profile '{Name}' ({Rows} row(s) affected)", name, rows);
+        // Phase 24 audit fix — application-level cascade. None of the
+        // child tables (vault_items, warmup_runs, script_runs, …)
+        // declare FK constraints, so we manually clean up any rows
+        // pointing at the deleted profile in one transaction.
+        // Phase 27 — also wipe profile_extensions overrides so renames /
+        // re-creates with the same name don't inherit stale state.
+        await _db.QueueAsync(async c =>
+        {
+            using var tx = c.BeginTransaction();
+            await c.ExecuteAsync(
+                "DELETE FROM vault_items WHERE profile_name = @name;",
+                new { name }, tx);
+            await c.ExecuteAsync(
+                "DELETE FROM profile_extensions WHERE profile_name = @name;",
+                new { name }, tx);
+            // Phase 28 — also cascade traffic_stats so a deleted profile
+            // doesn't leave orphan bandwidth accounting in the dashboard.
+            await c.ExecuteAsync(
+                "DELETE FROM traffic_stats WHERE profile_name = @name;",
+                new { name }, tx);
+            // Phase 31 — cascade external tester probe results too.
+            await c.ExecuteAsync(
+                "DELETE FROM external_tester_results WHERE profile_name = @name;",
+                new { name }, tx);
+            await c.ExecuteAsync(
+                "DELETE FROM profiles WHERE name = @name;",
+                new { name }, tx);
+            tx.Commit();
+            return 0;
+        }, ct);
+        _log.LogInformation("Deleted profile '{Name}' (vault items + extension overrides cascaded)", name);
     }
 
     public async Task<BulkCreateProfilesResult> BulkCreateAsync(
@@ -251,6 +285,9 @@ internal sealed class ProfileService : IProfileService
         public string? FpRegenSalt { get; init; }
         public string? FpNoiseSalt { get; init; }
         public long? AssignedScriptId { get; init; }
+        // Phase 20 — per-profile ad-domain configuration.
+        public string? MyDomainsCsv { get; init; }
+        public string? TargetDomainsCsv { get; init; }
     }
 
     private static Profile ToModel(ProfileRow r) => new()
@@ -270,6 +307,8 @@ internal sealed class ProfileService : IProfileService
         FpRegenSalt      = r.FpRegenSalt,
         FpNoiseSalt      = r.FpNoiseSalt,
         AssignedScriptId = r.AssignedScriptId,
+        MyDomainsCsv     = r.MyDomainsCsv,
+        TargetDomainsCsv = r.TargetDomainsCsv,
     };
 
     private static ProfileRow ToRow(Profile p) => new()
@@ -286,5 +325,7 @@ internal sealed class ProfileService : IProfileService
         Note             = p.Note,
         CreatedAt        = p.CreatedAt,
         UpdatedAt        = p.UpdatedAt,
+        MyDomainsCsv     = p.MyDomainsCsv,
+        TargetDomainsCsv = p.TargetDomainsCsv,
     };
 }

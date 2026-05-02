@@ -36,28 +36,36 @@
             <RowDefinition Height="*"/>     <!-- content -->
         </Grid.RowDefinitions>
 
-        <!-- Header + toolbar -->
+        <!-- Header + toolbar — title/buttons share row 0, subtitle gets
+             full width on row 1 so it doesn't wrap awkwardly next to
+             the buttons at narrow window sizes. -->
         <Grid Grid.Row="0" Margin="0,0,0,12">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="Auto"/>
-            </Grid.ColumnDefinitions>
-            <StackPanel Grid.Column="0" Margin="0,0,16,0">
-                <TextBlock Style="{StaticResource PageTitle}" Text="Profile groups"/>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            <Grid Grid.Row="0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" Style="{StaticResource PageTitle}"
+                           Text="Profile groups"
+                           VerticalAlignment="Center"
+                           TextTrimming="CharacterEllipsis"/>
+                <WrapPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button Content="+  Create group"
+                            Command="{Binding AddCommand}"
+                            Style="{StaticResource ButtonPrimary}"
+                            MinWidth="140"/>
+                </WrapPanel>
+            </Grid>
+            <Border Grid.Row="1" Style="{StaticResource Card}"
+                    Padding="14,10" Margin="0,12,0,0">
                 <TextBlock Style="{StaticResource PageSubtitle}"
+                           TextWrapping="Wrap"
                            Text="Batch-run many profiles at once. Each member runs in its own Chrome with its own proxy."/>
-            </StackPanel>
-            <!-- VerticalAlignment=Top so the buttons pin to the top of
-                 the title row and never overlap the subtitle when it
-                 wraps to a second line at narrow widths. -->
-            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Top">
-                <Button Content="↻  Reload" Command="{Binding ReloadCommand}"
-                        Margin="0,0,8,0"/>
-                <Button Content="+  Create group"
-                        Command="{Binding AddCommand}"
-                        Style="{StaticResource ButtonPrimary}"
-                        MinWidth="140"/>
-            </StackPanel>
+            </Border>
         </Grid>
 
         <!-- Search row -->

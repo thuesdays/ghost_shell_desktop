@@ -164,6 +164,40 @@
                               Content="Mark profile as ready to launch"
                               Margin="0,0,0,14"/>
 
+                    <!-- ─── Phase 20: Ad-domain configuration ────────
+                         Drives the script runner's per-step domain
+                         filters (skip_on_my_domain, skip_on_target,
+                         only_on_target, only_on_my_domain) and the
+                         four ad-aware condition kinds. Both are
+                         comma-separated lists of bare domains.
+                         Empty inputs make the filters pass through. -->
+                    <TextBlock Style="{StaticResource MutedText}"
+                               FontWeight="SemiBold"
+                               Margin="0,4,0,4"
+                               Text="AD-DOMAIN POLICY"/>
+
+                    <TextBlock Style="{StaticResource MutedText}"
+                               Text="My domains (comma-separated)" Margin="0,0,0,4"/>
+                    <TextBox x:Name="MyDomainsField"
+                             ToolTip="Domains the profile owns (won't self-click ads on these). E.g. example.com, www.example.com, store.example.com"
+                             Margin="0,0,0,4"/>
+                    <TextBlock Style="{StaticResource DimText}"
+                               FontSize="10"
+                               Margin="0,0,0,12"
+                               TextWrapping="Wrap"
+                               Text="Used by skip_on_my_domain / only_on_my_domain step flags + ad_is_mine condition."/>
+
+                    <TextBlock Style="{StaticResource MutedText}"
+                               Text="Target domains (comma-separated)" Margin="0,0,0,4"/>
+                    <TextBox x:Name="TargetDomainsField"
+                             ToolTip="Domains paid traffic should drive to. E.g. partner.example.com, advertiser.com"
+                             Margin="0,0,0,4"/>
+                    <TextBlock Style="{StaticResource DimText}"
+                               FontSize="10"
+                               Margin="0,0,0,14"
+                               TextWrapping="Wrap"
+                               Text="Used by skip_on_target / only_on_target step flags + ad_is_target / ad_is_competitor / ad_is_external conditions."/>
+
                     <!-- Notes -->
                     <TextBlock Style="{StaticResource MutedText}"
                                Text="Note (optional)" Margin="0,0,0,4"/>

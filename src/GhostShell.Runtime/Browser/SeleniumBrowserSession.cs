@@ -29,6 +29,7 @@ internal sealed class SeleniumBrowserSession : IBrowserSession
     private readonly ILogger _log;
     private readonly List<int> _ownedPids;
     private readonly IProxyAuthForwarder? _forwarder;
+    private readonly GhostShell.Runtime.Traffic.TrafficCollector? _trafficCollector;
     private bool _disposed;
 
     public string ProfileName { get; }
@@ -42,7 +43,8 @@ internal sealed class SeleniumBrowserSession : IBrowserSession
         IWebDriver driver, ChromeDriverService service,
         IEnumerable<int> ownedPids,
         IProxyAuthForwarder? forwarder,
-        ILogger log)
+        ILogger log,
+        ITrafficService? traffic = null)
     {
         ProfileName = profileName;
         RunId       = runId;
@@ -52,6 +54,32 @@ internal sealed class SeleniumBrowserSession : IBrowserSession
         _ownedPids  = ownedPids.ToList();
         _forwarder  = forwarder;
         _log        = log;
+
+        // Phase 28/31 — start the traffic collector. The CDP counter
+        // is created for EVERY session (proxied or not) so direct
+        // connections still get bandwidth accounting via Chrome's
+        // PerformanceObserver. The forwarder is layered on top for
+        // proxied profiles where its TCP-level counts are more
+        // accurate. The collector merges both via MAX. When neither
+        // a forwarder nor a CDP-able driver is present, no collector
+        // is created and the dashboard just shows 0 for that session.
+        if (traffic is not null && driver is OpenQA.Selenium.Chrome.ChromeDriver chrome)
+        {
+            GhostShell.Runtime.Traffic.CdpTrafficCounter? cdp = null;
+            try
+            {
+                cdp = new GhostShell.Runtime.Traffic.CdpTrafficCounter(chrome, log);
+                cdp.Start();
+            }
+            catch (Exception ex)
+            {
+                log.LogWarning(ex, "CDP traffic counter setup failed for '{Name}' — direct-connection traffic won't be counted", profileName);
+                cdp = null;
+            }
+            _trafficCollector = new GhostShell.Runtime.Traffic.TrafficCollector(
+                forwarder, traffic, profileName, runId, log, cdp);
+            _trafficCollector.Start();
+        }
     }
 
     public Task NavigateAsync(string url, CancellationToken ct = default)
@@ -359,6 +387,16 @@ internal sealed class SeleniumBrowserSession : IBrowserSession
     {
         if (_disposed) return;
         _disposed = true;
+
+        // Phase 28 — stop the traffic collector FIRST so any final
+        // bytes pushed by chromedriver's shutdown handshake still get
+        // billed before the forwarder closes its sockets. The collector
+        // does its own final flush during DisposeAsync.
+        if (_trafficCollector is not null)
+        {
+            try { await _trafficCollector.DisposeAsync(); }
+            catch (Exception ex) { _log.LogWarning(ex, "TrafficCollector dispose threw"); }
+        }
 
         // Quit driver first — Chromium typically exits cleanly when
         // WebDriver disconnects via CDP.

@@ -24,8 +24,14 @@ internal sealed class NavigationService : INavigationService
         ["fingerprint"] = typeof(FingerprintViewModel),
         ["scripts"]     = typeof(ScriptsViewModel),
         ["packs"]    = typeof(CookiePacksViewModel),
+        ["vault"]    = typeof(VaultViewModel),
+        ["extensions"] = typeof(ExtensionsViewModel),
+        ["traffic"]    = typeof(TrafficViewModel),
         ["logs"]     = typeof(LogsViewModel),
         ["settings"] = typeof(SettingsViewModel),
+        // Phase 34 — Advertisement section.
+        ["domains"]     = typeof(DomainsViewModel),
+        ["competitors"] = typeof(CompetitorsViewModel),
     };
 
     public NavigationService(IServiceProvider sp, ILogger<NavigationService> log)

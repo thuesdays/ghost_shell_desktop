@@ -1,6 +1,11 @@
 <!--
   SPDX-License-Identifier: MIT
   Copyright (c) 2026 Mykola Kovhanko <thuesdays@gmail.com>
+
+  Phase 31 — Overview dashboard. Five hero stat cards across the top,
+  quick-actions strip, two-column body (live runs / vault & traffic
+  panels) and a recent-activity table at the bottom. Auto-refreshes
+  every 10 s while visible.
 -->
 <UserControl x:Class="GhostShell.App.Views.OverviewView"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -11,123 +16,451 @@
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              mc:Ignorable="d"
              Background="Transparent">
-
     <ScrollViewer VerticalScrollBarVisibility="Auto">
-        <StackPanel Margin="24,20" MaxWidth="1280" HorizontalAlignment="Stretch">
+        <StackPanel Margin="24,20" MaxWidth="1320" HorizontalAlignment="Stretch">
 
-            <!-- Page header -->
+            <!-- ─── Page header ─── -->
             <StackPanel Margin="0,0,0,16">
-                <TextBlock Style="{StaticResource PageTitle}"
-                           Text="{Binding Greeting, StringFormat='{}{0}, Nick.'}"/>
-                <TextBlock Style="{StaticResource PageSubtitle}"
-                           Text="System status at a glance — runs, profiles, proxies."/>
-            </StackPanel>
-
-            <!-- Phase-2 status banner. Demonstrates the InfoBannerAccent
-                 pattern. Once Phase 3 ships, this will turn into a
-                 dismissable "What's new" banner driven by VM. -->
-            <Border Style="{StaticResource InfoBannerAccent}" Margin="0,0,0,16">
                 <Grid>
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto"/>
                         <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
-                    <TextBlock Grid.Column="0"
-                               FontFamily="Segoe MDL2 Assets" FontSize="20"
-                               Foreground="{StaticResource Accent}"
-                               Text="&#xE946;"
-                               VerticalAlignment="Center" Margin="0,0,12,0"/>
-                    <StackPanel Grid.Column="1">
-                        <TextBlock Style="{StaticResource InfoBannerTitle}"
-                                   Text="Phase 2 — CRUD &amp; logging"/>
-                        <TextBlock Style="{StaticResource InfoBannerBody}"
-                                   Text="Profiles + Proxies are fully editable. Browser launch (Phase 3) and the action runner (Phase 4) are next."/>
-                    </StackPanel>
+                    <TextBlock Grid.Column="0" Style="{StaticResource PageTitle}"
+                               Text="{Binding Greeting, StringFormat='{}{0}, Nick.'}"/>
+                    <Button Grid.Column="1" Content="⚙" Padding="8,4" FontSize="14"
+                            Command="{Binding ConfigureLayoutCommand}"
+                            ToolTip="Configure widgets"/>
                 </Grid>
+                <Border Style="{StaticResource Card}" Padding="14,10" Margin="0,12,0,0">
+                    <TextBlock Style="{StaticResource PageSubtitle}"
+                               TextWrapping="Wrap"
+                               Text="At-a-glance operational status — runs, profiles, vault, traffic, recent activity."/>
+                </Border>
+            </StackPanel>
+
+            <!-- ─── Stat tiles ─── -->
+            <Border Visibility="{Binding ShowHeroStats, Converter={StaticResource BoolToVis}}" Margin="0,0,0,16">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+
+                <!-- Runs -->
+                <Border Grid.Column="0" Style="{StaticResource Card}" Padding="16,14" Margin="0,0,8,0"
+                        BorderBrush="{StaticResource Border}" BorderThickness="1"
+                        Cursor="Hand">
+                    <Border.InputBindings>
+                        <MouseBinding MouseAction="LeftClick" Command="{Binding GoProfilesCommand}"/>
+                    </Border.InputBindings>
+                    <StackPanel>
+                        <TextBlock Text="🚀  TOTAL RUNS" Style="{StaticResource MutedText}" FontSize="10"/>
+                        <TextBlock Text="{Binding TotalRuns}"
+                                   FontSize="26" FontWeight="SemiBold"
+                                   Foreground="{StaticResource Accent}"
+                                   Margin="0,6,0,0"/>
+                        <Grid Margin="0,8,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0">
+                                <TextBlock Text="{Binding SuccessfulRuns}"
+                                           FontSize="13" FontWeight="SemiBold"
+                                           Foreground="{StaticResource OkBrush}"/>
+                                <TextBlock Text="ok" Style="{StaticResource MutedText}" FontSize="10"/>
+                            </StackPanel>
+                            <StackPanel Grid.Column="1">
+                                <TextBlock Text="{Binding FailedRuns}"
+                                           FontSize="13" FontWeight="SemiBold"
+                                           Foreground="{StaticResource ErrBrush}"/>
+                                <TextBlock Text="fail" Style="{StaticResource MutedText}" FontSize="10"/>
+                            </StackPanel>
+                            <StackPanel Grid.Column="2">
+                                <TextBlock Text="{Binding RunningRuns}"
+                                           FontSize="13" FontWeight="SemiBold"
+                                           Foreground="{StaticResource Accent}"/>
+                                <TextBlock Text="run" Style="{StaticResource MutedText}" FontSize="10"/>
+                            </StackPanel>
+                        </Grid>
+                    </StackPanel>
+                </Border>
+
+                <!-- Success rate -->
+                <Border Grid.Column="1" Style="{StaticResource Card}" Padding="16,14" Margin="4,0,4,0"
+                        BorderBrush="{StaticResource Border}" BorderThickness="1">
+                    <StackPanel>
+                        <TextBlock Text="✅  SUCCESS RATE" Style="{StaticResource MutedText}" FontSize="10"/>
+                        <TextBlock Text="{Binding SuccessRateLabel}"
+                                   FontSize="26" FontWeight="SemiBold"
+                                   Foreground="{Binding SuccessRateBrushKey, Converter={StaticResource ResourceKeyToBrush}}"
+                                   Margin="0,6,0,0"/>
+                        <TextBlock Text="last completed runs"
+                                   Style="{StaticResource MutedText}" FontSize="10" Margin="0,8,0,0"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- Profiles -->
+                <Border Grid.Column="2" Style="{StaticResource Card}" Padding="16,14" Margin="4,0,4,0"
+                        BorderBrush="{StaticResource Border}" BorderThickness="1"
+                        Cursor="Hand">
+                    <Border.InputBindings>
+                        <MouseBinding MouseAction="LeftClick" Command="{Binding GoProfilesCommand}"/>
+                    </Border.InputBindings>
+                    <StackPanel>
+                        <TextBlock Text="👤  PROFILES" Style="{StaticResource MutedText}" FontSize="10"/>
+                        <TextBlock Text="{Binding ProfileCount}"
+                                   FontSize="26" FontWeight="SemiBold"
+                                   Foreground="{StaticResource HueGreen}"
+                                   Margin="0,6,0,0"/>
+                        <TextBlock Text="installed identities"
+                                   Style="{StaticResource MutedText}" FontSize="10" Margin="0,8,0,0"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- Vault -->
+                <Border Grid.Column="3" Style="{StaticResource Card}" Padding="16,14" Margin="4,0,4,0"
+                        BorderBrush="{StaticResource Border}" BorderThickness="1"
+                        Cursor="Hand">
+                    <Border.InputBindings>
+                        <MouseBinding MouseAction="LeftClick" Command="{Binding GoVaultCommand}"/>
+                    </Border.InputBindings>
+                    <StackPanel>
+                        <TextBlock Text="🔐  VAULT" Style="{StaticResource MutedText}" FontSize="10"/>
+                        <TextBlock Text="{Binding VaultStatusText}"
+                                   FontSize="18" FontWeight="SemiBold"
+                                   Foreground="{Binding VaultStatusBrushKey, Converter={StaticResource ResourceKeyToBrush}}"
+                                   Margin="0,8,0,0"/>
+                        <TextBlock Text="encrypted credentials"
+                                   Style="{StaticResource MutedText}" FontSize="10" Margin="0,8,0,0"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- Traffic 24h -->
+                <Border Grid.Column="4" Style="{StaticResource Card}" Padding="16,14" Margin="8,0,0,0"
+                        BorderBrush="{StaticResource Border}" BorderThickness="1"
+                        Cursor="Hand">
+                    <Border.InputBindings>
+                        <MouseBinding MouseAction="LeftClick" Command="{Binding GoTrafficCommand}"/>
+                    </Border.InputBindings>
+                    <StackPanel>
+                        <TextBlock Text="📈  TRAFFIC · 24H" Style="{StaticResource MutedText}" FontSize="10"/>
+                        <TextBlock Text="{Binding Traffic24hText}"
+                                   FontSize="22" FontWeight="SemiBold"
+                                   Foreground="{StaticResource HueBlue}"
+                                   Margin="0,6,0,0"/>
+                        <TextBlock Text="{Binding TrafficRequestsText, StringFormat='{}{0} requests'}"
+                                   Style="{StaticResource MutedText}" FontSize="10" Margin="0,8,0,0"/>
+                    </StackPanel>
+                </Border>
+            </Grid>
             </Border>
 
-            <!-- Stat tiles row -->
-            <UniformGrid Rows="1" Columns="4" Margin="0,0,0,16">
-                <Border Style="{StaticResource Card}" Margin="0,0,8,0">
-                    <StackPanel>
-                        <TextBlock Style="{StaticResource CardHeader}" Text="TOTAL RUNS"/>
-                        <TextBlock Style="{StaticResource CardValue}" Text="{Binding TotalRuns}"/>
-                        <TextBlock Style="{StaticResource CardSubvalue}"
-                                   Text="{Binding RunningRuns, StringFormat='{}{0} running now'}"/>
-                    </StackPanel>
-                </Border>
-                <Border Style="{StaticResource Card}" Margin="4,0">
-                    <StackPanel>
-                        <TextBlock Style="{StaticResource CardHeader}" Text="SUCCESSFUL"/>
-                        <TextBlock Style="{StaticResource CardValue}"
-                                   Foreground="{StaticResource OkBrush}"
-                                   Text="{Binding SuccessfulRuns}"/>
-                        <TextBlock Style="{StaticResource CardSubvalue}" Text="exit_code = 0"/>
-                    </StackPanel>
-                </Border>
-                <Border Style="{StaticResource Card}" Margin="4,0">
-                    <StackPanel>
-                        <TextBlock Style="{StaticResource CardHeader}" Text="FAILED"/>
-                        <TextBlock Style="{StaticResource CardValue}"
-                                   Foreground="{StaticResource ErrBrush}"
-                                   Text="{Binding FailedRuns}"/>
-                        <TextBlock Style="{StaticResource CardSubvalue}" Text="non-zero exit code"/>
-                    </StackPanel>
-                </Border>
-                <Border Style="{StaticResource Card}" Margin="8,0,0,0">
-                    <StackPanel>
-                        <TextBlock Style="{StaticResource CardHeader}" Text="PROFILES"/>
-                        <TextBlock Style="{StaticResource CardValue}" Text="{Binding ProfileCount}"/>
-                        <TextBlock Style="{StaticResource CardSubvalue}"
-                                   Text="{Binding ProxyCount, StringFormat='{}{0} proxies configured'}"/>
-                    </StackPanel>
-                </Border>
-            </UniformGrid>
+            <!-- ─── Live runs (only when active) ─── -->
+            <Border Style="{StaticResource Card}" Padding="14,12" Margin="0,0,0,16"
+                    BorderBrush="{StaticResource Accent}" BorderThickness="1"
+                    Visibility="{Binding HasActiveRuns, Converter={StaticResource BoolToVis}}">
+                <StackPanel>
+                    <TextBlock Text="🟢  LIVE RUNS" FontSize="11" FontWeight="SemiBold"
+                               Foreground="{StaticResource Accent}" Margin="0,0,0,8"/>
+                    <ItemsControl ItemsSource="{Binding ActiveProfiles}">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <WrapPanel/>
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Border Padding="10,6" Margin="0,0,8,8"
+                                        Background="{StaticResource AccentSoft}"
+                                        CornerRadius="4">
+                                    <StackPanel Orientation="Horizontal">
+                                        <Ellipse Width="8" Height="8"
+                                                 Fill="{StaticResource Accent}"
+                                                 VerticalAlignment="Center"/>
+                                        <TextBlock Text="{Binding}"
+                                                   FontFamily="{StaticResource FontMono}"
+                                                   FontSize="11"
+                                                   Foreground="{StaticResource Text}"
+                                                   Margin="8,0,0,0"
+                                                   VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+            </Border>
 
-            <!-- Two-column lower row -->
+            <!-- ─── Recent activity ─── -->
+            <Border Visibility="{Binding ShowRecentRuns, Converter={StaticResource BoolToVis}}" Margin="0,0,0,16">
+            <Border Style="{StaticResource Card}" Padding="0">
+                <DockPanel>
+                    <Grid DockPanel.Dock="Top" Margin="14,12,14,8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Text="🕒  RECENT ACTIVITY"
+                                   FontSize="11" FontWeight="SemiBold"
+                                   Foreground="{StaticResource Text}"/>
+                        <Button Grid.Column="1" Content="View all runs"
+                                Command="{Binding GoLogsCommand}"
+                                Padding="10,4"/>
+                    </Grid>
+                    <Border DockPanel.Dock="Bottom" BorderBrush="{StaticResource Border}" BorderThickness="0,1,0,0">
+                        <ItemsControl ItemsSource="{Binding RecentRuns}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Border Padding="14,10"
+                                            BorderBrush="{StaticResource Border}"
+                                            BorderThickness="0,0,0,1">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="Auto"/>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0"
+                                                       Text="{Binding StatusIcon}"
+                                                       FontSize="14" FontWeight="Bold"
+                                                       Foreground="{Binding StatusBrushKey, Converter={StaticResource ResourceKeyToBrush}}"
+                                                       VerticalAlignment="Center"
+                                                       Width="22"/>
+                                            <StackPanel Grid.Column="1">
+                                                <TextBlock>
+                                                    <Run Text="Run #" Foreground="{StaticResource TextMuted}"/>
+                                                    <Run Text="{Binding Id, Mode=OneWay}" FontWeight="SemiBold"/>
+                                                    <Run Text=" · " Foreground="{StaticResource TextMuted}"/>
+                                                    <Run Text="{Binding ProfileName, Mode=OneWay}"/>
+                                                </TextBlock>
+                                                <TextBlock Style="{StaticResource MutedText}" FontSize="10" Margin="0,2,0,0">
+                                                    <Run Text="{Binding Status, Mode=OneWay}"/>
+                                                    <Run Text=" · "/>
+                                                    <Run Text="{Binding DurationLabel, Mode=OneWay}"/>
+                                                </TextBlock>
+                                            </StackPanel>
+                                            <TextBlock Grid.Column="2" Text="{Binding Relative}"
+                                                       Style="{StaticResource MutedText}" FontSize="10"
+                                                       VerticalAlignment="Center"
+                                                       Margin="8,0,0,0"/>
+                                        </Grid>
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </Border>
+                </DockPanel>
+            </Border>
+            </Border>
+
+            <!-- ─── Footer counters (proxy summary + traffic today) ─── -->
+            <Border Visibility="{Binding ShowProxySummary, Converter={StaticResource BoolToVis}}" Margin="0,0,0,8">
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="*"/>
                 </Grid.ColumnDefinitions>
-
-                <Border Style="{StaticResource Card}" Grid.Column="0" Margin="0,0,8,0">
+                <Border Grid.Column="0" Style="{StaticResource Card}" Padding="14,10" Margin="0,0,8,0">
                     <StackPanel>
-                        <TextBlock Style="{StaticResource CardHeader}" Text="WHAT TO DO NEXT"/>
-                        <TextBlock Foreground="{StaticResource Text}" TextWrapping="Wrap"
-                                   FontSize="12" LineHeight="20">
-                            • Phase 1 done — UI scaffolding visible.<LineBreak/>
-                            • Phase 2: bind real data to Profiles + Runs pages.<LineBreak/>
-                            • Phase 3: implement BrowserLauncher in GhostShell.Runtime.<LineBreak/>
-                            • Phase 4: full action runner with 49 handlers.
-                        </TextBlock>
+                        <TextBlock Text="🌐  PROXIES" Style="{StaticResource MutedText}" FontSize="10"/>
+                        <TextBlock Text="{Binding ProxyCount}"
+                                   FontSize="20" FontWeight="SemiBold"
+                                   Foreground="{StaticResource HueTeal}"
+                                   Margin="0,4,0,0"/>
                     </StackPanel>
                 </Border>
-
-                <Border Style="{StaticResource Card}" Grid.Column="1" Margin="8,0,0,0">
+                <Border Grid.Column="1" Style="{StaticResource Card}" Padding="14,10" Margin="8,0,0,0"
+                        Visibility="{Binding ShowTrafficToday, Converter={StaticResource BoolToVis}}">
                     <StackPanel>
-                        <TextBlock Style="{StaticResource CardHeader}" Text="BUILD INFO"/>
-                        <Grid>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="120"/>
-                                <ColumnDefinition Width="*"/>
-                            </Grid.ColumnDefinitions>
-                            <Grid.RowDefinitions>
-                                <RowDefinition/>
-                                <RowDefinition/>
-                                <RowDefinition/>
-                            </Grid.RowDefinitions>
-                            <TextBlock Style="{StaticResource MutedText}" Text="App version" Grid.Row="0" Grid.Column="0"/>
-                            <TextBlock Style="{StaticResource MonoText}" Text="0.1.0-phase1" Grid.Row="0" Grid.Column="1"/>
-                            <TextBlock Style="{StaticResource MutedText}" Text="Stack" Grid.Row="1" Grid.Column="0"/>
-                            <TextBlock Style="{StaticResource MonoText}" Text=".NET 8 / WPF" Grid.Row="1" Grid.Column="1"/>
-                            <TextBlock Style="{StaticResource MutedText}" Text="DB" Grid.Row="2" Grid.Column="0"/>
-                            <TextBlock Style="{StaticResource MonoText}" Text="SQLite (WAL)" Grid.Row="2" Grid.Column="1"/>
-                        </Grid>
+                        <TextBlock Text="🌐  UNIQUE DOMAINS · 24H" Style="{StaticResource MutedText}" FontSize="10"/>
+                        <TextBlock Text="{Binding TrafficUniqueDomains}"
+                                   FontSize="20" FontWeight="SemiBold"
+                                   Foreground="{StaticResource HueViolet}"
+                                   Margin="0,4,0,0"/>
                     </StackPanel>
                 </Border>
             </Grid>
+            </Border>
+
+            <!-- ─── Ad Density Trend ─── -->
+            <Border x:Name="AdDensityBorder"
+                    Visibility="{Binding ShowAdDensity, Converter={StaticResource BoolToVis}}"
+                    Style="{StaticResource Card}" Padding="0" Margin="0,0,0,16"
+                    Loaded="OnAdDensityLoaded">
+                <DockPanel>
+                    <!-- Header with refresh button -->
+                    <Grid DockPanel.Dock="Top" Margin="14,12,14,8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Text="🪩  Ad density trend — effectiveness of warmup &amp; click algos"
+                                   FontSize="11" FontWeight="SemiBold"
+                                   Foreground="{StaticResource Text}"/>
+                        <Button Grid.Column="1" Content="⟳" Padding="6,2" FontSize="11"
+                                Command="{Binding ReloadCommand}"/>
+                    </Grid>
+
+                    <Border DockPanel.Dock="Bottom" BorderBrush="{StaticResource Border}" BorderThickness="0,1,0,0"
+                            Padding="14,12">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="200"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="200"/>
+                            </Grid.ColumnDefinitions>
+
+                            <!-- Left block: KPI -->
+                            <StackPanel Grid.Column="0">
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Text="{Binding AdDensity.AvgAdsPerQuery7d, StringFormat='{}{0:0.00}'}"
+                                               FontSize="24" FontWeight="SemiBold"
+                                               Foreground="{StaticResource Accent}"/>
+                                    <TextBlock Text="ads / query · 7d" FontSize="11" Margin="8,0,0,0"
+                                               Style="{StaticResource MutedText}" VerticalAlignment="Center"/>
+                                </StackPanel>
+
+                                <!-- Delta indicator -->
+                                <TextBlock Margin="0,6,0,0" FontSize="10"
+                                           Text="{Binding AdDensity.DeltaPct7dPrev, StringFormat='↑ {0:0}% vs prev 7d'}"
+                                           Foreground="{StaticResource HueGreen}"/>
+
+                                <!-- KPI grid -->
+                                <Grid Margin="0,8,0,0">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                    </Grid.RowDefinitions>
+
+                                    <StackPanel Grid.Column="0" Grid.Row="0" Margin="0,0,8,8">
+                                        <TextBlock Text="{Binding AdDensity.AvgAdsPerQuery24h, StringFormat='{}{0:0.00}'}"
+                                                   FontWeight="SemiBold" Foreground="{StaticResource Text}"/>
+                                        <TextBlock Text="24h avg" Style="{StaticResource MutedText}" FontSize="9"/>
+                                    </StackPanel>
+
+                                    <StackPanel Grid.Column="1" Grid.Row="0" Margin="0,0,0,8">
+                                        <TextBlock Text="{Binding AdDensity.TotalRuns7d}"
+                                                   FontWeight="SemiBold" Foreground="{StaticResource Text}"/>
+                                        <TextBlock Text="runs 7d" Style="{StaticResource MutedText}" FontSize="9"/>
+                                    </StackPanel>
+
+                                    <StackPanel Grid.Column="0" Grid.Row="1">
+                                        <TextBlock Text="{Binding AdDensity.TotalAds7d}"
+                                                   FontWeight="SemiBold" Foreground="{StaticResource Text}"/>
+                                        <TextBlock Text="ads 7d" Style="{StaticResource MutedText}" FontSize="9"/>
+                                    </StackPanel>
+
+                                    <StackPanel Grid.Column="1" Grid.Row="1">
+                                        <TextBlock FontSize="11">
+                                            <Run Text="{Binding AdDensity.Ctr7d, StringFormat='{}{0:P1}', Mode=OneWay}"
+                                                 FontWeight="SemiBold" Foreground="{StaticResource Text}"/>
+                                            <Run Text=" CTR" FontSize="9" Foreground="{StaticResource TextMuted}"/>
+                                        </TextBlock>
+                                        <TextBlock Text="proxy" Style="{StaticResource MutedText}" FontSize="9"/>
+                                    </StackPanel>
+                                </Grid>
+                            </StackPanel>
+
+                            <!-- Center block: Top Profiles -->
+                            <StackPanel Grid.Column="1" Margin="16,0">
+                                <TextBlock Text="Top profiles · 7d" FontSize="10" FontWeight="SemiBold" Margin="0,0,0,6"
+                                           Foreground="{StaticResource Text}"/>
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="60"/>
+                                        <ColumnDefinition Width="70"/>
+                                    </Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto"/>
+                                    </Grid.RowDefinitions>
+
+                                    <!-- Headers -->
+                                    <TextBlock Grid.Column="0" Text="PROFILE" FontSize="8" Style="{StaticResource DimText}" FontWeight="SemiBold"/>
+                                    <TextBlock Grid.Column="1" Text="RUNS" FontSize="8" Style="{StaticResource DimText}" FontWeight="SemiBold" TextAlignment="Right"/>
+                                    <TextBlock Grid.Column="2" Text="ADS/Q" FontSize="8" Style="{StaticResource DimText}" FontWeight="SemiBold" TextAlignment="Right"/>
+
+                                    <!-- Items -->
+                                    <ItemsControl ItemsSource="{Binding AdDensity.PerProfile}" Margin="0,6,0,0"
+                                                  Grid.Column="0" Grid.ColumnSpan="3">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate>
+                                                <Grid Margin="0,0,0,4">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="*"/>
+                                                        <ColumnDefinition Width="60"/>
+                                                        <ColumnDefinition Width="70"/>
+                                                    </Grid.ColumnDefinitions>
+                                                    <TextBlock Grid.Column="0" Text="{Binding ProfileName}" FontSize="9"
+                                                               Foreground="{StaticResource Text}"/>
+                                                    <TextBlock Grid.Column="1" Text="{Binding Runs}" FontSize="9"
+                                                               Foreground="{StaticResource TextMuted}" TextAlignment="Right"/>
+                                                    <TextBlock Grid.Column="2" Text="{Binding AdsPerQuery, StringFormat='{}{0:0.00}'}"
+                                                               FontSize="9" Foreground="{StaticResource TextMuted}" TextAlignment="Right"/>
+                                                </Grid>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                </Grid>
+                            </StackPanel>
+
+                            <!-- Right block: Top IPs -->
+                            <StackPanel Grid.Column="2" Margin="16,0,0,0">
+                                <TextBlock Text="Top IPs · 7d" FontSize="10" FontWeight="SemiBold" Margin="0,0,0,6"
+                                           Foreground="{StaticResource Text}"/>
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="60"/>
+                                        <ColumnDefinition Width="70"/>
+                                    </Grid.ColumnDefinitions>
+
+                                    <!-- Headers -->
+                                    <TextBlock Grid.Column="0" Text="IP" FontSize="8" Style="{StaticResource DimText}" FontWeight="SemiBold"/>
+                                    <TextBlock Grid.Column="1" Text="RUNS" FontSize="8" Style="{StaticResource DimText}" FontWeight="SemiBold" TextAlignment="Right"/>
+                                    <TextBlock Grid.Column="2" Text="ADS/Q" FontSize="8" Style="{StaticResource DimText}" FontWeight="SemiBold" TextAlignment="Right"/>
+
+                                    <!-- Empty state or items -->
+                                    <ItemsControl ItemsSource="{Binding AdDensity.PerIp}" Margin="0,6,0,0"
+                                                  Grid.Column="0" Grid.ColumnSpan="3">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate>
+                                                <Grid Margin="0,0,0,4">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="*"/>
+                                                        <ColumnDefinition Width="60"/>
+                                                        <ColumnDefinition Width="70"/>
+                                                    </Grid.ColumnDefinitions>
+                                                    <TextBlock Grid.Column="0" Text="{Binding Ip}" FontSize="9"
+                                                               Foreground="{StaticResource Text}"/>
+                                                    <TextBlock Grid.Column="1" Text="{Binding Runs}" FontSize="9"
+                                                               Foreground="{StaticResource TextMuted}" TextAlignment="Right"/>
+                                                    <TextBlock Grid.Column="2" Text="{Binding AdsPerQuery, StringFormat='{}{0:0.00}'}"
+                                                               FontSize="9" Foreground="{StaticResource TextMuted}" TextAlignment="Right"/>
+                                                </Grid>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+
+                                    <!-- Empty state placeholder (shown in code-behind if no IPs) -->
+                                </Grid>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+                </DockPanel>
+            </Border>
+
         </StackPanel>
     </ScrollViewer>
 </UserControl>

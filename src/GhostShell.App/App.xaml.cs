@@ -2,11 +2,13 @@
 // Copyright (c) 2026 Mykola Kovhanko <thuesdays@gmail.com>
 
 using System.IO;
+using System.Threading;
 using System.Windows;
 using GhostShell.App.Dialogs;
 using GhostShell.App.Lifecycle;
 using GhostShell.App.Logging;
 using GhostShell.App.Navigation;
+using GhostShell.App.Tray;
 using GhostShell.App.ViewModels;
 using GhostShell.Core.Common;
 using GhostShell.Data;
@@ -32,8 +34,97 @@ public partial class App : Application
 {
     public IHost? Host { get; private set; }
 
+    // Single-instance enforcement
+    private Mutex? _singletonMutex;
+    private EventWaitHandle? _showWindowEvent;
+    private volatile bool _appShuttingDown;
+
+    // Phase 38: Static flag to signal shutdown from tray's Quit handler
+    public static bool AllowingShutdown { get; set; }
+
+    /// <summary>
+    /// Phase 38 — set the Windows AppUserModelID for this process.
+    /// Without it, NotifyIcon balloons / toast headers attribute to
+    /// the apphost's FileDescription, which on dev builds (and even
+    /// some publish modes) reads as ".NET Host" instead of our
+    /// product name. The AUMID also drives taskbar grouping + jump
+    /// list scoping — set it BEFORE any windows are created.
+    ///
+    /// shell32!SetCurrentProcessExplicitAppUserModelID is in every
+    /// Windows since Vista. Returns an HRESULT — we don't fail
+    /// startup on a non-zero return; absolute worst case the title
+    /// reverts to the FileDescription set in Directory.Build.props,
+    /// which we also fixed in the same phase.
+    /// </summary>
+    private const string AppUserModelId = "GhostShell.Desktop";
+
+    [System.Runtime.InteropServices.DllImport("shell32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, PreserveSig = false)]
+    private static extern void SetCurrentProcessExplicitAppUserModelID(
+        [System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.LPWStr)] string AppID);
+
     protected override async void OnStartup(StartupEventArgs e)
     {
+        // Phase 38: Set AppUserModelID FIRST so any subsequent
+        // notification / window has correct attribution.
+        try
+        {
+            SetCurrentProcessExplicitAppUserModelID(AppUserModelId);
+        }
+        catch
+        {
+            // Pre-Vista or sandboxed envs — fall through; balloon
+            // attribution falls back to FileDescription metadata.
+        }
+
+        // Phase 38: Single-instance enforcement — early, before base.OnStartup
+        const string MutexName = "Local\\GhostShellDesktop_Singleton";
+        const string EventName = "Local\\GhostShellDesktop_ShowWindow";
+
+        bool createdNew = false;
+        try
+        {
+            _singletonMutex = new Mutex(true, MutexName, out createdNew);
+        }
+        catch (AbandonedMutexException)
+        {
+            // Previous instance crashed; we own the mutex now
+            _singletonMutex = new Mutex(true, MutexName, out createdNew);
+            createdNew = true;
+        }
+
+        if (!createdNew)
+        {
+            // Another instance is running; signal it to show its window and exit.
+            try
+            {
+                if (EventWaitHandle.TryOpenExisting(EventName, out var ev))
+                    ev.Set();
+            }
+            catch { /* best-effort */ }
+
+            Shutdown(0);
+            return;
+        }
+
+        // Listen for wake-event from future instances (background thread)
+        _showWindowEvent = new EventWaitHandle(false, EventResetMode.AutoReset, EventName);
+        var t = new Thread(() =>
+        {
+            while (!_appShuttingDown)
+            {
+                if (_showWindowEvent.WaitOne(1000))
+                {
+                    var app = Application.Current;
+                    if (app is null) continue;
+                    app.Dispatcher.InvokeAsync(() => TrayIconHost.ShowAndActivateMainWindow());
+                }
+            }
+        })
+        {
+            IsBackground = true,
+            Name = "ShowWindowListener",
+        };
+        t.Start();
         // Diagnostic boot trace. Writes to a fixed path under
         // %LocalAppData%\GhostShell\ BEFORE Serilog is wired up, so
         // a crash in App.xaml parsing / Host.Build() / DI registration
@@ -114,6 +205,10 @@ public partial class App : Application
             {
                 // Persistence
                 s.AddGhostShellData();
+
+                // Phase 38: Tray icon (singleton + hosted service)
+                s.AddSingleton<TrayIconHost>();
+                s.AddHostedService<TrayIconHost>(sp => sp.GetRequiredService<TrayIconHost>());
 
                 // Background runner (Phase 1 stub)
                 s.AddHostedService<RunnerHost>();
@@ -206,6 +301,18 @@ public partial class App : Application
                 s.AddSingleton<SettingsViewModel>();
                 s.AddSingleton<FingerprintViewModel>();
                 s.AddSingleton<ScriptsViewModel>();
+                s.AddSingleton<VaultViewModel>();
+                s.AddSingleton<ExtensionsViewModel>();
+                s.AddSingleton<DomainsViewModel>();
+                s.AddSingleton<CompetitorsViewModel>();
+                s.AddSingleton<TrafficViewModel>();
+                s.AddSingleton<NotificationsViewModel>();
+
+                // Phase 26 — vault idle watcher. Singleton because it
+                // owns a DispatcherTimer + class-level WPF input handlers
+                // that are created on first Start(); allowing GC would
+                // make those handlers go silently dark.
+                s.AddSingleton<GhostShell.App.Vault.VaultIdleWatcher>();
             })
             .Build();
         BootTrace("Host.Build ok");
@@ -230,10 +337,19 @@ public partial class App : Application
         bootLogger.LogInformation("");
         bootLogger.LogInformation("════════════════════════════════════════════════════════════");
         bootLogger.LogInformation(" Ghost Shell starting (v{Version})",
-            typeof(App).Assembly.GetName().Version?.ToString(3) ?? "?");
+            typeof(App).Assembly.GetName().Version?.ToString() ?? "?");
         bootLogger.LogInformation(" Data dir: {DataDir}", AppPaths.DataDir);
         bootLogger.LogInformation(" Database: {Db}",      AppPaths.DatabasePath);
         bootLogger.LogInformation(" Log file: {Log}",     LoggingSetup.CurrentLogPath);
+
+        // Phase 37 audit fix #5: Log all GhostShell.* assembly versions to detect drift.
+        foreach (var asm in System.AppDomain.CurrentDomain.GetAssemblies()
+                    .Where(a => a.GetName().Name?.StartsWith("GhostShell.", StringComparison.Ordinal) == true)
+                    .OrderBy(a => a.GetName().Name))
+        {
+            bootLogger.LogInformation(" {Asm} {Ver}", asm.GetName().Name, asm.GetName().Version);
+        }
+
         bootLogger.LogInformation("════════════════════════════════════════════════════════════");
 
         try
@@ -242,6 +358,20 @@ public partial class App : Application
             // that touches the DB — otherwise OverviewViewModel's
             // OnNavigatedToAsync would race against schema creation.
             Host.Services.GetRequiredService<MigrationRunner>().Run();
+
+            // Phase 31 hot-fix — repair stale ext_id values left over
+            // from the old UTF-8 path-hash algorithm. Idempotent: rows
+            // that already match are skipped. Runs after MigrationRunner
+            // so the extensions table exists.
+            try
+            {
+                Host.Services.GetRequiredService<ExtensionIdMigrator>().Run();
+            }
+            catch (Exception ex)
+            {
+                bootLogger.LogWarning(ex,
+                    "ExtensionIdMigrator failed — extensions may still be pinned with the wrong id");
+            }
         }
         catch (Exception ex)
         {
@@ -275,7 +405,88 @@ public partial class App : Application
             MainWindow = window;
             window.Show();
 
+            // Phase 26 — start the auto-lock idle watcher only after
+            // the main window is up. The watcher hooks class-level
+            // input events on Window so it must run after at least one
+            // Window has been created (the EventManager call is fine
+            // earlier, but starting the timer here keeps everything in
+            // one obvious "post-show wiring" block).
+            try
+            {
+                Host.Services.GetRequiredService<GhostShell.App.Vault.VaultIdleWatcher>().Start();
+            }
+            catch (Exception ex)
+            {
+                bootLogger.LogWarning(ex, "VaultIdleWatcher failed to start — auto-lock disabled");
+            }
+
             bootLogger.LogInformation("Main window shown — startup complete");
+
+            // Phase 36 — wire the updater's "shutdown please" signal
+            // BEFORE the first ApplyAsync can fire. The Data layer
+            // raises this on the thread that called ApplyAsync, so
+            // we marshal back to the dispatcher for the actual
+            // Shutdown call (which is dispatcher-affine).
+            try
+            {
+                var updater = Host.Services.GetRequiredService<IUpdateService>();
+                updater.ShutdownRequested += (_, _) =>
+                {
+                    Application.Current?.Dispatcher.InvokeAsync(() =>
+                    {
+                        bootLogger.LogInformation("Updater asked for shutdown — closing for binary swap");
+                        Application.Current?.Shutdown(0);
+                    });
+                };
+            }
+            catch (Exception ex)
+            {
+                bootLogger.LogWarning(ex, "Couldn't subscribe ShutdownRequested handler");
+            }
+
+            // [Phase 37 fix:] Fire-and-forget update check on a background task
+            // Use InvokeAsync to avoid dispatcher deadlock, and guard against
+            // dispatcher being destroyed during shutdown
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var svc = Host.Services.GetRequiredService<IUpdateService>();
+                    var info = await svc.CheckAsync();
+                    if (info is not null && svc.UpdateAvailable)
+                    {
+                        // [Phase 37 fix:] Use InvokeAsync + Task to avoid deadlock
+                        // and check that Application.Current still exists.
+                        // The previous `await … ?? Task.CompletedTask` form
+                        // doesn't compile: DispatcherOperation isn't a Task
+                        // and `??` can't mix with `await` on a void-typed
+                        // chain. Guard explicitly.
+                        try
+                        {
+                            var app = Application.Current;
+                            if (app is not null)
+                            {
+                                await app.Dispatcher.InvokeAsync(() =>
+                                {
+                                    if (Application.Current is not null)
+                                    {
+                                        UpdateAvailableDialog.ShowFor(MainWindow, svc, info);
+                                    }
+                                });
+                            }
+                        }
+                        catch (TaskCanceledException)
+                        {
+                            // Dispatcher was destroyed during shutdown; ignore
+                            bootLogger.LogDebug("Update dialog skipped — app shutting down");
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    bootLogger.LogWarning(ex, "Update check failed at startup");
+                }
+            });
         }
         catch (Exception ex)
         {
@@ -324,8 +535,34 @@ public partial class App : Application
         }
     }
 
+    protected override void OnSessionEnding(SessionEndingCancelEventArgs e)
+    {
+        // Windows is logging off or shutting down. Set flag so OnClosing
+        // doesn't hijack it back into a hide.
+        AllowingShutdown = true;
+        base.OnSessionEnding(e);
+    }
+
     protected override async void OnExit(ExitEventArgs e)
     {
+        // Phase 38: Signal shutdown to the wake-event listener thread
+        _appShuttingDown = true;
+
+        // Phase 38: Tell every Window the close is real this time so
+        // the OnClosing override doesn't hijack it back into a hide.
+        // Without this, calling Application.Current.Shutdown from the
+        // tray's "Quit" menu item would: tray click → Shutdown() →
+        // each Window's Close() → OnClosing(e) → e.Cancel=true → window
+        // never closes → Shutdown loops or hangs on the dispatcher.
+        try
+        {
+            foreach (Window w in Windows)
+            {
+                if (w is MainWindow mw) mw.AllowClose();
+            }
+        }
+        catch { /* best-effort */ }
+
         if (Host is not null)
         {
             var logger = Host.Services
@@ -355,6 +592,22 @@ public partial class App : Application
         // ProcessExit handler is no longer needed — we just ran the
         // full cleanup. Unhook it so the GC can reclaim the closure.
         AppDomain.CurrentDomain.ProcessExit -= OnProcessExit;
+
+        // Phase 38: Release and dispose singleton mutex and event
+        try
+        {
+            if (_singletonMutex != null)
+            {
+                try
+                {
+                    _singletonMutex.ReleaseMutex();
+                }
+                catch { /* mutex already released or not owned */ }
+                _singletonMutex.Dispose();
+            }
+            _showWindowEvent?.Dispose();
+        }
+        catch { /* best-effort */ }
 
         // Flush every Serilog sink before the process actually ends —
         // otherwise the last few writes to the daily file may be lost.

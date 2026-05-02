@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Mykola Kovhanko <thuesdays@gmail.com>
 
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -55,6 +56,20 @@ public sealed class HttpConnectForwarder : IProxyAuthForwarder
 
     public bool IsRunning => _listener is not null && _stopCts is { IsCancellationRequested: false };
     public string? LocalUrl => _localUrl;
+
+    // Phase 28 — per-host byte / request counters. ConcurrentDictionary
+    // gives us thread-safe lookups across the per-connection handlers;
+    // each connection mutates ITS OWN HostCounter via Interlocked.Add
+    // so the only contention is on the dictionary itself (cheap, since
+    // most accesses are reads after the first request to a new host).
+    private sealed class HostCounter
+    {
+        public long Bytes;
+        public long Requests;
+    }
+    private readonly ConcurrentDictionary<string, HostCounter> _counters = new(StringComparer.OrdinalIgnoreCase);
+    private HostCounter GetCounter(string host) =>
+        _counters.GetOrAdd(host, _ => new HostCounter());
 
     public HttpConnectForwarder(ILogger<HttpConnectForwarder> log)
     {
@@ -190,20 +205,25 @@ public sealed class HttpConnectForwarder : IProxyAuthForwarder
                 "Forwarding {Bytes}B header block (target={Target})",
                 modified.Length, string.IsNullOrEmpty(targetHost) ? "?" : targetHost);
 
+            // Phase 28 — count this connection as one request against
+            // the resolved target host, and bill the request-line +
+            // headers we already wrote upstream (they're real bytes).
+            HostCounter? counter = null;
+            if (!string.IsNullOrEmpty(targetHost))
+            {
+                counter = GetCounter(targetHost);
+                Interlocked.Increment(ref counter.Requests);
+                Interlocked.Add(ref counter.Bytes, modified.Length);
+            }
+
             // Bidirectional pump. Either side hitting EOF / error
-            // tears the whole thing down.
-            //
-            // After WhenAny returns we must force the OTHER copy to
-            // unblock — otherwise it sits inside ReadAsync until
-            // its own peer closes (which can take indefinitely if
-            // the upstream proxy is slow to drain). Closing both
-            // streams via the finally block does the trick: the
-            // pending ReadAsync throws ObjectDisposed/IOException
-            // and the loser task exits. We swallow whichever it
-            // threw — by then we already know the connection is
-            // dead.
-            var c2u = clientStream.CopyToAsync(upstreamStream, ct);
-            var u2c = upstreamStream.CopyToAsync(clientStream, ct);
+            // tears the whole thing down. The counting copy mirrors
+            // Stream.CopyToAsync but Interlocked-adds each chunk's
+            // length to the host counter. counter==null = direct
+            // proxy without an upstream host header (rare); the copy
+            // still works, we just don't bill it.
+            var c2u = CountingCopyAsync(clientStream, upstreamStream, counter, ct);
+            var u2c = CountingCopyAsync(upstreamStream, clientStream, counter, ct);
             await Task.WhenAny(c2u, u2c);
 
             // Politely close both sides; the surviving copy will
@@ -229,6 +249,52 @@ public sealed class HttpConnectForwarder : IProxyAuthForwarder
             try { client.Close(); }   catch { /* swallow */ }
             try { upstream?.Close(); } catch { /* swallow */ }
         }
+    }
+
+    /// <summary>Phase 28 — Stream.CopyToAsync analogue that bills each
+    /// chunk's length to <paramref name="counter"/> via Interlocked.
+    /// Bills BOTH directions to the same host counter (request +
+    /// response) — that's what the user sees as "total traffic for
+    /// host X" in the dashboard.</summary>
+    private static async Task CountingCopyAsync(
+        Stream src, Stream dst, HostCounter? counter, CancellationToken ct)
+    {
+        var buf = new byte[16 * 1024];
+        while (true)
+        {
+            int n;
+            try { n = await src.ReadAsync(buf, ct); }
+            catch (IOException)            { return; }
+            catch (ObjectDisposedException) { return; }
+            if (n <= 0) return;
+            try { await dst.WriteAsync(buf.AsMemory(0, n), ct); }
+            catch (IOException)            { return; }
+            catch (ObjectDisposedException) { return; }
+            if (counter is not null) Interlocked.Add(ref counter.Bytes, n);
+        }
+    }
+
+    /// <summary>Phase 28 — atomically swap out the per-host counter
+    /// table and return the OLD one. The collector thread is the only
+    /// reader; per-connection writers contend on the new (empty) table
+    /// from this point. Returns a snapshot keyed by hostname (lowercase).</summary>
+    public IReadOnlyDictionary<string, (long Bytes, long Requests)> DrainCounters()
+    {
+        // We don't expose the live ConcurrentDictionary — that would let
+        // a worker mutate it while the caller iterates. Instead we
+        // *swap* by Clear()-ing after copying out a snapshot. The window
+        // between snapshot and Clear is tiny (microseconds); any writes
+        // landing inside that window get counted on the NEXT drain,
+        // which is fine for hourly bucket aggregation.
+        var snapshot = new Dictionary<string, (long, long)>(StringComparer.OrdinalIgnoreCase);
+        foreach (var kv in _counters)
+        {
+            var bytes = Interlocked.Exchange(ref kv.Value.Bytes, 0);
+            var reqs  = Interlocked.Exchange(ref kv.Value.Requests, 0);
+            if (bytes == 0 && reqs == 0) continue;
+            snapshot[kv.Key] = (bytes, reqs);
+        }
+        return snapshot;
     }
 
     // ─────────────────────────────────────────────────────────

@@ -4,6 +4,12 @@
     Solution-wide build defaults. Pinning these here keeps every csproj
     file under src/ tiny and consistent.
   -->
+  <!-- Phase 37 audit fix #8: Version format contract documentation.
+       VERSION must be 4-part dotted (X.Y.Z.W). Release tags on GitHub
+       follow vX.Y.Z.W (e.g., v0.0.2.0). The updater strips the v
+       prefix case-insensitively, parses, and compares with > against
+       the running assembly version. -->
+
   <PropertyGroup>
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
@@ -11,17 +17,34 @@
     <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
     <Deterministic>true</Deterministic>
     <Company>Ghost Shell</Company>
-    <Product>Ghost Shell Desktop</Product>
+    <Product>Ghost Shell</Product>
     <Copyright>Copyright (c) Ghost Shell contributors</Copyright>
+    <!-- Phase 38 fix — Windows reads FileDescription / AssemblyTitle for
+         the title bar of toast / balloon notifications and the Properties
+         → Details dialog. Without these, the apphost's default literally
+         shows ".NET Host" on every balloon (we hit this on a dev build:
+         the GhostShell.exe apphost stamp wasn't rewritten because we run
+         the unpublished build). Setting them here covers BOTH dev and
+         publish — MSBuild stamps the exe's version-info resource. -->
+    <AssemblyTitle>Ghost Shell</AssemblyTitle>
+    <Description>Ghost Shell — antidetect browser control plane</Description>
     <RootNamespace>GhostShell.$(MSBuildProjectName.Replace('GhostShell.', ''))</RootNamespace>
 
-    <!-- Version stamped into every assembly so SettingsView's
-         Assembly.GetName().Version matches the title-bar display
-         and the eventual installer / release tag. -->
-    <Version>0.2.0</Version>
-    <AssemblyVersion>0.2.0.0</AssemblyVersion>
-    <FileVersion>0.2.0.0</FileVersion>
-    <InformationalVersion>0.2.0-phase4.4</InformationalVersion>
+    <!-- Version is read from the VERSION file at the repo root —
+         single source of truth shared with build_desktop.bat (which
+         passes it to ISCC) and the GitHub Releases tag. Format is
+         four-part dotted (Major.Minor.Patch.Build); the file should
+         contain just that string with optional trailing whitespace.
+         The Trim() call strips the LF the editor leaves behind.
+         Bump this file when cutting a release; everything downstream
+         (assembly metadata, installer .exe properties, SettingsView's
+         "About" pane, MainWindow title, update-check comparison)
+         picks the new value up automatically. -->
+    <_GhostShellVersionFromFile>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)VERSION').Trim())</_GhostShellVersionFromFile>
+    <Version>$(_GhostShellVersionFromFile)</Version>
+    <AssemblyVersion>$(_GhostShellVersionFromFile)</AssemblyVersion>
+    <FileVersion>$(_GhostShellVersionFromFile)</FileVersion>
+    <InformationalVersion>$(_GhostShellVersionFromFile)</InformationalVersion>
 
     <!-- ─── No leftover dotnet.exe build-server processes ──────────
          The default MSBuild + Roslyn config keeps a build-server
@@ -42,5 +65,14 @@
     <UseSharedCompilation>false</UseSharedCompilation>
     <BuildInParallel>false</BuildInParallel>
   </PropertyGroup>
+
+  <!-- Phase 37 audit fix #1: MSBuild cache staleness.
+       Register VERSION as a build input so MSBuild busts the property
+       cache when VERSION changes. -->
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)VERSION" Condition="Exists('$(MSBuildThisFileDirectory)VERSION')">
+      <Visible>false</Visible>
+    </None>
+  </ItemGroup>
 
 </Project>

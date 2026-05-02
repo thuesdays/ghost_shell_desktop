@@ -39,6 +39,9 @@ public partial class ProfileEditorDialog : Window
             NameField.IsEnabled    = false; // primary key
             GroupField.Text        = existing.GroupName ?? "";
             NoteField.Text         = existing.Note ?? "";
+            // Phase 20 — load CSV domain lists.
+            MyDomainsField.Text     = existing.MyDomainsCsv ?? "";
+            TargetDomainsField.Text = existing.TargetDomainsCsv ?? "";
             IsReadyField.IsChecked = existing.IsReady;
             EnrichField.IsChecked  = existing.EnrichOnFirstRun;
             TemplateCombo.SelectedValue = existing.TemplateId ?? AutoTemplateId;
@@ -187,10 +190,20 @@ public partial class ProfileEditorDialog : Window
             IsReady          = IsReadyField.IsChecked == true,
             EnrichOnFirstRun = EnrichField.IsChecked  == true,
             Note             = NullIfBlank(NoteField.Text),
+            // Phase 20 — write CSV domain lists. Blank → null so the
+            // runtime sees no policy at all (filters pass through).
+            MyDomainsCsv     = NullIfBlank(MyDomainsField.Text),
+            TargetDomainsCsv = NullIfBlank(TargetDomainsField.Text),
             CreatedAt        = _existing?.CreatedAt ?? default,
             UpdatedAt        = default,
             LastRunAt        = _existing?.LastRunAt,
             RunCount         = _existing?.RunCount ?? 0,
+            // Preserve the existing profile's salts + script binding
+            // (the editor doesn't expose them, but we'd lose them on
+            // save without copying through).
+            FpRegenSalt      = _existing?.FpRegenSalt,
+            FpNoiseSalt      = _existing?.FpNoiseSalt,
+            AssignedScriptId = _existing?.AssignedScriptId,
         };
         DialogResult = true;
     }

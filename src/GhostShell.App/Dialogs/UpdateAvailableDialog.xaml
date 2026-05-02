@@ -1,0 +1,123 @@
+<!--
+  SPDX-License-Identifier: MIT
+  Copyright (c) 2026 Mykola Kovhanko <thuesdays@gmail.com>
+-->
+<Window x:Class="GhostShell.App.Dialogs.UpdateAvailableDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Update available"
+        Width="560" SizeToContent="Height"
+        WindowStartupLocation="CenterOwner"
+        WindowStyle="None"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False"
+        Background="{StaticResource BgBase}">
+
+    <Border BorderBrush="{StaticResource BorderStrong}" BorderThickness="1">
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>  <!-- title bar  -->
+                <RowDefinition Height="*"/>     <!-- body       -->
+                <RowDefinition Height="Auto"/>  <!-- footer     -->
+            </Grid.RowDefinitions>
+
+            <!-- Title bar -->
+            <Border Grid.Row="0"
+                    Background="{StaticResource BgDeep}"
+                    BorderBrush="{StaticResource Border}"
+                    BorderThickness="0,0,0,1"
+                    Padding="0">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="4"/>     <!-- accent strip -->
+                        <ColumnDefinition Width="*"/>     <!-- title -->
+                        <ColumnDefinition Width="Auto"/>  <!-- close -->
+                    </Grid.ColumnDefinitions>
+                    <Border Grid.Column="0" Background="{StaticResource Accent}"/>
+                    <!-- StackPanel has no Padding; wrap in a Border. -->
+                    <Border Grid.Column="1" Padding="14,12,14,12">
+                    <StackPanel VerticalAlignment="Center">
+                        <TextBlock x:Name="TitleText"
+                                   FontSize="13" FontWeight="SemiBold"
+                                   Foreground="{StaticResource Text}"/>
+                        <TextBlock x:Name="CurrentVersionText"
+                                   FontSize="11" Margin="0,2,0,0"
+                                   Foreground="{StaticResource TextMuted}"/>
+                    </StackPanel>
+                    </Border>
+                    <Button Grid.Column="2" Padding="8" Margin="0" Background="Transparent"
+                            Click="OnCloseClick" Foreground="{StaticResource TextMuted}">
+                        ✕
+                    </Button>
+                </Grid>
+            </Border>
+
+            <!-- Body: release notes + progress bar -->
+            <!-- Grid has no Padding either; wrap in a Border. -->
+            <Border Grid.Row="1" Padding="14,12">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="*"/>     <!-- release notes -->
+                    <RowDefinition Height="Auto"/>  <!-- progress bar  -->
+                </Grid.RowDefinitions>
+
+                <ScrollViewer Grid.Row="0" VerticalScrollBarVisibility="Auto" MaxHeight="300">
+                    <TextBox x:Name="ReleaseNotesBox"
+                             IsReadOnly="True"
+                             TextWrapping="Wrap"
+                             Background="Transparent"
+                             BorderThickness="0"
+                             Foreground="{StaticResource Text}"
+                             FontSize="11"/>
+                </ScrollViewer>
+
+                <ProgressBar x:Name="ProgressBar"
+                             Grid.Row="1"
+                             Margin="0,12,0,0"
+                             Height="20"
+                             Background="{StaticResource BgDeep}"
+                             Foreground="{StaticResource Accent}"
+                             Visibility="Collapsed"/>
+            </Grid>
+            </Border>
+
+            <!-- Footer buttons -->
+            <Border Grid.Row="2"
+                    BorderBrush="{StaticResource Border}"
+                    BorderThickness="0,1,0,0"
+                    Padding="14,12"
+                    Background="{StaticResource BgDeep}">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+
+                    <!-- [Phase 37 fix:] IsDefault on Update button; accessibility names; IsCancel on Later -->
+                    <Button x:Name="UpdateButton"
+                            Grid.Column="1"
+                            Content="Update now"
+                            Click="OnUpdateClick"
+                            Padding="12,6" Margin="0,0,8,0"
+                            IsDefault="True"
+                            AutomationProperties.Name="Update now"/>
+                    <Button x:Name="InstallerButton"
+                            Grid.Column="2"
+                            Content="Download installer"
+                            Click="OnInstallerClick"
+                            Padding="12,6" Margin="0,0,8,0"
+                            AutomationProperties.Name="Download installer"/>
+                    <Button x:Name="LaterButton"
+                            Grid.Column="3"
+                            Content="Later"
+                            Click="OnLaterClick"
+                            Padding="12,6"
+                            IsCancel="True"
+                            AutomationProperties.Name="Remind me later"/>
+                </Grid>
+            </Border>
+        </Grid>
+    </Border>
+</Window>

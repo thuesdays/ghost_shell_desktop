@@ -50,6 +50,13 @@ public sealed class RunContext
     public HashSet<string> TargetDomains { get; } = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
+    /// Domains to skip entirely — never click, never record competitor
+    /// data, never fire action events. Used by per-step
+    /// <c>SkipOnBlocked</c> / <c>OnlyOnBlocked</c> filters.
+    /// </summary>
+    public HashSet<string> BlockDomains { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
     /// Currently-iterated ad's href, set by foreach_ad on each lap so
     /// per-step domain filters can resolve which ad they're looking at.
     /// Empty outside an ad loop, in which case the filters become
@@ -57,6 +64,16 @@ public sealed class RunContext
     /// "not matching any policy").
     /// </summary>
     public string CurrentAdHref { get; set; } = "";
+
+    /// <summary>
+    /// Phase 24 — credential-vault references resolved at run start.
+    /// Shape: <c>{ "12": { "username": "...", "password": "..." } }</c>.
+    /// Read by <c>InterpolateVars</c> when a <c>{{vault.&lt;id&gt;.&lt;field&gt;}}</c>
+    /// placeholder is encountered; missing items / fields fall through
+    /// to the literal placeholder text (debugging-friendly).
+    /// </summary>
+    public Dictionary<string, IReadOnlyDictionary<string, string>> Vault { get; }
+        = new(StringComparer.Ordinal);
 
     /// <summary>Pop a fresh var-name without colliding with existing keys.</summary>
     public string NextVarName(string baseName)

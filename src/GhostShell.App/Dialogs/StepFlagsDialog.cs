@@ -27,6 +27,8 @@ public sealed class StepFlagsDialog : Window
     public bool   SkipOnTarget { get; private set; }
     public bool   OnlyOnTarget { get; private set; }
     public bool   OnlyOnMyDomain { get; private set; }
+    public bool   SkipOnBlocked { get; private set; }
+    public bool   OnlyOnBlocked { get; private set; }
 
     private readonly Slider   _prob;
     private readonly TextBlock _probLabel;
@@ -35,6 +37,8 @@ public sealed class StepFlagsDialog : Window
     private readonly CheckBox _skipTg;
     private readonly CheckBox _onlyTg;
     private readonly CheckBox _onlyMy;
+    private readonly CheckBox _skipBlocked;
+    private readonly CheckBox _onlyBlocked;
 
     public StepFlagsDialog(
         string actionLabel,
@@ -43,7 +47,9 @@ public sealed class StepFlagsDialog : Window
         bool skipOnMyDomain,
         bool skipOnTarget,
         bool onlyOnTarget,
-        bool onlyOnMyDomain)
+        bool onlyOnMyDomain,
+        bool skipOnBlocked = false,
+        bool onlyOnBlocked = false)
     {
         Title = $"⚙ Step settings — {actionLabel}";
         Width = 480;
@@ -165,6 +171,18 @@ public sealed class StepFlagsDialog : Window
             onlyOnMyDomain);
         body.Children.Add(_onlyMy.Parent as FrameworkElement ?? _onlyMy);
 
+        _skipBlocked = MakeFlagRow(
+            "Skip on blocked domain",
+            "Skip when the current ad is on the block list (domains to ignore entirely).",
+            skipOnBlocked);
+        body.Children.Add(_skipBlocked.Parent as FrameworkElement ?? _skipBlocked);
+
+        _onlyBlocked = MakeFlagRow(
+            "Only on blocked domain",
+            "Run ONLY for ads on the block list (debug-only; rare usage).",
+            onlyOnBlocked);
+        body.Children.Add(_onlyBlocked.Parent as FrameworkElement ?? _onlyBlocked);
+
         var bodyScroll = new ScrollViewer
         {
             Content = body,
@@ -202,6 +220,8 @@ public sealed class StepFlagsDialog : Window
         SkipOnTarget   = _skipTg.IsChecked == true;
         OnlyOnTarget   = _onlyTg.IsChecked == true;
         OnlyOnMyDomain = _onlyMy.IsChecked == true;
+        SkipOnBlocked  = _skipBlocked.IsChecked == true;
+        OnlyOnBlocked  = _onlyBlocked.IsChecked == true;
         Saved = true;
         DialogResult = true;
         Close();

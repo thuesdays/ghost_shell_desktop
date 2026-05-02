@@ -3,33 +3,134 @@
 
 using System.Diagnostics;
 using System.IO;
+using System.Text.Json;
+using System.Windows;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using GhostShell.App.Dialogs;
 using GhostShell.App.Logging;
 using GhostShell.Core.Common;
+using GhostShell.Core.Models;
 using GhostShell.Core.Services;
 using Microsoft.Extensions.Logging;
+using Microsoft.Win32;
 
 namespace GhostShell.App.ViewModels;
 
+/// <summary>
+/// Phase 29 — full Settings page port. Sections:
+/// Build info / Install paths / UA spoof range / SERP engagement /
+/// Auto-enrich / Export-Import / Danger zone.
+///
+/// Each input is bound TwoWay to a property here; changes persist
+/// via <see cref="ISettingsService"/> on focus-loss / explicit Save.
+/// </summary>
 public sealed partial class SettingsViewModel : BaseViewModel
 {
     private readonly IChromiumLocator _chromiumLocator;
+    private readonly ISettingsService _settings;
+    private readonly INotificationService _notifications;
+    private readonly IProfileService _profiles;
+    private readonly IRunService _runs;
+    private readonly IScriptService _scripts;
+    private readonly ITrafficService _traffic;
+    private readonly IDialogService _dialogs;
     private readonly ILogger<SettingsViewModel> _log;
+    private bool _initialised;
 
-    public SettingsViewModel(IChromiumLocator chromiumLocator, ILogger<SettingsViewModel> log)
+    public SettingsViewModel(
+        IChromiumLocator chromiumLocator,
+        ISettingsService settings,
+        INotificationService notifications,
+        IProfileService profiles,
+        IRunService runs,
+        IScriptService scripts,
+        ITrafficService traffic,
+        IDialogService dialogs,
+        ILogger<SettingsViewModel> log)
     {
         _chromiumLocator = chromiumLocator;
+        _settings        = settings;
+        _notifications   = notifications;
+        _profiles        = profiles;
+        _runs            = runs;
+        _scripts         = scripts;
+        _traffic         = traffic;
+        _dialogs         = dialogs;
         _log             = log;
         ProbeChromium();
     }
+
+    /// <summary>Phase 30 — left-rail tab id. Drives which section is
+    /// visible. Same-shape as the legacy web's hash navigation
+    /// (#build-info / #install-paths / etc.).</summary>
+    [ObservableProperty] private string _activeTab = "build-info";
+
+    public IReadOnlyList<SettingsTab> Tabs { get; } = new[]
+    {
+        new SettingsTab("build-info",    "🚀  Build info"),
+        new SettingsTab("ua-spoof",      "🎭  UA spoof range"),
+        new SettingsTab("serp",          "🍯  SERP engagement"),
+        new SettingsTab("performance",   "⚡  Performance"),
+        new SettingsTab("auto-enrich",   "🔴  Auto-enrich"),
+        new SettingsTab("export-import", "📦  Export / Import"),
+        new SettingsTab("danger-zone",   "⚠  Danger zone"),
+    };
+
+    [RelayCommand]
+    private void SetActiveTab(string? id) { if (!string.IsNullOrEmpty(id)) ActiveTab = id; }
+
+    public override async Task OnNavigatedToAsync()
+    {
+        // Phase 29 audit fix — flip _initialised back to true ONLY if
+        // the entire load succeeded. If anything throws we leave it
+        // false so subsequent property changes don't accidentally
+        // persist over a half-loaded state. The user can reload by
+        // navigating away + back.
+        _initialised = false;
+        var loaded = false;
+        try
+        {
+            ChromiumBinaryPath = await _settings.GetChromiumBinaryPathAsync() ?? "";
+            UaSpoofMin         = await _settings.GetUaSpoofMinAsync();
+            UaSpoofMax         = await _settings.GetUaSpoofMaxAsync();
+            SerpScroll         = await _settings.GetSerpScrollEnabledAsync();
+            SerpDwell          = await _settings.GetSerpDwellEnabledAsync();
+            OrganicClick       = await _settings.GetOrganicClickEnabledAsync();
+            OrganicClickProb   = await _settings.GetOrganicClickProbabilityAsync();
+            OrganicDwellMin    = await _settings.GetOrganicDwellMinSecAsync();
+            OrganicDwellMax    = await _settings.GetOrganicDwellMaxSecAsync();
+            AutoEnrichEnabled  = await _settings.GetAutoEnrichEnabledAsync();
+            AutoEnrichMaxDays  = await _settings.GetAutoEnrichMaxDaysAsync();
+            AutoEnrichMaxUrls  = await _settings.GetAutoEnrichMaxUrlsAsync();
+            AutoEnrichSrcPath  = await _settings.GetAutoEnrichSourcePathAsync() ?? "";
+            // Phase 30 — performance / resource blocking.
+            BlockYoutube       = await _settings.GetBoolAsync(SettingsKeys.BlockYoutubeVideo)    ?? false;
+            BlockGoogleImages  = await _settings.GetBoolAsync(SettingsKeys.BlockGoogleImages)    ?? false;
+            BlockMapsTiles     = await _settings.GetBoolAsync(SettingsKeys.BlockGoogleMapsTiles) ?? false;
+            BlockFonts         = await _settings.GetBoolAsync(SettingsKeys.BlockFonts)           ?? false;
+            BlockAnalytics     = await _settings.GetBoolAsync(SettingsKeys.BlockAnalytics)       ?? false;
+            BlockSocialWidgets = await _settings.GetBoolAsync(SettingsKeys.BlockSocialWidgets)   ?? false;
+            BlockVideoEverywhere = await _settings.GetBoolAsync(SettingsKeys.BlockVideoEverywhere) ?? false;
+            BlockCustomPatterns  = await _settings.GetStringAsync(SettingsKeys.BlockCustomPatterns) ?? "";
+            UpdatePoolPreview();
+            UpdateBlockingPreview();
+            loaded = true;
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "Settings load failed — leaving fields disabled until next visit");
+        }
+        finally { _initialised = loaded; }
+    }
+
+    // ─── Build info (read-only) ──────────────────────────────────────
 
     [ObservableProperty] private string _dataDirectory   = AppPaths.DataDir;
     [ObservableProperty] private string _databasePath    = AppPaths.DatabasePath;
     [ObservableProperty] private string _logsDirectory   = AppPaths.LogsDir;
     [ObservableProperty] private string _currentLogFile  = LoggingSetup.CurrentLogPath;
 
-    // ─── Chromium status ──────────────────────────────────────────
     [ObservableProperty] private string _chromiumPath          = "—";
     [ObservableProperty] private string _chromedriverPath      = "—";
     [ObservableProperty] private string _chromiumVersion       = "—";
@@ -41,6 +142,242 @@ public sealed partial class SettingsViewModel : BaseViewModel
     [ObservableProperty]
     private string _appVersion =
         typeof(SettingsViewModel).Assembly.GetName().Version?.ToString(3) ?? "0.1.0";
+
+    // ─── Install paths ───────────────────────────────────────────────
+
+    [ObservableProperty] private string _chromiumBinaryPath = "";
+    partial void OnChromiumBinaryPathChanged(string value) => _ = PersistAsync(
+        () => _settings.SetChromiumBinaryPathAsync(string.IsNullOrWhiteSpace(value) ? null : value.Trim()));
+
+    // ─── UA spoof range ──────────────────────────────────────────────
+
+    [ObservableProperty] private int _uaSpoofMin = 130;
+    [ObservableProperty] private int _uaSpoofMax = 147;
+    [ObservableProperty] private string _uaPoolPreview = "";
+
+    partial void OnUaSpoofMinChanged(int value) => _ = PersistRangeAsync();
+    partial void OnUaSpoofMaxChanged(int value) => _ = PersistRangeAsync();
+
+    private async Task PersistRangeAsync()
+    {
+        UpdatePoolPreview();
+        if (!_initialised) return;
+        try { await _settings.SetUaSpoofRangeAsync(UaSpoofMin, UaSpoofMax); }
+        catch (Exception ex) { _log.LogWarning(ex, "Persist UA range failed"); }
+    }
+
+    private void UpdatePoolPreview()
+    {
+        // Deterministic preview — the actual fingerprint pool lives in
+        // the runtime layer, but the user-facing preview should match
+        // the inclusive [Min..Max] window. We surface up to 6 versions
+        // (newest first) so the chip stays compact.
+        var hi = Math.Max(UaSpoofMin, UaSpoofMax);
+        var lo = Math.Min(UaSpoofMin, UaSpoofMax);
+        if (hi - lo > 30) // sanity clamp on the preview row
+            UaPoolPreview = $"{hi}.0.7780.88, {hi - 1}.0.7715.130, {hi - 2}.0.7665.162, … (range too wide)";
+        else
+        {
+            var versions = new List<string>();
+            for (int v = hi; v >= lo && versions.Count < 6; v--)
+                versions.Add($"{v}.0.{7000 + v * 5}.{20 + v % 100}");
+            UaPoolPreview = string.Join(", ", versions);
+        }
+    }
+
+    // ─── SERP engagement ─────────────────────────────────────────────
+
+    [ObservableProperty] private bool   _serpScroll        = true;
+    [ObservableProperty] private bool   _serpDwell         = true;
+    [ObservableProperty] private bool   _organicClick      = true;
+    [ObservableProperty] private double _organicClickProb  = 0.25;
+    [ObservableProperty] private int    _organicDwellMin   = 8;
+    [ObservableProperty] private int    _organicDwellMax   = 26;
+
+    partial void OnSerpScrollChanged(bool value)        => _ = PersistAsync(() => _settings.SetBoolAsync(SettingsKeys.SerpScrollEnabled, value));
+    partial void OnSerpDwellChanged(bool value)         => _ = PersistAsync(() => _settings.SetBoolAsync(SettingsKeys.SerpDwellEnabled, value));
+    partial void OnOrganicClickChanged(bool value)      => _ = PersistAsync(() => _settings.SetBoolAsync(SettingsKeys.OrganicClickEnabled, value));
+    partial void OnOrganicClickProbChanged(double value)=> _ = PersistAsync(() => _settings.SetDoubleAsync(SettingsKeys.OrganicClickProbability, Math.Clamp(value, 0, 1)));
+    partial void OnOrganicDwellMinChanged(int value)    => _ = PersistAsync(() => _settings.SetIntAsync(SettingsKeys.OrganicDwellMinSec, Math.Max(0, value)));
+    partial void OnOrganicDwellMaxChanged(int value)    => _ = PersistAsync(() => _settings.SetIntAsync(SettingsKeys.OrganicDwellMaxSec, Math.Max(0, value)));
+
+    // ─── Performance / resource blocking (Phase 30) ──────────────────
+
+    [ObservableProperty] private bool   _blockYoutube;
+    [ObservableProperty] private bool   _blockGoogleImages;
+    [ObservableProperty] private bool   _blockMapsTiles;
+    [ObservableProperty] private bool   _blockFonts;
+    [ObservableProperty] private bool   _blockAnalytics;
+    [ObservableProperty] private bool   _blockSocialWidgets;
+    [ObservableProperty] private bool   _blockVideoEverywhere;
+    [ObservableProperty] private string _blockCustomPatterns = "";
+    [ObservableProperty] private string _blockingSummary = "";
+
+    partial void OnBlockYoutubeChanged(bool value)         => _ = PersistBoolAsync(SettingsKeys.BlockYoutubeVideo, value);
+    partial void OnBlockGoogleImagesChanged(bool value)    => _ = PersistBoolAsync(SettingsKeys.BlockGoogleImages, value);
+    partial void OnBlockMapsTilesChanged(bool value)       => _ = PersistBoolAsync(SettingsKeys.BlockGoogleMapsTiles, value);
+    partial void OnBlockFontsChanged(bool value)           => _ = PersistBoolAsync(SettingsKeys.BlockFonts, value);
+    partial void OnBlockAnalyticsChanged(bool value)       => _ = PersistBoolAsync(SettingsKeys.BlockAnalytics, value);
+    partial void OnBlockSocialWidgetsChanged(bool value)   => _ = PersistBoolAsync(SettingsKeys.BlockSocialWidgets, value);
+    partial void OnBlockVideoEverywhereChanged(bool value) => _ = PersistBoolAsync(SettingsKeys.BlockVideoEverywhere, value);
+    partial void OnBlockCustomPatternsChanged(string value) => _ = PersistAsync(
+        () => _settings.SetStringAsync(SettingsKeys.BlockCustomPatterns, value));
+
+    private async Task PersistBoolAsync(string key, bool v)
+    {
+        UpdateBlockingPreview();
+        if (!_initialised) return;
+        try { await _settings.SetBoolAsync(key, v); }
+        catch (Exception ex) { _log.LogWarning(ex, "Persist {Key} failed", key); }
+    }
+
+    private void UpdateBlockingPreview()
+    {
+        var enabled = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (BlockYoutube)         enabled.Add("block_youtube_video");
+        if (BlockGoogleImages)    enabled.Add("block_google_images");
+        if (BlockMapsTiles)       enabled.Add("block_google_maps_tiles");
+        if (BlockFonts)           enabled.Add("block_fonts");
+        if (BlockAnalytics)       enabled.Add("block_analytics");
+        if (BlockSocialWidgets)   enabled.Add("block_social_widgets");
+        if (BlockVideoEverywhere) enabled.Add("block_video_everywhere");
+        var patterns = ResourceBlockingPatterns.Compose(enabled, BlockCustomPatterns);
+        var custom   = ResourceBlockingPatterns.ParseCustomPatterns(BlockCustomPatterns).Count();
+        BlockingSummary = patterns.Count == 0
+            ? "No patterns active — every resource will load."
+            : $"{patterns.Count} URL pattern(s) will be blocked · {enabled.Count} bucket(s) + {custom} custom";
+    }
+
+    // ─── Auto-enrich ─────────────────────────────────────────────────
+
+    [ObservableProperty] private bool   _autoEnrichEnabled;
+    [ObservableProperty] private int    _autoEnrichMaxDays = 30;
+    [ObservableProperty] private int    _autoEnrichMaxUrls = 500;
+    [ObservableProperty] private string _autoEnrichSrcPath = "";
+
+    partial void OnAutoEnrichEnabledChanged(bool value) => _ = PersistAsync(() => _settings.SetBoolAsync(SettingsKeys.AutoEnrichEnabled, value));
+    partial void OnAutoEnrichMaxDaysChanged(int value)  => _ = PersistAsync(() => _settings.SetIntAsync(SettingsKeys.AutoEnrichMaxDays, Math.Clamp(value, 1, 365)));
+    partial void OnAutoEnrichMaxUrlsChanged(int value)  => _ = PersistAsync(() => _settings.SetIntAsync(SettingsKeys.AutoEnrichMaxUrls, Math.Clamp(value, 10, 10000)));
+    partial void OnAutoEnrichSrcPathChanged(string value)=> _ = PersistAsync(() => _settings.SetStringAsync(SettingsKeys.AutoEnrichSourcePath, string.IsNullOrWhiteSpace(value) ? null : value.Trim()));
+
+    private async Task PersistAsync(Func<Task> setter)
+    {
+        if (!_initialised) return;
+        try { await setter(); }
+        catch (Exception ex) { _log.LogWarning(ex, "Persist setting failed"); }
+    }
+
+    // ─── Export / Import / Reset ────────────────────────────────────
+
+    [RelayCommand]
+    private async Task ExportConfigAsync()
+    {
+        var sfd = new SaveFileDialog
+        {
+            FileName = $"ghost-shell-config-{DateTime.Now:yyyyMMdd-HHmmss}.json",
+            Filter = "JSON bundle (*.json)|*.json",
+        };
+        if (sfd.ShowDialog() != true) return;
+        try
+        {
+            var settings  = await _settings.GetAllAsync();
+            var profiles  = await _profiles.ListAsync();
+            var scripts   = await _scripts.ListAsync();
+            var bundle = new
+            {
+                format_version = 2,
+                exported_at    = DateTime.UtcNow.ToString("O"),
+                app_version    = AppVersion,
+                config         = settings,
+                profiles       = profiles,
+                scripts        = scripts,
+            };
+            var json = JsonSerializer.Serialize(bundle, new JsonSerializerOptions
+            {
+                WriteIndented = true,
+            });
+            await File.WriteAllTextAsync(sfd.FileName, json);
+            await _notifications.AddAsync(NotificationSeverity.Success,
+                "Config exported",
+                $"Bundle written to {Path.GetFileName(sfd.FileName)}",
+                source: "settings_export");
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "Export config failed");
+            await _dialogs.ConfirmAsync("Export failed", ex.Message, "OK", ConfirmSeverity.Error);
+        }
+    }
+
+    [ObservableProperty] private bool _replaceMode;
+    [RelayCommand]
+    private async Task ImportConfigAsync()
+    {
+        var ofd = new OpenFileDialog { Filter = "JSON bundle (*.json)|*.json" };
+        if (ofd.ShowDialog() != true) return;
+        if (ReplaceMode)
+        {
+            var ok = await _dialogs.ConfirmAsync(
+                "Replace ALL config?",
+                "Replace mode wipes every existing setting before importing the bundle. Profiles, scripts, and proxies are kept. There is no undo.",
+                "Replace", ConfirmSeverity.Danger);
+            if (!ok) return;
+        }
+        try
+        {
+            var raw = await File.ReadAllTextAsync(ofd.FileName);
+            using var doc = JsonDocument.Parse(raw);
+            var root = doc.RootElement;
+            int settingsCount = 0;
+            if (root.TryGetProperty("config", out var cfg) && cfg.ValueKind == JsonValueKind.Object)
+            {
+                var dict = new Dictionary<string, string?>();
+                foreach (var kv in cfg.EnumerateObject())
+                    dict[kv.Name] = kv.Value.ValueKind == JsonValueKind.String ? kv.Value.GetString() : kv.Value.GetRawText();
+                await _settings.ApplyAllAsync(dict, replaceAll: ReplaceMode);
+                settingsCount = dict.Count;
+            }
+            await _notifications.AddAsync(NotificationSeverity.Success,
+                "Config imported",
+                $"{settingsCount} setting(s) applied (mode={(ReplaceMode ? "replace" : "merge")}).",
+                source: "settings_import");
+            await OnNavigatedToAsync();
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "Import config failed");
+            await _dialogs.ConfirmAsync("Import failed", ex.Message, "OK", ConfirmSeverity.Error);
+        }
+    }
+
+    [RelayCommand]
+    private async Task ResetStatsAsync()
+    {
+        var ok = await _dialogs.ConfirmAsync(
+            "Reset stats counters?",
+            "Wipes run history, traffic stats, and notifications. Profiles, scripts, vault, and settings are preserved. There is no undo.",
+            "Reset", ConfirmSeverity.Danger);
+        if (!ok) return;
+        try
+        {
+            // Wipe runs, traffic stats, and old notifications. Vault,
+            // profiles, scripts, proxies, and settings stay untouched.
+            await _runs.ClearAsync(olderThan: null);
+            await _traffic.CleanupOlderThanAsync(1);  // smallest valid window — effectively wipes all
+            await _notifications.PurgeOlderThanAsync(1);
+            await _notifications.AddAsync(NotificationSeverity.Info,
+                "Stats counters reset",
+                "Run history + traffic stats wiped. Profiles + scripts kept.",
+                source: "settings_reset");
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "Reset stats failed");
+            await _dialogs.ConfirmAsync("Reset failed", ex.Message, "OK", ConfirmSeverity.Error);
+        }
+    }
+
+    // ─── Existing chrome / folder helpers (unchanged) ───────────────
 
     [RelayCommand]
     private void ProbeChromium()
@@ -57,9 +394,6 @@ public sealed partial class SettingsViewModel : BaseViewModel
                 ? $"Located via {status.ProbedFrom}"
                 : status.Error ?? "Not found.";
             ChromiumCandidates     = string.Join("\n", status.Candidates);
-            _log.LogInformation(
-                "Chromium probe: found={Found}, path='{Path}', version={Ver}",
-                status.Found, ChromiumPath, ChromiumVersion);
         }
         catch (Exception ex)
         {
@@ -69,18 +403,8 @@ public sealed partial class SettingsViewModel : BaseViewModel
         }
     }
 
-    [RelayCommand]
-    private void OpenLogsFolder()
-    {
-        TryOpenInExplorer(AppPaths.LogsDir, "logs folder");
-    }
-
-    [RelayCommand]
-    private void OpenDataFolder()
-    {
-        TryOpenInExplorer(AppPaths.DataDir, "data folder");
-    }
-
+    [RelayCommand] private void OpenLogsFolder()       => TryOpenInExplorer(AppPaths.LogsDir, "logs folder");
+    [RelayCommand] private void OpenDataFolder()       => TryOpenInExplorer(AppPaths.DataDir, "data folder");
     [RelayCommand]
     private void OpenChromiumFolder()
     {
@@ -93,7 +417,6 @@ public sealed partial class SettingsViewModel : BaseViewModel
     {
         try
         {
-            _log.LogInformation("Opening {Label} in Explorer: {Path}", label, path);
             Process.Start(new ProcessStartInfo
             {
                 FileName        = "explorer.exe",
@@ -101,9 +424,14 @@ public sealed partial class SettingsViewModel : BaseViewModel
                 UseShellExecute = true,
             });
         }
-        catch (Exception ex)
-        {
-            _log.LogError(ex, "Failed to open {Label}", label);
-        }
+        catch (Exception ex) { _log.LogError(ex, "Failed to open {Label}", label); }
     }
+}
+
+/// <summary>Phase 30 — left-rail tab descriptor.</summary>
+public sealed partial class SettingsTab : ObservableObject
+{
+    public string Id    { get; }
+    public string Label { get; }
+    public SettingsTab(string id, string label) { Id = id; Label = label; }
 }

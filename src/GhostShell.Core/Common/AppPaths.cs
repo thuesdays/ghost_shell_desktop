@@ -41,6 +41,23 @@ public static class AppPaths
     public static string VaultPath     => Path.Combine(DataDir, "vault.enc");
     public static string SettingsPath  => Path.Combine(DataDir, "app.json");
 
+    /// <summary>Phase 27 — root for unpacked extensions. Each extension
+    /// lives under <c>extensions/&lt;ext_id&gt;/</c> and is referenced
+    /// by Chrome via <c>--load-extension=&lt;path&gt;</c>.</summary>
+    public static string ExtensionsDir => EnsureDir(Path.Combine(DataDir, "extensions"));
+
+    /// <summary>Path to the unpacked dir for a single extension. Throws
+    /// on a non-32-char id (defence against ../path-traversal).</summary>
+    public static string ExtensionDir(string extId)
+    {
+        if (string.IsNullOrWhiteSpace(extId) || extId.Length != 32 ||
+            !extId.All(c => c is >= 'a' and <= 'p'))
+            throw new ArgumentException(
+                "extension id must be 32 chars in [a-p]",
+                nameof(extId));
+        return EnsureDir(Path.Combine(ExtensionsDir, extId));
+    }
+
     /// <summary>
     /// Per-profile user-data-dir. Chromium passes this via
     /// `--user-data-dir=...` and stores cookies / cache / extensions

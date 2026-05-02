@@ -18,6 +18,11 @@ public static class ServiceCollectionExtensions
     {
         services.AddSingleton<DatabaseConnection>();
         services.AddSingleton<MigrationRunner>();
+        // Phase 31 hot-fix — one-shot migrator that re-derives every
+        // extension's ext_id with the current SynthesizeExtId algorithm
+        // (UTF-16 LE on Windows). Wired in App.xaml.cs right after the
+        // SQL migration runner finishes.
+        services.AddSingleton<ExtensionIdMigrator>();
 
         services.AddSingleton<IProfileService,     ProfileService>();
         services.AddSingleton<IRunService,         RunService>();
@@ -55,6 +60,41 @@ public static class ServiceCollectionExtensions
 
         // Phase 12 — Scripts library + run history.
         services.AddSingleton<IScriptService, ScriptService>();
+
+        // Phase 24 — Credential vault. Internal class registered as
+        // singleton so the master-key + lock state persists across
+        // VM activations.
+        services.AddSingleton<IVaultService, VaultService>();
+
+        // Phase 27 — Browser Extensions. Singleton so the extension
+        // library is shared across pages; HttpClient is supplied by
+        // Microsoft.Extensions.Http (registered in App.xaml.cs).
+        services.AddSingleton<IExtensionService, ExtensionService>();
+
+        // Phase 28 — Traffic accounting. Singleton so the dashboard
+        // and the per-profile collector share the same write path.
+        services.AddSingleton<ITrafficService, TrafficService>();
+
+        // Phase 29 — Settings (key/value config) + Notifications.
+        services.AddSingleton<ISettingsService, SettingsService>();
+        services.AddSingleton<INotificationService, NotificationService>();
+
+        // Phase 31 — external fingerprint-tester probe persistence.
+        services.AddSingleton<IExternalTesterResultService, ExternalTesterResultService>();
+
+        // Phase 34 — Domain-list management (my / target / block).
+        services.AddSingleton<IDomainListService, DomainListService>();
+
+        // Phase 34 — competitor records + analytics.
+        services.AddSingleton<ICompetitorService, CompetitorService>();
+
+        // Phase 34 — Ad density + Overview widget layout.
+        services.AddSingleton<IAdDensityService, AdDensityService>();
+        services.AddSingleton<IOverviewLayoutService, OverviewLayoutService>();
+
+        // Phase 35 — GitHub-based self-update. HttpClient is supplied by
+        // Microsoft.Extensions.Http (registered in App.xaml.cs).
+        services.AddSingleton<IUpdateService, GitHubUpdateService>();
 
         return services;
     }

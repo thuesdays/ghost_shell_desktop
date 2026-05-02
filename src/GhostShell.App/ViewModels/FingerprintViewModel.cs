@@ -30,6 +30,7 @@ public sealed partial class FingerprintViewModel : BaseViewModel
     private readonly IProfileService _profiles;
     private readonly IProfileRunner _runner;
     private readonly IDialogService _dialogs;
+    private readonly IExternalTesterResultService _testerResults;
     private readonly ILogger<FingerprintViewModel> _log;
 
     private readonly Brush _okBrush;
@@ -42,12 +43,14 @@ public sealed partial class FingerprintViewModel : BaseViewModel
         IProfileService profiles,
         IProfileRunner runner,
         IDialogService dialogs,
+        IExternalTesterResultService testerResults,
         ILogger<FingerprintViewModel> log)
     {
         _fp       = fp;
         _profiles = profiles;
         _runner   = runner;
         _dialogs  = dialogs;
+        _testerResults = testerResults;
         _log      = log;
 
         _okBrush   = (Brush)(Application.Current?.TryFindResource("OkBrush")    ?? Brushes.LimeGreen);
@@ -71,8 +74,12 @@ public sealed partial class FingerprintViewModel : BaseViewModel
                     Description = "Canvas/WebGL hash uniqueness + geo correlation." },
             new() { Name = "AmIUnique",          Icon = "🔍",  Url = "https://amiunique.org/fingerprint",
                     Description = "Compares to a public fingerprint DB." },
-            new() { Name = "BrowserLeaks",       Icon = "💧",  Url = "https://browserleaks.com/",
-                    Description = "Per-API leak breakdown. Gold standard." },
+            // Phase 32 — BrowserLeaks landing page is a nav directory,
+            // not a probe. Point at /canvas which gives a real fingerprint
+            // hash + signature in one page (most informative single
+            // probe BrowserLeaks ships).
+            new() { Name = "BrowserLeaks",       Icon = "💧",  Url = "https://browserleaks.com/canvas",
+                    Description = "Canvas hash + signature uniqueness." },
             new() { Name = "Fingerprint.com BotD",Icon = "🛡",  Url = "https://fingerprint.com/products/bot-detection/",
                     Description = "The realest test — commercial bot-detect demo." },
         };
@@ -113,6 +120,46 @@ public sealed partial class FingerprintViewModel : BaseViewModel
         _refreshCts?.Dispose();
         _refreshCts = new CancellationTokenSource();
         _ = RefreshAsync(_refreshCts.Token);
+        // Phase 31 — restore the per-tester probe verdicts persisted
+        // on the previous probe-in-profile run so the cards aren't
+        // blank when the user revisits the page.
+        _ = RestoreTesterResultsAsync(value);
+    }
+
+    private async Task RestoreTesterResultsAsync(string? profileName)
+    {
+        // Reset every card first so a profile-switch clears stale verdicts.
+        foreach (var t in ExternalTesters) { t.Result = null; t.Status = null; }
+        if (string.IsNullOrEmpty(profileName)) return;
+        try
+        {
+            var rows = await _testerResults.ListForProfileAsync(profileName);
+            foreach (var t in ExternalTesters)
+            {
+                if (!rows.TryGetValue(t.Name, out var rec)) continue;
+                IReadOnlyList<TesterDetailRow> details;
+                try
+                {
+                    details = System.Text.Json.JsonSerializer
+                        .Deserialize<List<TesterDetailRow>>(rec.DetailsJson)
+                        ?? new List<TesterDetailRow>();
+                }
+                catch { details = Array.Empty<TesterDetailRow>(); }
+                t.Result = new TesterResult
+                {
+                    TesterName = rec.TesterName,
+                    Summary    = rec.Summary,
+                    Verdict    = rec.Verdict,
+                    Details    = details,
+                    CapturedAt = rec.CapturedAt,
+                };
+                t.Status = "✓ " + rec.Summary;
+            }
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "Couldn't restore tester results for '{Profile}'", profileName);
+        }
     }
 
     // ─── Score card ────────────────────────────────────────────
@@ -302,6 +349,27 @@ public sealed partial class FingerprintViewModel : BaseViewModel
         finally { IsWorking = false; }
     }
 
+    /// <summary>Phase 31 — open the per-tester detail dialog for a
+    /// card the user clicked. No-op when the card has no result yet.</summary>
+    [RelayCommand]
+    private async Task ShowTesterDetailsAsync(ExternalTester? t)
+    {
+        if (t?.Result is null) return;
+        var r = t.Result;
+        var lines = string.Join("\n",
+            r.Details.Select(d => $"  • {d.Key}: {d.Value}"));
+        var body = $"Verdict: {r.Verdict}\nSummary: {r.Summary}\nCaptured: {r.CapturedAt:yyyy-MM-dd HH:mm:ss} UTC\n\n{lines}";
+        var sev = r.Verdict switch
+        {
+            "excellent" => ConfirmSeverity.Success,
+            "ok"        => ConfirmSeverity.Success,
+            "weak"      => ConfirmSeverity.Warning,
+            "flagged"   => ConfirmSeverity.Error,
+            _           => ConfirmSeverity.Info,
+        };
+        await _dialogs.ConfirmAsync($"{t.Name} — probe result", body, "OK", sev);
+    }
+
     /// <summary>
     /// Launch the patched browser for the focused profile and copy
     /// every selected tester URL into the clipboard so the user can
@@ -331,6 +399,10 @@ public sealed partial class FingerprintViewModel : BaseViewModel
             return;
         }
 
+        // Reset the per-card status so the user sees fresh state on
+        // each Probe click.
+        foreach (var t in selected) t.Status = "queued";
+
         try
         {
             // Start the profile if it isn't already running.
@@ -339,30 +411,115 @@ public sealed partial class FingerprintViewModel : BaseViewModel
                 var profile = await _profiles.GetAsync(SelectedProfile)
                     ?? throw new InvalidOperationException($"Profile '{SelectedProfile}' not found");
                 _ = await _runner.StartAsync(profile);
+                // Give the chromedriver about:blank navigate + the
+                // self-check probe (3s after launch) breathing room
+                // before we hijack the session.
+                await Task.Delay(TimeSpan.FromSeconds(4));
             }
 
-            // Copy URLs to clipboard — newline-separated so paste-as-
-            // multiple-tabs works in Chrome's address bar (Chromium
-            // recognises newline-pasted URLs and opens each as a tab).
-            var clipText = string.Join(Environment.NewLine, selected.Select(t => t.Url));
-            try { Clipboard.SetText(clipText); }
-            catch (Exception ex)
+            var session = _runner.TryGetActiveSession(SelectedProfile);
+            if (session is null)
             {
-                _log.LogWarning(ex, "Clipboard set failed");
+                await _dialogs.ConfirmAsync(
+                    "Session unavailable",
+                    "The browser session isn't ready yet (still starting up or mid-teardown). Try again in a few seconds.",
+                    "OK", ConfirmSeverity.Warning);
+                return;
             }
 
-            var msg = $"Profile '{SelectedProfile}' is up.\n\n" +
-                      $"{selected.Count} tester URL(s) copied to clipboard:\n  • " +
-                      string.Join("\n  • ", selected.Select(t => $"{t.Name} — {t.Url}")) +
-                      "\n\nPaste into the address bar (multiple URLs open as tabs).";
-            await _dialogs.ConfirmAsync(
-                "Probe ready", msg, "OK", ConfirmSeverity.Info);
+            // Walk through each tester sequentially. We DON'T spawn
+            // tabs in parallel — Chrome assigns the same window so a
+            // background tab's JS still runs but the user can't watch
+            // progress. Sequential keeps the active tab on whatever
+            // probe just finished.
+            for (int i = 0; i < selected.Count; i++)
+            {
+                var t = selected[i];
+                t.Status = $"navigating ({i + 1}/{selected.Count})…";
+                try
+                {
+                    await session.NavigateAsync(t.Url);
+                    // Each tester needs a different settle window:
+                    // CreepJS runs ~5s of JS, BrowserLeaks loads up
+                    // to a dozen iframes, Sannysoft is instant.
+                    var settle = TesterProbe.SettleFor(t.Name);
+                    t.Status = $"running ({settle.TotalSeconds:0}s)…";
+                    await Task.Delay(settle);
+
+                    // Phase 31 — site-specific data extraction. The
+                    // helper runs a short JS snippet against the live
+                    // page that pulls out the meaningful number /
+                    // verdict the tester displays (CreepJS trust
+                    // score, Sannysoft pass-count, AmIUnique unique?
+                    // flag, etc.). On any failure we fall through to
+                    // the page title so the card still shows SOMETHING.
+                    TesterResult? detailedResult = null;
+                    string summary = "";
+                    try
+                    {
+                        detailedResult = await TesterProbe.ExtractDetailedAsync(t.Name, session);
+                        summary = detailedResult.Summary ?? "";
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.LogDebug(ex, "Tester extractor for '{Name}' threw — falling back to title", t.Name);
+                    }
+                    if (string.IsNullOrWhiteSpace(summary))
+                    {
+                        try { summary = await session.GetTitleAsync() ?? "probed"; }
+                        catch { summary = "probed"; }
+                    }
+                    t.Status = "✓ " + summary;
+                    t.Result = detailedResult;
+                    // Phase 31 — persist so the card restores its
+                    // verdict on next page open. Best-effort; a DB
+                    // hiccup shouldn't fail the probe loop.
+                    if (detailedResult is not null)
+                    {
+                        try
+                        {
+                            var detailsJson = System.Text.Json.JsonSerializer.Serialize(detailedResult.Details);
+                            // Coalesce strings — `required` doesn't
+                            // strictly suppress nullable warnings at
+                            // call sites that read the property, and
+                            // empty is fine for the persistence layer.
+                            await _testerResults.UpsertAsync(
+                                SelectedProfile!, t.Name,
+                                detailedResult.Summary ?? "",
+                                detailedResult.Verdict ?? "",
+                                detailsJson,
+                                detailedResult.CapturedAt);
+                        }
+                        catch (Exception ex)
+                        {
+                            _log.LogWarning(ex,
+                                "Couldn't persist tester result for '{Profile}'/{Tester}",
+                                SelectedProfile, t.Name);
+                        }
+                    }
+                    _log.LogInformation(
+                        "External tester '{Name}' probe complete for '{Profile}': {Result}",
+                        t.Name, SelectedProfile, summary);
+                }
+                catch (OperationCanceledException) { t.Status = "✗ cancelled"; throw; }
+                catch (Exception ex)
+                {
+                    _log.LogWarning(ex,
+                        "External tester probe '{Name}' failed for profile '{Profile}'",
+                        t.Name, SelectedProfile);
+                    t.Status = "✗ " + (ex.Message.Length > 60
+                        ? ex.Message[..60] + "…" : ex.Message);
+                }
+            }
+            // Phase 31 — no completion dialog. Status hides on each
+            // card, the user reads the result either inline or by
+            // looking at the live browser window.
         }
         catch (Exception ex)
         {
             _log.LogError(ex, "Probe-in-profile failed");
             await _dialogs.ConfirmAsync(
-                "Could not start probe", ex.Message,
+                "Could not run probe", ex.Message,
                 "OK", ConfirmSeverity.Error);
         }
     }
@@ -417,6 +574,33 @@ public sealed partial class ExternalTester : ObservableObject
 
     [ObservableProperty] private bool _isSelected = true;
     [ObservableProperty] private string _resultText = "no result yet — click 🚀 below";
+
+    /// <summary>Phase 29 — live probe status surfaced on the card
+    /// while the automated probe walks through testers. Values shift
+    /// through "queued" → "navigating…" → "running (Ns)…" → "✓ {title}"
+    /// or "✗ {error}".</summary>
+    [ObservableProperty] private string? _status;
+
+    /// <summary>Phase 31 — full extracted result. Populated by the
+    /// site-specific extractor; null until the user clicks Probe.</summary>
+    [ObservableProperty] private TesterResult? _result;
+
+    /// <summary>True when there's a result to show in the detail
+    /// dialog; drives the "click for details" affordance on the card.</summary>
+    public bool HasResult => Result is not null;
+
+    /// <summary>"excellent" | "ok" | "weak" | "flagged" | "info" |
+    /// "?" — used by the XAML DataTrigger to colour the status pill.</summary>
+    public string VerdictKey => Result?.Verdict ?? "";
+
+    // Source generator only allows one OnXChanged overload per
+    // observable property, so fan out to the dependent props from
+    // a single handler.
+    partial void OnResultChanged(TesterResult? value)
+    {
+        OnPropertyChanged(nameof(HasResult));
+        OnPropertyChanged(nameof(VerdictKey));
+    }
 }
 
 public sealed record CheckRowVm

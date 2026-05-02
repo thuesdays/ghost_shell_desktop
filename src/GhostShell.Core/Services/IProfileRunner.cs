@@ -40,4 +40,11 @@ public interface IProfileRunner
 
     /// <summary>Stop everything. Used by "Stop all" / shutdown.</summary>
     Task StopAllAsync(CancellationToken ct = default);
+
+    /// <summary>Phase 29 — return the live browser session for the
+    /// named profile if one is running, otherwise null. Lets callers
+    /// (Fingerprint page's external-tester probe) drive the same
+    /// browser without spawning another. Implementation should NEVER
+    /// expose the session if the runner is mid-teardown.</summary>
+    IBrowserSession? TryGetActiveSession(string profileName);
 }

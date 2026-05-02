@@ -128,17 +128,62 @@
                                Foreground="{StaticResource Text}"
                                FontSize="12" FontWeight="SemiBold"
                                Text="Ghost Shell"/>
-                    <TextBlock Margin="10,0,0,0" VerticalAlignment="Center"
+                    <!-- Version stamped from Assembly.GetName().Version
+                         (sourced from VERSION file via Directory.Build.props).
+                         Set on the window at construction time so this
+                         binding picks it up without a separate VM. -->
+                    <TextBlock x:Name="VersionLabel"
+                               Margin="10,0,0,0" VerticalAlignment="Center"
                                Foreground="{StaticResource TextDim}"
                                FontFamily="{StaticResource FontMono}"
-                               FontSize="10.5"
-                               Text="0.2.0-phase3"/>
+                               FontSize="10.5"/>
                 </StackPanel>
 
                 <Border Grid.Column="1" Background="Transparent"/>
 
                 <StackPanel Grid.Column="2" Orientation="Horizontal"
                             WindowChrome.IsHitTestVisibleInChrome="True">
+                    <!-- Phase 29 — notification bell with severity-tinted
+                         badge. The badge collapses when ActiveCount=0
+                         so plain-state windows aren't littered with
+                         empty pills. Click toggles the slide-out
+                         drawer below. -->
+                    <Button Style="{StaticResource ChromeButton}"
+                            Command="{Binding Notifications.OpenDrawerCommand}"
+                            ToolTip="Notifications"
+                            Padding="12,0">
+                        <Grid>
+                            <TextBlock FontFamily="Segoe MDL2 Assets" FontSize="13"
+                                       Text="&#xEA8F;"/>
+                            <Border CornerRadius="8" MinWidth="14" Height="14"
+                                    Padding="3,0"
+                                    HorizontalAlignment="Right" VerticalAlignment="Top"
+                                    Margin="0,-3,-6,0"
+                                    Visibility="{Binding Notifications.HasActive, Converter={StaticResource BoolToVis}}">
+                                <Border.Style>
+                                    <Style TargetType="Border">
+                                        <Setter Property="Background" Value="{StaticResource Accent}"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding Notifications.BadgeSeverity}" Value="critical">
+                                                <Setter Property="Background" Value="{StaticResource ErrBrush}"/>
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding Notifications.BadgeSeverity}" Value="warning">
+                                                <Setter Property="Background" Value="{StaticResource WarnBrush}"/>
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding Notifications.BadgeSeverity}" Value="success">
+                                                <Setter Property="Background" Value="{StaticResource OkBrush}"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Border.Style>
+                                <TextBlock Text="{Binding Notifications.BadgeText}"
+                                           FontSize="9" FontWeight="Bold"
+                                           Foreground="White"
+                                           HorizontalAlignment="Center"
+                                           VerticalAlignment="Center"/>
+                            </Border>
+                        </Grid>
+                    </Button>
                     <!-- Glyphs come from Segoe MDL2 Assets (Win10 1809+
                          and Win11). Fluent-only codepoints like E949/E739
                          render as empty boxes on Win10. -->
@@ -201,6 +246,168 @@
                 <!-- ─── CONTENT ─── -->
                 <ContentControl Grid.Column="1" Content="{Binding Current}"
                                 Background="{StaticResource BgBase}"/>
+            </Grid>
+
+            <!-- ─── Phase 29 — Notifications drawer overlay ───
+                 Spans the body row only (Grid.Row=1) so the title bar
+                 stays accessible. Backdrop = semi-transparent click-
+                 to-close; the panel slides in from the right edge. -->
+            <Grid Grid.Row="1"
+                  Visibility="{Binding Notifications.IsDrawerOpen, Converter={StaticResource BoolToVis}}">
+                <!-- Backdrop. Click anywhere outside the panel to dismiss. -->
+                <Rectangle Fill="#80000000">
+                    <Rectangle.InputBindings>
+                        <MouseBinding MouseAction="LeftClick"
+                                      Command="{Binding Notifications.CloseDrawerCommand}"/>
+                    </Rectangle.InputBindings>
+                </Rectangle>
+
+                <!-- Panel — fixed 380 px wide on the right edge -->
+                <Border HorizontalAlignment="Right"
+                        Width="380"
+                        Background="{StaticResource BgBase}"
+                        BorderBrush="{StaticResource Border}"
+                        BorderThickness="1,0,0,0">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+
+                        <!-- Drawer header -->
+                        <Border Grid.Row="0" Padding="16,14"
+                                BorderBrush="{StaticResource Border}"
+                                BorderThickness="0,0,0,1">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0">
+                                    <TextBlock Text="🔔  Notifications"
+                                               FontSize="14" FontWeight="SemiBold"
+                                               Foreground="{StaticResource Text}"/>
+                                    <TextBlock Foreground="{StaticResource TextMuted}"
+                                               FontSize="11" Margin="0,2,0,0">
+                                        <Run Text="{Binding Notifications.ActiveCount, Mode=OneWay}"/>
+                                        <Run Text=" active"/>
+                                    </TextBlock>
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" Orientation="Horizontal">
+                                    <Button Content="↻"
+                                            Command="{Binding Notifications.RefreshCommand}"
+                                            Padding="8,4" Margin="0,0,4,0"
+                                            ToolTip="Refresh"/>
+                                    <Button Content="✓ all"
+                                            Command="{Binding Notifications.DismissAllCommand}"
+                                            Padding="8,4" Margin="0,0,4,0"
+                                            ToolTip="Dismiss all"/>
+                                    <Button Content="✕"
+                                            Command="{Binding Notifications.CloseDrawerCommand}"
+                                            Padding="8,4"
+                                            ToolTip="Close"/>
+                                </StackPanel>
+                            </Grid>
+                        </Border>
+
+                        <!-- List -->
+                        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+                            <ItemsControl ItemsSource="{Binding Notifications.Items}">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Border Padding="14,12"
+                                                BorderBrush="{StaticResource Border}"
+                                                BorderThickness="0,0,0,1"
+                                                Background="Transparent">
+                                            <Border.InputBindings>
+                                                <MouseBinding MouseAction="LeftClick"
+                                                              Command="{Binding DataContext.Notifications.ActivateCommand,
+                                                                        RelativeSource={RelativeSource AncestorType=Window}}"
+                                                              CommandParameter="{Binding}"/>
+                                            </Border.InputBindings>
+                                            <Grid>
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                </Grid.ColumnDefinitions>
+
+                                                <!-- Severity dot -->
+                                                <Ellipse Grid.Column="0"
+                                                         Width="8" Height="8"
+                                                         VerticalAlignment="Top"
+                                                         Margin="0,6,10,0">
+                                                    <Ellipse.Style>
+                                                        <Style TargetType="Ellipse">
+                                                            <Setter Property="Fill" Value="{StaticResource Accent}"/>
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding Severity}" Value="critical">
+                                                                    <Setter Property="Fill" Value="{StaticResource ErrBrush}"/>
+                                                                </DataTrigger>
+                                                                <DataTrigger Binding="{Binding Severity}" Value="warning">
+                                                                    <Setter Property="Fill" Value="{StaticResource WarnBrush}"/>
+                                                                </DataTrigger>
+                                                                <DataTrigger Binding="{Binding Severity}" Value="success">
+                                                                    <Setter Property="Fill" Value="{StaticResource OkBrush}"/>
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </Ellipse.Style>
+                                                </Ellipse>
+
+                                                <StackPanel Grid.Column="1">
+                                                    <TextBlock Text="{Binding Title}"
+                                                               FontSize="12" FontWeight="SemiBold"
+                                                               Foreground="{StaticResource Text}"
+                                                               TextWrapping="Wrap"/>
+                                                    <TextBlock Text="{Binding Body}"
+                                                               Style="{StaticResource MutedText}"
+                                                               TextWrapping="Wrap"
+                                                               Margin="0,2,0,0"/>
+                                                    <TextBlock Foreground="{StaticResource TextDim}"
+                                                               FontSize="9.5"
+                                                               FontFamily="{StaticResource FontMono}"
+                                                               Margin="0,4,0,0"
+                                                               Text="{Binding CreatedAt, StringFormat='yyyy-MM-dd HH:mm'}"/>
+                                                </StackPanel>
+
+                                                <!-- Dismiss button — click handled inline so the
+                                                     parent Border's MouseBinding (Activate) doesn't
+                                                     also fire on the same press, which would both
+                                                     dismiss AND navigate. -->
+                                                <Button Grid.Column="2"
+                                                        Content="✕"
+                                                        Padding="6,2"
+                                                        Click="OnNotificationDismissClicked"
+                                                        CommandParameter="{Binding}"
+                                                        Command="{Binding DataContext.Notifications.DismissCommand,
+                                                                  RelativeSource={RelativeSource AncestorType=Window}}"
+                                                        ToolTip="Dismiss"
+                                                        VerticalAlignment="Top"/>
+                                            </Grid>
+                                        </Border>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </ScrollViewer>
+
+                        <!-- Empty state -->
+                        <Border Grid.Row="1" Padding="40"
+                                HorizontalAlignment="Center" VerticalAlignment="Center"
+                                Visibility="{Binding Notifications.HasActive, Converter={StaticResource InverseBoolToVis}}">
+                            <StackPanel HorizontalAlignment="Center">
+                                <TextBlock Text="🌿" FontSize="40"
+                                           HorizontalAlignment="Center"
+                                           Foreground="{StaticResource TextDim}"/>
+                                <TextBlock Margin="0,8,0,0"
+                                           Style="{StaticResource MutedText}"
+                                           HorizontalAlignment="Center"
+                                           Text="All clear."/>
+                            </StackPanel>
+                        </Border>
+                    </Grid>
+                </Border>
             </Grid>
         </Grid>
     </Border>

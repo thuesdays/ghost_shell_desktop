@@ -8,7 +8,7 @@
              xmlns:conv="clr-namespace:GhostShell.App.Converters"
              xmlns:vm="clr-namespace:GhostShell.App.ViewModels"
              xmlns:views="clr-namespace:GhostShell.App.Views"
-             ShutdownMode="OnMainWindowClose">
+             ShutdownMode="OnExplicitShutdown">
     <Application.Resources>
         <ResourceDictionary>
             <ResourceDictionary.MergedDictionaries>
@@ -18,6 +18,8 @@
             <!-- Converters available globally -->
             <conv:BoolToVisibilityConverter         x:Key="BoolToVis"/>
             <conv:InverseBoolToVisibilityConverter  x:Key="InverseBoolToVis"/>
+            <conv:StringEqualsVisibilityConverter   x:Key="StringEqualsVis"/>
+            <conv:StringEqualsBoolConverter         x:Key="StringEqualsBool"/>
             <conv:NullToCollapsedConverter          x:Key="NullToCollapsedConverter"/>
             <conv:NonEmptyToVisibleConverter        x:Key="NonEmptyToVisibleConverter"/>
             <conv:ResourceKeyToBrushConverter       x:Key="ResourceKeyToBrush"/>
@@ -67,6 +69,21 @@
             </DataTemplate>
             <DataTemplate DataType="{x:Type vm:CookiePacksViewModel}">
                 <views:CookiePacksView/>
+            </DataTemplate>
+            <DataTemplate DataType="{x:Type vm:VaultViewModel}">
+                <views:VaultView/>
+            </DataTemplate>
+            <DataTemplate DataType="{x:Type vm:ExtensionsViewModel}">
+                <views:ExtensionsView/>
+            </DataTemplate>
+            <DataTemplate DataType="{x:Type vm:DomainsViewModel}">
+                <views:DomainsView/>
+            </DataTemplate>
+            <DataTemplate DataType="{x:Type vm:CompetitorsViewModel}">
+                <views:CompetitorsView/>
+            </DataTemplate>
+            <DataTemplate DataType="{x:Type vm:TrafficViewModel}">
+                <views:TrafficView/>
             </DataTemplate>
             <DataTemplate DataType="{x:Type vm:LogsViewModel}">
                 <views:LogsView/>

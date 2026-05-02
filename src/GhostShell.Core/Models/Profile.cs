@@ -7,8 +7,13 @@ namespace GhostShell.Core.Models;
 /// One browser identity. Maps roughly to a row in the legacy
 /// `profiles` table — fields are kept name-compatible so a future
 /// import tool can copy rows verbatim.
+///
+/// Phase 20: switched from <c>class</c> to <c>record</c> to support
+/// non-destructive mutation via <c>with { … }</c>. All <c>init</c>-set
+/// properties stay; existing <c>new Profile { … }</c> initialisers
+/// keep compiling unchanged.
 /// </summary>
-public sealed class Profile
+public sealed record Profile
 {
     public required string Name { get; init; }
 

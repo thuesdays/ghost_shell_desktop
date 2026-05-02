@@ -18,9 +18,15 @@ public sealed partial class MainViewModel : ObservableObject
 {
     private readonly INavigationService _nav;
 
-    public MainViewModel(INavigationService nav)
+    /// <summary>Phase 29 — bell-button + drawer VM, exposed so the
+    /// title bar binds the badge count and the drawer's IsOpen flag
+    /// to it. Wired by DI.</summary>
+    public NotificationsViewModel Notifications { get; }
+
+    public MainViewModel(INavigationService nav, NotificationsViewModel notifications)
     {
         _nav = nav;
+        Notifications = notifications;
 
         // Build the nav list FIRST — the CurrentChanged handler walks
         // it to update the highlight, and subscribing before assignment
@@ -96,6 +102,25 @@ public sealed partial class MainViewModel : ObservableObject
         new SidebarRow { PageKey = "fingerprint", Label = "Fingerprint",  Icon = Glyph(0xE8FD), IconBrush = Hue("HueGreen")  }, // Identity
         new SidebarRow { PageKey = "sessions",    Label = "Sessions",     Icon = Glyph(0xE81C), IconBrush = Hue("HueViolet") }, // Library
         new SidebarRow { PageKey = "packs",       Label = "Cookie packs", Icon = Glyph(0xE7B8), IconBrush = Hue("HuePink")   }, // Package
+        // Phase 25 — credential vault. Lives in Identity because it's
+        // identity-adjacent (logins for sites the profile pretends to be).
+        new SidebarRow { PageKey = "vault",       Label = "Vault",        Icon = Glyph(0xE192), IconBrush = Hue("HueAmber")  }, // Lock
+        // Phase 27 — browser extensions. Sits in Identity because the
+        // set of extensions a profile loads is part of how that profile
+        // looks to sites (uBlock blocking trackers, MetaMask leaking
+        // wallet-specific JS APIs, etc.).
+        new SidebarRow { PageKey = "extensions",  Label = "Extensions",   Icon = Glyph(0xECAA), IconBrush = Hue("HuePink")   }, // Puzzle
+
+        // Phase 34 — Advertisement section. Competitors is a pure
+        // observation surface for ads we've seen across runs.
+        //
+        // Domains used to live here too but was demoted off the
+        // sidebar — the lists are configured via a "Domain lists"
+        // toolbar button on the Scripts page (where they're
+        // actually consumed). The page+VM+route stay registered so
+        // that button can navigate to "domains" the same as before.
+        SidebarRow.Section("Advertisement"),
+        new SidebarRow { PageKey = "competitors", Label = "Competitors", Icon = Glyph(0xE9F9), IconBrush = Hue("HueOrange") }, // BankBuilding
 
         // Scheduler + Runs were originally up under Workspace because
         // they're "things you start work with". Demoted into Monitoring
@@ -107,6 +132,7 @@ public sealed partial class MainViewModel : ObservableObject
         SidebarRow.Section("Monitoring"),
         new SidebarRow { PageKey = "scheduler", Label = "Scheduler", Icon = Glyph(0xE787), IconBrush = Hue("HueAmber")  }, // Calendar
         new SidebarRow { PageKey = "runs",      Label = "Runs",      Icon = Glyph(0xE823), IconBrush = Hue("HueOrange") }, // History
+        new SidebarRow { PageKey = "traffic",   Label = "Traffic",   Icon = Glyph(0xEA0B), IconBrush = Hue("HueBlue")   }, // BarChart
         new SidebarRow { PageKey = "logs",     Label = "Logs",      Icon = Glyph(0xE7C3), IconBrush = Hue("HueAmber")  }, // Page
 
         SidebarRow.Section(""),

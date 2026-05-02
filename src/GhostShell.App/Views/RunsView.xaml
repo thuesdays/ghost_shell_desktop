@@ -43,38 +43,47 @@
             <RowDefinition Height="Auto"/>  <!-- pagination    -->
         </Grid.RowDefinitions>
 
-        <!-- Header + clear-history toolbar -->
+        <!-- Header + clear-history toolbar — buttons can wrap to a
+             second line when window is narrow. -->
         <Grid Grid.Row="0" Margin="0,0,0,12">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="Auto"/>
-            </Grid.ColumnDefinitions>
-            <StackPanel Grid.Column="0" Margin="0,0,16,0">
-                <TextBlock Style="{StaticResource PageTitle}" Text="Run history"/>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            <Grid Grid.Row="0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" Style="{StaticResource PageTitle}"
+                           Text="Run history"
+                           VerticalAlignment="Center"
+                           TextTrimming="CharacterEllipsis"/>
+                <WrapPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button Content="🗑  Clear &gt; 30d"
+                            Command="{Binding ClearCommand}"
+                            CommandParameter="30"
+                            Margin="0,0,4,4"/>
+                    <Button Content="&gt; 7d"
+                            Command="{Binding ClearCommand}"
+                            CommandParameter="7"
+                            Margin="0,0,4,4"/>
+                    <Button Content="&gt; 1d"
+                            Command="{Binding ClearCommand}"
+                            CommandParameter="1"
+                            Margin="0,0,4,4"/>
+                    <Button Content="all"
+                            Command="{Binding ClearCommand}"
+                            CommandParameter=""
+                            Margin="0,0,0,4"/>
+                </WrapPanel>
+            </Grid>
+            <Border Grid.Row="1" Style="{StaticResource Card}"
+                    Padding="14,10" Margin="0,12,0,0">
                 <TextBlock Style="{StaticResource PageSubtitle}"
+                           TextWrapping="Wrap"
                            Text="All monitoring runs stored in the database."/>
-            </StackPanel>
-            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Top">
-                <Button Content="↻  Reload" Command="{Binding ReloadCommand}" Margin="0,0,8,0"/>
-                <!-- Clear-with-age dropdown — same shape as the web
-                     "Older than 30d / 7d / 1d / All" picker. Each
-                     button passes its days threshold (or null = all). -->
-                <Button Content="🗑  Clear &gt; 30d"
-                        Command="{Binding ClearCommand}"
-                        CommandParameter="30"
-                        Margin="0,0,4,0"/>
-                <Button Content="&gt; 7d"
-                        Command="{Binding ClearCommand}"
-                        CommandParameter="7"
-                        Margin="0,0,4,0"/>
-                <Button Content="&gt; 1d"
-                        Command="{Binding ClearCommand}"
-                        CommandParameter="1"
-                        Margin="0,0,4,0"/>
-                <Button Content="all"
-                        Command="{Binding ClearCommand}"
-                        CommandParameter=""/>
-            </StackPanel>
+            </Border>
         </Grid>
 
         <!-- Stats toolbar -->

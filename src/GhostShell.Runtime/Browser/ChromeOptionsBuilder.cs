@@ -32,7 +32,8 @@ public static class ChromeOptionsBuilder
         Profile profile,
         DeviceTemplate template,
         string chromeBinaryPath,
-        string? proxyUrl = null)
+        string? proxyUrl = null,
+        IReadOnlyList<string>? extensionLoadPaths = null)
     {
         var userDataDir = AppPaths.ProfileDir(profile.Name);
 
@@ -141,6 +142,38 @@ public static class ChromeOptionsBuilder
         else
         {
             options.AddArgument("--no-proxy-server");
+        }
+
+        // ─── Phase 27 — extensions ────────────────────────────────
+        // Chrome accepts `--load-extension=path1,path2,...` listing
+        // unpacked extension dirs. We pass the per-profile resolved
+        // list (global default flipped per per_profile_extensions).
+        // Empty / null means "no extensions for this profile" — we
+        // skip the flag entirely so Chrome runs identically to its
+        // pre-Phase-27 behaviour.
+        if (extensionLoadPaths is { Count: > 0 })
+        {
+            // Defensive: drop any path that doesn't exist on disk so
+            // a stale DB row doesn't crash chrome at startup. Phase 27
+            // audit fix — also drop paths containing a comma. Chrome's
+            // --load-extension splits on comma, so a path with a comma
+            // would be torn into two invalid halves and the extension
+            // would silently fail to load. Better to skip with a log.
+            var live = extensionLoadPaths
+                .Where(p => !string.IsNullOrWhiteSpace(p) && Directory.Exists(p))
+                .Where(p => !p.Contains(','))
+                .ToList();
+            if (live.Count > 0)
+            {
+                options.AddArgument($"--load-extension={string.Join(',', live)}");
+                // The patched-Chromium build's stealth payload normally
+                // disables the extension subsystem altogether via
+                // --disable-extensions. We DON'T add that flag (the
+                // legacy builder didn't either), so --load-extension is
+                // honoured. If we ever do, it must be replaced with
+                // `--disable-extensions-except=...` listing the same
+                // dirs.
+            }
         }
 
         // ─── Anti-detection baselines ─────────────────────────────

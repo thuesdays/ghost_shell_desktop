@@ -257,22 +257,18 @@
              ════════════════════════════════════════════════════════════ -->
         <DockPanel Grid.Column="1" Margin="16,0,0,0" LastChildFill="True">
 
-            <!-- ─── Page header ─── -->
-            <Grid DockPanel.Dock="Top" Margin="0,0,0,14">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="Auto"/>
-                </Grid.ColumnDefinitions>
-                <StackPanel Grid.Column="0" Margin="0,0,16,0">
-                    <TextBlock Style="{StaticResource PageTitle}"
-                               Text="🍪  Session &amp; cookies"/>
+            <!-- ─── Page header ─── Subtitle wrapped in a Card so the
+                 description visually separates from the page title and
+                 doesn't crowd the toolbar at narrow widths. -->
+            <StackPanel DockPanel.Dock="Top" Margin="0,0,0,14">
+                <TextBlock Style="{StaticResource PageTitle}"
+                           Text="🍪  Session &amp; cookies"/>
+                <Border Style="{StaticResource Card}" Padding="14,10" Margin="0,12,0,0">
                     <TextBlock Style="{StaticResource PageSubtitle}"
+                               TextWrapping="Wrap"
                                Text="Warmup robot, cookie pool, Chrome import — everything that shapes the profile's identity to websites lives here."/>
-                </StackPanel>
-                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Top">
-                    <Button Content="↻  Reload" Command="{Binding ReloadCommand}"/>
-                </StackPanel>
-            </Grid>
+                </Border>
+            </StackPanel>
 
             <!-- ─── Stat row (4 cards) ───
                  LAST WARMUP / WARMUP STATUS / COOKIE SNAPSHOTS / POOL COOKIES
@@ -434,30 +430,39 @@
                                         </ItemsControl.ItemTemplate>
                                     </ItemsControl>
 
-                                    <!-- Site-count + Run button row -->
+                                    <!-- Site-count + Run button row.
+                                         Two-row layout so the Run button never gets
+                                         clipped at narrow window widths: top row is
+                                         the spinner + the wrap-friendly helper text;
+                                         bottom row is the action button right-aligned. -->
                                     <Grid Margin="0,16,0,0">
-                                        <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="Auto"/>
-                                            <ColumnDefinition Width="Auto"/>
-                                            <ColumnDefinition Width="*"/>
-                                            <ColumnDefinition Width="Auto"/>
-                                        </Grid.ColumnDefinitions>
-                                        <StackPanel Grid.Column="0">
-                                            <TextBlock Style="{StaticResource MutedText}"
-                                                       Text="Site count"/>
-                                            <TextBox Text="{Binding SiteCount, Mode=TwoWay,
-                                                                   UpdateSourceTrigger=PropertyChanged}"
-                                                     Width="80" Margin="0,4,0,0"
-                                                     HorizontalContentAlignment="Center"
-                                                     FontFamily="{StaticResource FontMono}"
-                                                     FontSize="13"/>
-                                        </StackPanel>
-                                        <StackPanel Grid.Column="1" VerticalAlignment="Bottom"
-                                                    Margin="14,0,0,0">
-                                            <TextBlock Style="{StaticResource MutedText}"
-                                                       FontSize="11" Margin="0,0,0,6"
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="Auto"/>
+                                        </Grid.RowDefinitions>
+                                        <Grid Grid.Row="0">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="Auto"/>
+                                                <ColumnDefinition Width="*"/>
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Grid.Column="0">
+                                                <TextBlock Style="{StaticResource MutedText}"
+                                                           Text="Site count"/>
+                                                <TextBox Text="{Binding SiteCount, Mode=TwoWay,
+                                                                       UpdateSourceTrigger=PropertyChanged}"
+                                                         Width="80" Margin="0,4,0,0"
+                                                         HorizontalContentAlignment="Center"
+                                                         FontFamily="{StaticResource FontMono}"
+                                                         FontSize="13"/>
+                                            </StackPanel>
+                                            <TextBlock Grid.Column="1"
+                                                       Style="{StaticResource MutedText}"
+                                                       FontSize="11"
+                                                       Margin="14,0,0,0"
+                                                       VerticalAlignment="Bottom"
+                                                       TextWrapping="Wrap"
                                                        Text="How many sites from the preset to visit."/>
-                                        </StackPanel>
+                                        </Grid>
                                         <!-- IsEnabled state is implicit via the
                                              RunWarmupCommand's CanExecute, which we
                                              keep wide-open and instead branch inside
@@ -465,16 +470,17 @@
                                              dialog; mid-warmup → cancel toggle). The
                                              button is NEVER hidden so the user
                                              always knows where the action lives. -->
-                                        <Button Grid.Column="3"
+                                        <Button Grid.Row="1"
                                                 Content="{Binding RunButtonLabel}"
                                                 Command="{Binding RunWarmupCommand}"
+                                                HorizontalAlignment="Right"
+                                                Margin="0,12,0,0"
                                                 MinWidth="180"
                                                 Padding="14,8"
                                                 Background="{StaticResource Accent}"
                                                 Foreground="White"
                                                 FontWeight="SemiBold"
-                                                BorderBrush="{StaticResource Accent}"
-                                                VerticalAlignment="Bottom"/>
+                                                BorderBrush="{StaticResource Accent}"/>
                                     </Grid>
                                 </StackPanel>
                             </Border>

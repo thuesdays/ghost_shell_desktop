@@ -70,34 +70,52 @@
 
         <!-- ─── HEADER ──────────────────────────────────────────── -->
         <Grid Grid.Row="0" Margin="0,0,0,18">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="Auto"/>
-            </Grid.ColumnDefinitions>
-            <StackPanel Grid.Column="0">
-                <TextBlock Style="{StaticResource PageTitle}" Text="Scripts"/>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            <Grid Grid.Row="0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" Style="{StaticResource PageTitle}"
+                           Text="Scripts"
+                           VerticalAlignment="Center"
+                           TextTrimming="CharacterEllipsis"/>
+                <WrapPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <!-- Phase 34 — Domain lists button moved here from
+                         the sidebar. The domain lists (my / target /
+                         block) are consumed by click_ad steps in the
+                         script engine, so the configuration UI lives
+                         next to the scripts that read it. -->
+                    <Button Content="🌐  Domain lists"
+                            Command="{Binding OpenDomainListsCommand}"
+                            Padding="12,7" Margin="0,0,8,4"
+                            ToolTip="My / target / block domain lists used by click_ad steps"/>
+                    <Button Content="🎨  Templates"
+                            Command="{Binding OpenTemplatesCommand}"
+                            Padding="12,7" Margin="0,0,8,4"
+                            ToolTip="Curated script templates (Phase 16)"/>
+                    <Button Content="⤒  Import"
+                            Command="{Binding ImportCommand}"
+                            Padding="12,7" Margin="0,0,8,4"
+                            ToolTip="Load a script from a JSON file"/>
+                    <Button Content="+  New script"
+                            Command="{Binding CreateCommand}"
+                            Padding="14,7" Margin="0,0,0,4"
+                            Background="{StaticResource Accent}"
+                            Foreground="White"
+                            BorderBrush="{StaticResource Accent}"
+                            FontWeight="SemiBold"/>
+                </WrapPanel>
+            </Grid>
+            <Border Grid.Row="1" Style="{StaticResource Card}"
+                    Padding="14,10" Margin="0,12,0,0">
                 <TextBlock Style="{StaticResource PageSubtitle}"
                            TextWrapping="Wrap"
-                           Margin="0,4,32,0"
                            Text="Saved flow definitions. Assign a script to a profile on the profile page — the runtime fetches the profile's script at the start of each run."/>
-            </StackPanel>
-            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Top">
-                <Button Content="🎨  Templates"
-                        Command="{Binding OpenTemplatesCommand}"
-                        Padding="12,7" Margin="0,0,8,0"
-                        ToolTip="Curated script templates (Phase 16)"/>
-                <Button Content="⤒  Import"
-                        Command="{Binding ImportCommand}"
-                        Padding="12,7" Margin="0,0,8,0"
-                        ToolTip="Load a script from a JSON file"/>
-                <Button Content="+  New script"
-                        Command="{Binding CreateCommand}"
-                        Padding="14,7"
-                        Background="{StaticResource Accent}"
-                        Foreground="White"
-                        BorderBrush="{StaticResource Accent}"
-                        FontWeight="SemiBold"/>
-            </StackPanel>
+            </Border>
         </Grid>
 
         <!-- ─── SEARCH BAR ──────────────────────────────────────── -->

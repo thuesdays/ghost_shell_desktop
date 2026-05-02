@@ -23,7 +23,10 @@ public sealed class ScriptService : IScriptService
     private const string SelectColumns = """
         id, name, description, steps_json AS StepsJson,
         enabled, is_default AS IsDefault, etag AS ETag,
-        created_at AS CreatedAt, updated_at AS UpdatedAt
+        created_at AS CreatedAt, updated_at AS UpdatedAt,
+        layout_mode AS LayoutMode,
+        nodes_json  AS NodesJson,
+        edges_json  AS EdgesJson
     """;
 
     public async Task<IReadOnlyList<Script>> ListAsync(CancellationToken ct = default)
@@ -48,9 +51,13 @@ public sealed class ScriptService : IScriptService
         var etag = Guid.NewGuid().ToString("N");
         const string sql = """
             INSERT INTO scripts
-                (name, description, steps_json, enabled, is_default, etag, created_at, updated_at)
+                (name, description, steps_json, enabled, is_default, etag,
+                 created_at, updated_at,
+                 layout_mode, nodes_json, edges_json)
             VALUES
-                (@Name, @Description, @StepsJson, @Enabled, @IsDefault, @ETag, @CreatedAt, @UpdatedAt)
+                (@Name, @Description, @StepsJson, @Enabled, @IsDefault, @ETag,
+                 @CreatedAt, @UpdatedAt,
+                 @LayoutMode, @NodesJson, @EdgesJson)
             RETURNING id;
         """;
         var id = await _db.QueueAsync(c => c.ExecuteScalarAsync<long>(sql, new
@@ -63,8 +70,12 @@ public sealed class ScriptService : IScriptService
             ETag = etag,
             CreatedAt = now,
             UpdatedAt = now,
+            LayoutMode = s.LayoutMode ?? "list",
+            NodesJson  = s.NodesJson,
+            EdgesJson  = s.EdgesJson,
         }), ct);
-        _log.LogInformation("Script #{Id} '{Name}' created", id, s.Name);
+        _log.LogInformation("Script #{Id} '{Name}' created (layout={Layout})",
+            id, s.Name, s.LayoutMode);
         return s with { Id = id, ETag = etag, CreatedAt = now, UpdatedAt = now };
     }
 
@@ -82,7 +93,10 @@ public sealed class ScriptService : IScriptService
                 steps_json  = @StepsJson,
                 enabled     = @Enabled,
                 etag        = @NewETag,
-                updated_at  = @Now
+                updated_at  = @Now,
+                layout_mode = @LayoutMode,
+                nodes_json  = @NodesJson,
+                edges_json  = @EdgesJson
               WHERE id = @Id AND etag = @ExpectedETag;
         """;
         var rows = await _db.QueueAsync(c => c.ExecuteAsync(sql, new
@@ -91,6 +105,9 @@ public sealed class ScriptService : IScriptService
             Enabled = s.Enabled ? 1 : 0,
             NewETag = newEtag, ExpectedETag = expectedEtag,
             Now = DateTime.UtcNow,
+            LayoutMode = s.LayoutMode ?? "list",
+            NodesJson  = s.NodesJson,
+            EdgesJson  = s.EdgesJson,
         }), ct);
         if (rows == 0)
         {
@@ -101,9 +118,27 @@ public sealed class ScriptService : IScriptService
             s.Id, expectedEtag.Substring(0, Math.Min(8, expectedEtag.Length)), newEtag[..8]);
     }
 
-    public Task DeleteAsync(long id, CancellationToken ct = default)
-        => _db.QueueAsync(c => c.ExecuteAsync(
-            "DELETE FROM scripts WHERE id = @id;", new { id }), ct);
+    public async Task DeleteAsync(long id, CancellationToken ct = default)
+    {
+        // Phase 21 audit fix — application-level cascade. Without a
+        // FK constraint (V13 didn't declare one), profiles holding
+        // <c>assigned_script_id = id</c> become orphaned references
+        // when the script is deleted. Clear them inside the same
+        // transaction so the DB stays consistent.
+        await _db.QueueAsync(async c =>
+        {
+            using var tx = c.BeginTransaction();
+            await c.ExecuteAsync(
+                "UPDATE profiles SET assigned_script_id = NULL WHERE assigned_script_id = @id;",
+                new { id }, tx);
+            await c.ExecuteAsync(
+                "DELETE FROM scripts WHERE id = @id;",
+                new { id }, tx);
+            tx.Commit();
+            return 0;
+        }, ct);
+        _log.LogInformation("Script #{Id} deleted (orphan profile assignments cleared)", id);
+    }
 
     public async Task<long> RecordRunAsync(ScriptRun r, CancellationToken ct = default)
     {

@@ -51,29 +51,38 @@
 
             <!-- ─── Header + toolbar ─── -->
             <Grid Grid.Row="0" Margin="0,0,0,12">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="Auto"/>
-                </Grid.ColumnDefinitions>
-
-                <StackPanel Grid.Column="0" Margin="0,0,16,0">
-                    <TextBlock Style="{StaticResource PageTitle}" Text="Proxies"/>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+                <Grid Grid.Row="0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Style="{StaticResource PageTitle}"
+                               Text="Proxies"
+                               VerticalAlignment="Center"
+                               TextTrimming="CharacterEllipsis"/>
+                    <WrapPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                        <Button Content="📋  Bulk import"
+                                Command="{Binding BulkImportCommand}"
+                                Margin="0,0,8,4"/>
+                        <Button Content="🧪  Test all"
+                                Command="{Binding TestAllCommand}"
+                                Margin="0,0,8,4"/>
+                        <Button Content="+  Add proxy"
+                                Command="{Binding AddCommand}"
+                                Style="{StaticResource ButtonPrimary}"
+                                MinWidth="120" Margin="0,0,0,4"/>
+                    </WrapPanel>
+                </Grid>
+                <Border Grid.Row="1" Style="{StaticResource Card}"
+                        Padding="14,10" Margin="0,12,0,0">
                     <TextBlock Style="{StaticResource PageSubtitle}"
+                               TextWrapping="Wrap"
                                Text="Proxy library. Each profile picks one — runtime routes through the assigned proxy. Right-click a row to test or edit."/>
-                </StackPanel>
-
-                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Top">
-                    <Button Content="📋  Bulk import"
-                            Command="{Binding BulkImportCommand}"
-                            Margin="0,0,8,0"/>
-                    <Button Content="🧪  Test all"
-                            Command="{Binding TestAllCommand}"
-                            Margin="0,0,8,0"/>
-                    <Button Content="+  Add proxy"
-                            Command="{Binding AddCommand}"
-                            Style="{StaticResource ButtonPrimary}"
-                            MinWidth="120"/>
-                </StackPanel>
+                </Border>
             </Grid>
 
             <!-- ─── Status bar ─── -->
@@ -246,7 +255,6 @@
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
                         <TextBlock Grid.Column="0"
                                    Foreground="{StaticResource Text}"
@@ -256,9 +264,6 @@
                                    Style="{StaticResource MutedText}"
                                    VerticalAlignment="Center"
                                    Text="last 7 days · rotations / captchas / burn events"/>
-                        <Button Grid.Column="2" Content="↻"
-                                Command="{Binding ReloadCommand}"
-                                Width="28" Height="28" Padding="0"/>
                     </Grid>
 
                     <!-- Legend -->

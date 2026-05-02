@@ -36,6 +36,20 @@ public partial class ScriptVisualEditorDialog : Window
     /// back to <see cref="ScriptJsonEditorDialog"/>.</summary>
     public bool SwitchToJson { get; private set; }
 
+    /// <summary>Phase 21: set when the user clicks "Graph mode" —
+    /// caller (ScriptsViewModel) converts the list to a graph
+    /// skeleton and opens <see cref="ScriptGraphEditorDialog"/>.</summary>
+    public bool SwitchToGraph { get; private set; }
+
+    /// <summary>
+    /// Phase 20: set when user clicked "▶ Run on…". The caller saves
+    /// the edited script first, then opens a profile picker and kicks
+    /// the runner against each chosen profile. The dialog itself
+    /// doesn't have access to <c>IProfileRunner</c> / <c>IProfileService</c>;
+    /// they live in <c>ScriptsViewModel</c>, which orchestrates.
+    /// </summary>
+    public bool RequestRun { get; private set; }
+
     private readonly Script? _existing;
     private readonly ObservableCollection<StepRow> _steps = new();
 
@@ -379,7 +393,8 @@ public partial class ScriptVisualEditorDialog : Window
             r.Probability,
             r.AbortOnError,
             r.SkipOnMyDomain, r.SkipOnTarget,
-            r.OnlyOnTarget,   r.OnlyOnMyDomain) { Owner = this };
+            r.OnlyOnTarget,   r.OnlyOnMyDomain,
+            r.SkipOnBlocked,  r.OnlyOnBlocked) { Owner = this };
         if (dlg.ShowDialog() != true || !dlg.Saved) return;
         r.Probability    = dlg.Probability;
         r.AbortOnError   = dlg.AbortOnError;
@@ -387,6 +402,8 @@ public partial class ScriptVisualEditorDialog : Window
         r.SkipOnTarget   = dlg.SkipOnTarget;
         r.OnlyOnTarget   = dlg.OnlyOnTarget;
         r.OnlyOnMyDomain = dlg.OnlyOnMyDomain;
+        r.SkipOnBlocked  = dlg.SkipOnBlocked;
+        r.OnlyOnBlocked  = dlg.OnlyOnBlocked;
         // StepRow doesn't fire INPC for these (they're plain set
         // properties); refresh the bound list so HasAdvancedFlags
         // re-evaluates and the ⚙ badge tints accent.
@@ -635,6 +652,10 @@ public partial class ScriptVisualEditorDialog : Window
                     row.OnlyOnTarget = true;
                 if (s.TryGetProperty("only_on_my_domain", out var om) && om.ValueKind == JsonValueKind.True)
                     row.OnlyOnMyDomain = true;
+                if (s.TryGetProperty("skip_on_blocked", out var sb) && sb.ValueKind == JsonValueKind.True)
+                    row.SkipOnBlocked = true;
+                if (s.TryGetProperty("only_on_blocked", out var ob) && ob.ValueKind == JsonValueKind.True)
+                    row.OnlyOnBlocked = true;
 
                 // Phase 14: extract nested branches for if/foreach so
                 // the visual editor renders an indented summary
@@ -711,6 +732,8 @@ public partial class ScriptVisualEditorDialog : Window
             if (r.SkipOnTarget)    w.WriteBoolean("skip_on_target",    true);
             if (r.OnlyOnTarget)    w.WriteBoolean("only_on_target",    true);
             if (r.OnlyOnMyDomain)  w.WriteBoolean("only_on_my_domain", true);
+            if (r.SkipOnBlocked)   w.WriteBoolean("skip_on_blocked",   true);
+            if (r.OnlyOnBlocked)   w.WriteBoolean("only_on_blocked",   true);
 
             var typeKey = r.Type.ToLowerInvariant();
             var isIf      = typeKey == "if";
@@ -757,7 +780,8 @@ public partial class ScriptVisualEditorDialog : Window
                             or "then" or "else" or "body"
                             or "probability" or "abort_on_error"
                             or "skip_on_my_domain" or "skip_on_target"
-                            or "only_on_my_domain" or "only_on_target")
+                            or "only_on_my_domain" or "only_on_target"
+                            or "skip_on_blocked" or "only_on_blocked")
                             continue;
                         prop.WriteTo(w);
                     }
@@ -817,6 +841,16 @@ public partial class ScriptVisualEditorDialog : Window
                 MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
+        // Phase 21 audit fix — block save with zero steps. An empty
+        // script can't run anything; failing here is friendlier than
+        // failing at run-time on the next launch.
+        if (_steps.Count == 0)
+        {
+            MessageBox.Show(this,
+                "Add at least one step before saving — empty scripts can't be run.",
+                "Save", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
         // Re-serialise — preserve nested branches (then/else/body/
         // condition) by round-tripping through the original raw JSON
         // when present. This is the Phase 14 round-trip-safety fix:
@@ -851,6 +885,57 @@ public partial class ScriptVisualEditorDialog : Window
         SwitchToJson = true;
         DialogResult = false;
         Close();
+    }
+
+    /// <summary>Phase 21/22: flip into graph editor. We snapshot the
+    /// current list-editor state into <see cref="Result"/> (no strict
+    /// validation — the user can validate after wiring the graph) so
+    /// the caller has a non-null Script to feed into the converter.
+    /// Without this snapshot, brand-new scripts would lose any name /
+    /// description / steps the user typed before clicking Graph mode.</summary>
+    private void OnGraphView(object sender, RoutedEventArgs e)
+    {
+        // Build a soft-validated Result snapshot. Empty name is OK
+        // here — the graph editor's Save will enforce it via its
+        // own validation pass before persisting.
+        var name = (NameField.Text ?? "").Trim();
+        if (string.IsNullOrEmpty(name)) name = "(unnamed)";
+
+        var stepObjects = new List<string>(_steps.Count);
+        foreach (var r in _steps) stepObjects.Add(SerialiseStep(r));
+        var arr = "[" + string.Join(",", stepObjects) + "]";
+
+        Result = new Script
+        {
+            Id          = _existing?.Id ?? 0,
+            Name        = name,
+            Description = (DescriptionField.Text ?? "").Trim(),
+            StepsJson   = arr,
+            Enabled     = EnabledCheck.IsChecked == true,
+            IsDefault   = DefaultCheck.IsChecked == true,
+            ETag        = _existing?.ETag ?? "",
+            CreatedAt   = _existing?.CreatedAt ?? default,
+            UpdatedAt   = DateTime.UtcNow,
+            LayoutMode  = "list",
+        };
+        ResultExpectedEtag = _existing?.ETag;
+        SwitchToGraph = true;
+        DialogResult = false;
+        Close();
+    }
+
+    /// <summary>
+    /// "▶ Run on…" button. Performs the same save flow as
+    /// <see cref="OnSave"/>, then sets <see cref="RequestRun"/> so the
+    /// caller (ScriptsViewModel) opens a profile picker and kicks
+    /// the runner. Bails if validation fails the same way Save does.
+    /// </summary>
+    private void OnRunOnProfile(object sender, RoutedEventArgs e)
+    {
+        RequestRun = true;
+        OnSave(sender, e);
+        // OnSave sets DialogResult=true and Closes; the caller reads
+        // RequestRun + Result and dispatches the run.
     }
 
     private void OnCancel(object sender, RoutedEventArgs e)
@@ -972,13 +1057,20 @@ public partial class ScriptVisualEditorDialog : Window
         /// <summary>Run only when current ad is on a profile-owned domain.</summary>
         public bool OnlyOnMyDomain { get; set; }
 
+        /// <summary>Skip when current ad's domain is in the block list.</summary>
+        public bool SkipOnBlocked { get; set; }
+
+        /// <summary>Run only when current ad is on the block list (debug-only).</summary>
+        public bool OnlyOnBlocked { get; set; }
+
         /// <summary>True if any flag is set to a non-default value —
         /// drives a small "⚙" badge on the card so users can see at
         /// a glance that this step has advanced settings.</summary>
         public bool HasAdvancedFlags
             => Probability < 1.0 || AbortOnError
             || SkipOnMyDomain || SkipOnTarget
-            || OnlyOnTarget || OnlyOnMyDomain;
+            || OnlyOnTarget || OnlyOnMyDomain
+            || SkipOnBlocked || OnlyOnBlocked;
 
         /// <summary>
         /// The step's original full JSON object as loaded from the

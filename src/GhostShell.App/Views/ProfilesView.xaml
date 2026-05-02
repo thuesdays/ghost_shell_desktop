@@ -293,22 +293,24 @@
             <RowDefinition Height="*"/>     <!-- content    -->
         </Grid.RowDefinitions>
 
-        <!-- Header + toolbar -->
+        <!-- Header + toolbar — title/buttons on row 0, subtitle wraps
+             full width on row 1 so the description stays readable at
+             narrow window sizes. -->
         <Grid Grid.Row="0" Margin="0,0,0,12">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="Auto"/>
-            </Grid.ColumnDefinitions>
-
-            <StackPanel Grid.Column="0" Margin="0,0,16,0">
-                <TextBlock Style="{StaticResource PageTitle}" Text="Profiles"/>
-                <TextBlock Style="{StaticResource PageSubtitle}"
-                           Text="Browser identities — create, start, inspect, manage. Tick rows to start or delete in bulk."/>
-            </StackPanel>
-
-            <!-- VerticalAlignment=Top so toolbar buttons never overlap
-                 a wrapped subtitle. -->
-            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Top">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            <Grid Grid.Row="0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" Style="{StaticResource PageTitle}"
+                           Text="Profiles"
+                           VerticalAlignment="Center"
+                           TextTrimming="CharacterEllipsis"/>
+            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
                 <!-- Cards / Table segmented toggle. Active state uses
                      the Accent background tint so it reads clearly. -->
                 <Border Background="{StaticResource BgDeep}"
@@ -362,8 +364,6 @@
                     </StackPanel>
                 </Border>
 
-                <Button Content="↻  Reload" Command="{Binding ReloadCommand}"
-                        Margin="0,0,8,0"/>
                 <Button Content="⚡  Bulk create"
                         Command="{Binding BulkAddCommand}"
                         Margin="0,0,8,0"
@@ -373,6 +373,13 @@
                         Style="{StaticResource ButtonPrimary}"
                         MinWidth="120"/>
             </StackPanel>
+            </Grid>
+            <Border Grid.Row="1" Style="{StaticResource Card}"
+                    Padding="14,10" Margin="0,12,0,0">
+                <TextBlock Style="{StaticResource PageSubtitle}"
+                           TextWrapping="Wrap"
+                           Text="Browser identities — create, start, inspect, manage. Tick rows to start or delete in bulk."/>
+            </Border>
         </Grid>
 
         <!-- Bulk-action strip — visible only when at least one row is checked.

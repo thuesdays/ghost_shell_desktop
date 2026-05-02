@@ -94,4 +94,8 @@ public sealed class StubProfileRunner : IProfileRunner
             await StopAsync(name, ct);
         _log.LogInformation("StopAll: signalled cancellation for every active run");
     }
+
+    /// <summary>Stub never produces a live IBrowserSession (it doesn't
+    /// own one) — return null so callers fall back gracefully.</summary>
+    public IBrowserSession? TryGetActiveSession(string profileName) => null;
 }

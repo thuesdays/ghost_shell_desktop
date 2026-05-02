@@ -22,21 +22,14 @@
                  the user reported it was easy to miss before, so it
                  lives in a green-bordered pill that reads as a chip
                  of metadata about the page-wide context. -->
-            <Grid Margin="0,0,0,14">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="Auto"/>
-                </Grid.ColumnDefinitions>
-                <StackPanel Grid.Column="0" Margin="0,0,16,0">
-                    <TextBlock Style="{StaticResource PageTitle}" Text="🧬  Fingerprint"/>
+            <StackPanel Margin="0,0,0,14">
+                <TextBlock Style="{StaticResource PageTitle}" Text="🧬  Fingerprint"/>
+                <Border Style="{StaticResource Card}" Padding="14,10" Margin="0,12,0,0">
                     <TextBlock Style="{StaticResource PageSubtitle}"
+                               TextWrapping="Wrap"
                                Text="Coherence validator — checks that UA / GPU / fonts / timezone tell the same story. A score below 75 means the profile is lying to itself and detection systems will notice."/>
-                </StackPanel>
-                <Button Grid.Column="1"
-                        Content="↻  Reload"
-                        Command="{Binding RefreshCommand}"
-                        VerticalAlignment="Top"/>
-            </Grid>
+                </Border>
+            </StackPanel>
 
             <!-- ─── PROMINENT PROFILE PICKER ────────────────────────
                  Big chip-style row: "Profile" label + dropdown + the
@@ -252,7 +245,8 @@
                                 <Button Background="Transparent"
                                         BorderThickness="0"
                                         Padding="0"
-                                        Margin="14,2"
+                                        Margin="0,2"
+                                        HorizontalAlignment="Stretch"
                                         HorizontalContentAlignment="Stretch"
                                         Command="{Binding DataContext.SelectTemplateCommand,
                                                   Source={x:Reference PageRoot}}"
@@ -437,7 +431,19 @@
                                         CornerRadius="6"
                                         Background="{StaticResource BgDeep}"
                                         BorderBrush="{StaticResource Border}"
-                                        BorderThickness="1">
+                                        BorderThickness="1"
+                                        Cursor="Hand"
+                                        ToolTip="Click for full probe details (after running Probe in profile)">
+                                    <!-- Click-to-open-details. The MouseBinding fires on the
+                                         WHOLE card so the user doesn't have to aim at a tiny
+                                         "more" link. Command params it with the row VM so the
+                                         parent VM can pull .Result. -->
+                                    <Border.InputBindings>
+                                        <MouseBinding MouseAction="LeftClick"
+                                                      Command="{Binding DataContext.ShowTesterDetailsCommand,
+                                                                RelativeSource={RelativeSource AncestorType=ItemsControl}}"
+                                                      CommandParameter="{Binding}"/>
+                                    </Border.InputBindings>
                                     <Border.Style>
                                         <Style TargetType="Border">
                                             <Setter Property="Background"  Value="{StaticResource BgDeep}"/>
@@ -445,6 +451,18 @@
                                             <Style.Triggers>
                                                 <DataTrigger Binding="{Binding IsSelected}" Value="True">
                                                     <Setter Property="BorderBrush" Value="{StaticResource Accent}"/>
+                                                </DataTrigger>
+                                                <DataTrigger Binding="{Binding VerdictKey}" Value="excellent">
+                                                    <Setter Property="BorderBrush" Value="{StaticResource OkBrush}"/>
+                                                </DataTrigger>
+                                                <DataTrigger Binding="{Binding VerdictKey}" Value="ok">
+                                                    <Setter Property="BorderBrush" Value="{StaticResource OkBrush}"/>
+                                                </DataTrigger>
+                                                <DataTrigger Binding="{Binding VerdictKey}" Value="weak">
+                                                    <Setter Property="BorderBrush" Value="{StaticResource WarnBrush}"/>
+                                                </DataTrigger>
+                                                <DataTrigger Binding="{Binding VerdictKey}" Value="flagged">
+                                                    <Setter Property="BorderBrush" Value="{StaticResource ErrBrush}"/>
                                                 </DataTrigger>
                                             </Style.Triggers>
                                         </Style>
@@ -456,10 +474,14 @@
                                                 <ColumnDefinition Width="*"/>
                                                 <ColumnDefinition Width="Auto"/>
                                             </Grid.ColumnDefinitions>
+                                            <!-- Stop the checkbox click from bubbling to the
+                                                 outer card MouseBinding, otherwise toggling
+                                                 selection would also pop the detail dialog. -->
                                             <CheckBox Grid.Column="0"
                                                       IsChecked="{Binding IsSelected, Mode=TwoWay}"
                                                       VerticalAlignment="Center"
-                                                      Margin="0,0,8,0"/>
+                                                      Margin="0,0,8,0"
+                                                      ClickMode="Press"/>
                                             <TextBlock Grid.Column="1"
                                                        FontSize="13" FontWeight="SemiBold"
                                                        Foreground="{StaticResource Text}"
@@ -474,10 +496,52 @@
                                                    FontSize="11"
                                                    TextWrapping="Wrap"
                                                    Margin="0,6,0,0"/>
+
+                                        <!-- Live status (during probing): "queued", "navigating…",
+                                             "running (Ns)…", "✓ {summary}", "✗ {error}". Visible
+                                             only while Status has a value. -->
+                                        <Border Margin="0,8,0,0" Padding="8,5"
+                                                CornerRadius="4"
+                                                Background="{StaticResource BgRaised}"
+                                                Visibility="{Binding Status, Converter={StaticResource NonEmptyToVisibleConverter}}">
+                                            <TextBlock Text="{Binding Status}"
+                                                       FontSize="10"
+                                                       FontFamily="{StaticResource FontMono}"
+                                                       TextWrapping="Wrap">
+                                                <TextBlock.Style>
+                                                    <Style TargetType="TextBlock">
+                                                        <Setter Property="Foreground" Value="{StaticResource TextMuted}"/>
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding VerdictKey}" Value="excellent">
+                                                                <Setter Property="Foreground" Value="{StaticResource OkBrush}"/>
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding VerdictKey}" Value="ok">
+                                                                <Setter Property="Foreground" Value="{StaticResource OkBrush}"/>
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding VerdictKey}" Value="weak">
+                                                                <Setter Property="Foreground" Value="{StaticResource WarnBrush}"/>
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding VerdictKey}" Value="flagged">
+                                                                <Setter Property="Foreground" Value="{StaticResource ErrBrush}"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </TextBlock.Style>
+                                            </TextBlock>
+                                        </Border>
+
+                                        <!-- "click for details" hint — only when a result
+                                             is available. -->
+                                        <TextBlock Text="↗  click for details"
+                                                   Style="{StaticResource DimText}"
+                                                   FontSize="9"
+                                                   Margin="0,4,0,0"
+                                                   Visibility="{Binding HasResult, Converter={StaticResource BoolToVis}}"/>
                                         <TextBlock Text="{Binding ResultText}"
                                                    Style="{StaticResource DimText}"
                                                    FontSize="10"
-                                                   Margin="0,8,0,0"/>
+                                                   Margin="0,4,0,0"
+                                                   Visibility="{Binding HasResult, Converter={StaticResource InverseBoolToVis}}"/>
                                     </StackPanel>
                                 </Border>
                             </DataTemplate>
