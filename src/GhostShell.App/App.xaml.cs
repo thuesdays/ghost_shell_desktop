@@ -11,6 +11,7 @@ using GhostShell.App.Navigation;
 using GhostShell.App.Tray;
 using GhostShell.App.ViewModels;
 using GhostShell.Core.Common;
+using GhostShell.Core.Models;
 using GhostShell.Data;
 using GhostShell.Data.Database;
 using GhostShell.Core.Services;
@@ -565,6 +566,28 @@ public partial class App : Application
                     Application.Current?.Dispatcher.InvokeAsync(() =>
                     {
                         bootLogger.LogInformation("Updater asked for shutdown — closing for binary swap");
+                        // Phase 69c — match the tray "Quit" path: flag the
+                        // shutdown as allowed AND let every MainWindow know
+                        // it can really close. Without this, MainWindow.OnClosing
+                        // hits its tray-hide branch (e.Cancel=true; Hide())
+                        // which makes the window flash to tray during the
+                        // update; Application.Shutdown still completes
+                        // (it overrides Cancel) but the brief Hide() before
+                        // teardown is what the user sees as "minimised to
+                        // tray then everything closed".
+                        AllowingShutdown = true;
+                        try
+                        {
+                            foreach (Window w in Application.Current!.Windows)
+                            {
+                                if (w is MainWindow mw) mw.AllowClose();
+                            }
+                        }
+                        catch (Exception allowEx)
+                        {
+                            bootLogger.LogWarning(allowEx,
+                                "AllowClose pass before update-shutdown failed (continuing)");
+                        }
                         Application.Current?.Shutdown(0);
                     });
                 };
@@ -585,6 +608,42 @@ public partial class App : Application
                     var info = await svc.CheckAsync();
                     if (info is not null && svc.UpdateAvailable)
                     {
+                        // Phase 69c — also persist as a bell-drawer
+                        // notification so the user can re-open the
+                        // dialog any time, not just on this startup.
+                        // Dedupes against existing ACTIVE rows for the
+                        // same target version: if the user already has
+                        // a pending update notification, we don't add a
+                        // second one. Dismissed rows DON'T count, so
+                        // dismiss-then-restart re-surfaces the badge.
+                        try
+                        {
+                            var notifSvc = Host.Services.GetRequiredService<INotificationService>();
+                            var src = $"update:{info.LatestVersion}";
+                            var active = await notifSvc.ListActiveAsync(200);
+                            var alreadyPresent = active.Any(n =>
+                                string.Equals(n.Source, src, StringComparison.Ordinal));
+                            if (!alreadyPresent)
+                            {
+                                var title = $"Update available — v{info.LatestVersion}";
+                                var body  = string.IsNullOrWhiteSpace(info.ReleaseName)
+                                    ? $"You're on v{info.CurrentVersion}. Click to install."
+                                    : $"You're on v{info.CurrentVersion}. {info.ReleaseName}. Click to install.";
+                                await notifSvc.AddAsync(
+                                    severity: NotificationSeverity.Info,
+                                    title:    title,
+                                    body:     body,
+                                    action:   "show_update",
+                                    actionArg: info.LatestVersion.ToString(),
+                                    source:   src);
+                            }
+                        }
+                        catch (Exception nx)
+                        {
+                            bootLogger.LogWarning(nx,
+                                "Couldn't persist update-available notification (non-fatal)");
+                        }
+
                         // [Phase 37 fix:] Use InvokeAsync + Task to avoid deadlock
                         // and check that Application.Current still exists.
                         // The previous `await … ?? Task.CompletedTask` form

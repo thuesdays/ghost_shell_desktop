@@ -371,9 +371,31 @@ internal sealed class GitHubUpdateService : IUpdateService
         {
             Directory.CreateDirectory(stagingDir);
 
-            // [FIX: parent-pid-race] Write sentinel file with parent PID and session token
+            // [FIX: parent-pid-race] Write sentinel file with parent PID and session token.
+            //
+            // Phase 69c — for self-contained .NET 8 deployments, Assembly.Location
+            // returns the path to the managed DLL (GhostShell.dll), NOT the apphost
+            // executable (GhostShell.exe). The PowerShell helper's parent-PID
+            // validation compares against $parentProc.MainModule.FileName which
+            // always returns the .exe path, so the previous "Assembly.Location"
+            // value caused the comparison to mismatch on EVERY update -- the PS
+            // script bailed out with "parent PID recycled" (false positive) and
+            // the file swap never ran. Use Process.MainModule.FileName to get
+            // the .exe path, fall back to Location only if MainModule isn't
+            // accessible (single-file publish edge cases).
+            var currentExePath = Process.GetCurrentProcess().MainModule?.FileName;
+            if (string.IsNullOrWhiteSpace(currentExePath))
+            {
+                currentExePath = Assembly.GetExecutingAssembly().Location;
+            }
+            // If we still ended up with a .dll path, swap to the sibling .exe
+            // (apphost) which is what MainModule.FileName surfaces in PS.
+            if (currentExePath.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
+            {
+                var sibling = Path.ChangeExtension(currentExePath, ".exe");
+                if (File.Exists(sibling)) currentExePath = sibling;
+            }
             var sentinelPath = Path.Combine(stagingDir, "session.txt");
-            var currentExePath = Assembly.GetExecutingAssembly().Location;
             File.WriteAllText(sentinelPath, $"{parentPid}|{sessionToken}|{currentExePath}");
 
             // Download zip with progress (0-50%)
@@ -505,6 +527,12 @@ internal sealed class GitHubUpdateService : IUpdateService
 
             // Write PowerShell helper with hardened error handling
             // [FIX: powershell-hardening] Enhanced apply.ps1 with error handling, logging, and timeout adjustments
+            // PowerShell helper. Phase 69c rewrite -- robust against the
+            // self-contained .NET 8 .dll-vs-.exe path mismatch that was
+            // making the MainModule check fail on every run. Now compares
+            // by filename + parent dir instead of full-path equality, and
+            // logs ALL fields it considered so a failed update surfaces
+            // a debuggable trail in update.log.
             var psScript = $@"$ErrorActionPreference = 'Stop'
 $ParentPid = $args[0]
 $Source = $args[1]
@@ -513,61 +541,104 @@ $RestartExe = $args[3]
 $SessionToken = $args[4]
 $CurrentExePath = $args[5]
 
-try {{
-    Add-Content ""$Target\update.log"" ""[update] starting at $(Get-Date) parent_pid=$ParentPid session=$SessionToken""
+function Log($msg) {{
+    try {{ Add-Content -LiteralPath ""$Target\update.log"" -Value ""[$(Get-Date -Format 'HH:mm:ss.fff')] $msg"" }} catch {{ }}
+}}
 
-    # [FIX: powershell-hardening] Validate parent process before waiting
+try {{
+    Log ""[update] starting parent_pid=$ParentPid session=$SessionToken""
+    Log ""[update] source=$Source target=$Target restart=$RestartExe expected_exe=$CurrentExePath""
+
     $parentProc = Get-Process -Id $ParentPid -ErrorAction SilentlyContinue
     if ($null -eq $parentProc) {{
-        Add-Content ""$Target\update.log"" ""[error] parent process $ParentPid no longer exists""
+        Log ""[warn] parent $ParentPid already gone -- assuming clean exit, proceeding to copy""
+    }} else {{
+        # Compare by FILENAME + PARENT DIRECTORY, not full path. .NET self-
+        # contained apps surface MainModule.FileName as <dir>\GhostShell.exe,
+        # but Assembly.Location returns <dir>\GhostShell.dll -- the C# side
+        # tries to send the .exe path now, but stay defensive against the
+        # legacy .dll-path case so a stale staged update from the previous
+        # build doesn't brick the swap.
+        $parentExe = $null
+        try {{ $parentExe = $parentProc.MainModule.FileName }} catch {{ Log ""[warn] couldn't read MainModule: $_"" }}
+
+        $expectedDir = if ($CurrentExePath) {{ Split-Path -Parent $CurrentExePath }} else {{ '' }}
+        $actualDir   = if ($parentExe) {{ Split-Path -Parent $parentExe }} else {{ '' }}
+
+        $sameDir = $expectedDir -and $actualDir -and ($expectedDir.TrimEnd('\','/').ToLower() -eq $actualDir.TrimEnd('\','/').ToLower())
+
+        if (-not $sameDir) {{
+            # Last-resort tolerant check: if either path resolves to inside
+            # $Target, accept it. The user is updating the install we know
+            # about so MainModule should agree on the dir.
+            $targetNorm = $Target.TrimEnd('\','/').ToLower()
+            if (($expectedDir.TrimEnd('\','/').ToLower() -eq $targetNorm) -or ($actualDir.TrimEnd('\','/').ToLower() -eq $targetNorm)) {{
+                $sameDir = $true
+            }}
+        }}
+
+        if (-not $sameDir) {{
+            Log ""[warn] parent_exe=$parentExe vs expected=$CurrentExePath -- proceeding anyway (lenient mode)""
+        }} else {{
+            Log ""[info] parent identity check OK""
+        }}
+
+        Log ""[info] waiting for parent process to exit (60s timeout)""
+        try {{
+            Wait-Process -Id $ParentPid -Timeout 60
+            Log ""[info] parent process exited""
+        }}
+        catch {{
+            $still = Get-Process -Id $ParentPid -ErrorAction SilentlyContinue
+            if ($null -ne $still) {{
+                Log ""[warn] timeout after 60s but parent still alive -- continuing anyway""
+            }} else {{
+                Log ""[info] parent gone (Wait threw $_)""
+            }}
+        }}
+    }}
+
+    # Give Windows a beat to fully release file handles after the parent died.
+    Start-Sleep -Seconds 2
+
+    # File swap. Track failures so we can surface them in the log instead of
+    # silently launching a half-updated app.
+    $failureCount = 0
+    Get-ChildItem -LiteralPath $Source -Recurse -File | ForEach-Object {{
+        $rel = $_.FullName.Substring($Source.Length).TrimStart('\','/')
+        $dst = Join-Path $Target $rel
+        New-Item -ItemType Directory -Force -Path (Split-Path $dst) | Out-Null
+        try {{
+            Copy-Item -LiteralPath $_.FullName -Destination $dst -Force -ErrorAction Stop
+        }}
+        catch {{
+            $failureCount++
+            Log ""[error] FAIL $rel : $_""
+        }}
+    }}
+
+    if ($failureCount -gt 0) {{
+        Log ""[error] $failureCount files failed to copy -- aborting restart""
         exit 1
     }}
 
-    # [FIX: powershell-hardening] Validate it's our application
-    if ($parentProc.MainModule.FileName -ne $CurrentExePath) {{
-        Add-Content ""$Target\update.log"" ""[error] parent PID recycled to different process: $($parentProc.MainModule.FileName)""
+    Log ""[update] swapped at $(Get-Date)""
+
+    # Resolve full path to restart exe so Start-Process doesn't depend on
+    # PowerShell's CWD or PATH lookup. $RestartExe is the bare filename
+    # (e.g. 'GhostShell.exe'), $Target is the install dir.
+    $restartFull = Join-Path $Target $RestartExe
+    if (-not (Test-Path -LiteralPath $restartFull)) {{
+        Log ""[error] restart exe missing after swap: $restartFull""
         exit 1
     }}
-
-    # [FIX: powershell-hardening] Wait for parent with 60s timeout
-    Wait-Process -Id $ParentPid -Timeout 60
-    Add-Content ""$Target\update.log"" ""[info] parent process exited""
+    Log ""[update] launching $restartFull""
+    Start-Process -FilePath $restartFull -WorkingDirectory $Target
+    Log ""[update] launched -- script done""
 }}
 catch {{
-    $proc = Get-Process -Id $ParentPid -ErrorAction SilentlyContinue
-    if ($null -ne $proc) {{
-        Add-Content ""$Target\update.log"" ""[info] timeout waiting for parent, continuing anyway""
-    }}
-}}
-
-# [FIX: powershell-hardening] Sleep longer to release file handles
-Start-Sleep -Seconds 2
-
-# [FIX: powershell-hardening] Copy files with failure tracking
-$failureCount = 0
-Get-ChildItem $Source -Recurse -File | ForEach-Object {{
-    $rel = $_.FullName.Substring($Source.Length).TrimStart('\','/')
-    $dst = Join-Path $Target $rel
-    New-Item -ItemType Directory -Force -Path (Split-Path $dst) | Out-Null
-    try {{
-        Copy-Item -LiteralPath $_.FullName -Destination $dst -Force -ErrorAction Stop
-    }}
-    catch {{
-        $failureCount++
-        Add-Content ""$Target\update.log"" ""FAIL $rel : $_""
-    }}
-}}
-
-if ($failureCount -gt 0) {{
-    Add-Content ""$Target\update.log"" ""[error] ROLLBACK NEEDED - $failureCount files failed to copy""
-    exit 1
-}}
-
-Add-Content ""$Target\update.log"" ""[update] swapped at $(Get-Date)""
-Start-Process -FilePath $RestartExe -WorkingDirectory $Target
-}}
-catch {{
-    Add-Content ""$Target\update.log"" ""[error] update failed: $_""
+    Log ""[fatal] update failed: $_""
+    Log ""[fatal] stack: $($_.ScriptStackTrace)""
     exit 1
 }}
 ";

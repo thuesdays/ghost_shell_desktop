@@ -25,16 +25,19 @@ public sealed partial class NotificationsViewModel : ObservableObject
 {
     private readonly INotificationService _notifications;
     private readonly INavigationService _nav;
+    private readonly IUpdateService _updates;
     private readonly ILogger<NotificationsViewModel> _log;
     private readonly DispatcherTimer _poll;
 
     public NotificationsViewModel(
         INotificationService notifications,
         INavigationService nav,
+        IUpdateService updates,
         ILogger<NotificationsViewModel> log)
     {
         _notifications = notifications;
         _nav           = nav;
+        _updates       = updates;
         _log           = log;
         _notifications.Changed += (_, _) => MarshalRefresh();
 
@@ -134,9 +137,14 @@ public sealed partial class NotificationsViewModel : ObservableObject
     private async Task ActivateAsync(Notification? n)
     {
         if (n is null) return;
-        // Always dismiss when the user activates — once they've seen
-        // it and acted, the badge shouldn't keep nagging.
-        await DismissAsync(n);
+        // Phase 69c — for most verbs we dismiss on activation (user has
+        // seen + acted, badge shouldn't keep nagging). EXCEPTION: the
+        // "show_update" verb is sticky — the user might dismiss the
+        // dialog ("Maybe later") and want to come back to it via the
+        // bell. We only dismiss when they explicitly hit the Dismiss
+        // button on the row (DismissCommand).
+        var sticky = string.Equals(n.Action, "show_update", StringComparison.Ordinal);
+        if (!sticky) await DismissAsync(n);
         IsDrawerOpen = false;
         try
         {
@@ -148,6 +156,46 @@ public sealed partial class NotificationsViewModel : ObservableObject
                 case "open_scheduler": _nav.NavigateTo("scheduler"); break;
                 case "open_traffic":   _nav.NavigateTo("traffic");   break;
                 case "open_logs":      _nav.NavigateTo("logs");      break;
+                case "show_update":
+                    // Phase 69c — re-open the "Update available" dialog any
+                    // time, not just at startup. The original release flow
+                    // showed the dialog ONCE on launch and the user had no
+                    // way to get back to it after dismissing. Persisting it
+                    // as a notification + this action lets them tap the bell
+                    // and trigger the same dialog whenever they're ready.
+                    try
+                    {
+                        var info = _updates.LatestKnown;
+                        if (info is null)
+                        {
+                            // Cache may have expired or never populated --
+                            // re-check (CheckAsync has a 60s TTL guard so
+                            // this is cheap if we're in the active window).
+                            info = await _updates.CheckAsync();
+                        }
+                        if (info is not null && _updates.UpdateAvailable)
+                        {
+                            var owner = Application.Current?.MainWindow;
+                            if (owner is not null)
+                            {
+                                Dialogs.UpdateAvailableDialog.ShowFor(owner, _updates, info);
+                            }
+                            else
+                            {
+                                _log.LogWarning("show_update: no MainWindow to host the dialog");
+                            }
+                        }
+                        else
+                        {
+                            _log.LogInformation(
+                                "show_update: no update available now (current is up-to-date)");
+                        }
+                    }
+                    catch (Exception updEx)
+                    {
+                        _log.LogWarning(updEx, "show_update notification activation failed");
+                    }
+                    break;
                 case "url":
                     if (!string.IsNullOrWhiteSpace(n.ActionArg))
                     {

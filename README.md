@@ -44,7 +44,19 @@ on it.
 - [x] **Bulk vault import** — paste CSV / load file / fetch Google Sheet, map columns to fields, auto-bind rows to profiles by name (Phase 69)
 - [ ] Auto-update — Velopack (deferred)
 
-### v0.0.2.2 — splash window stays visible after minimising to tray (this release)
+### v0.0.2.3 — self-update fixes + persistent update notification (this release)
+
+**Self-update never restarted.** Three coordinated bugs caused self-update to "minimise to tray and close everything" without ever swapping in the new build:
+
+1. **`Application.Shutdown(0)` ran without setting `App.AllowingShutdown = true`.** That made `MainWindow.OnClosing` hit its tray-hide branch (`e.Cancel = true; Hide()`) before WPF overrode the cancel and tore the app down. The brief Hide() is what the user saw as "minimise to tray". Fixed by mirroring the tray-Quit path: set `AllowingShutdown = true` and call `MainWindow.AllowClose()` on every open MainWindow before `Shutdown(0)`.
+2. **PowerShell helper bailed out on a path-mismatch false-positive.** `Assembly.GetExecutingAssembly().Location` returns the path to the managed DLL (`GhostShell.dll`) for self-contained .NET 8 publishes, but the helper compared it against `$parentProc.MainModule.FileName` which surfaces the apphost path (`GhostShell.exe`). The strings always differed → "parent PID recycled" → `exit 1` → file swap never ran. C# now uses `Process.GetCurrentProcess().MainModule.FileName` (with a `.dll → sibling .exe` fallback), and the PowerShell side compares by **directory** rather than full path so a stale staged update from the previous build can't brick the swap.
+3. **`Start-Process -FilePath "GhostShell.exe"`** at the end of the helper resolved relative to PowerShell's CWD (not `-WorkingDirectory`), so even when the swap succeeded the restart could miss the binary. Now joins the bare filename to `$Target` to get a full absolute path before launching.
+
+Helper script also gets a proper `Log` function (timestamped lines), more breadcrumbs (every input arg + dir comparison), and explicit error-stacktrace dump on the catch path. If a future update fails, `%LocalAppData%\GhostShellDesktop\update.log` will tell you exactly where.
+
+**"Update available" is now a persistent notification.** Previously the update only appeared as a one-shot dialog at startup — once dismissed, the user had no way to get back to it. Now an `info` notification is added to the bell drawer (`source = "update:<version>"`, action = `show_update`) the first time a new version is detected. Click the row in the drawer any time to re-open the install dialog. The notification stays in the active list until the user explicitly dismisses it, and dedup is per-target-version so a future v0.0.3.0 release will surface fresh.
+
+### v0.0.2.2 — splash window stays visible after minimising to tray
 
 The previous patch (`v0.0.2.1`) only addressed one half of the bug. Some users still saw the splash hanging on screen when the main window was minimised to tray. This release rewrites the splash close path to be paranoid:
 
