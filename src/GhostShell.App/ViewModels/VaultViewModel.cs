@@ -176,6 +176,31 @@ public sealed partial class VaultViewModel : BaseViewModel
             await ReloadAsync();
     }
 
+    /// <summary>
+    /// Phase 69 — open the bulk-import dialog. Lets the user paste CSV
+    /// (or fetch a Google Sheet) and create N vault items in one pass,
+    /// auto-binding each to the profile named in its <c>profile_name</c>
+    /// column. After commit we reload so the new rows show up + surface
+    /// a count toast so the user sees how many landed.
+    /// </summary>
+    [RelayCommand]
+    private async Task BulkImportAsync()
+    {
+        if (!IsUnlocked) { await UnlockAsync(); if (!IsUnlocked) return; }
+        var owner = System.Windows.Application.Current?.MainWindow;
+        var profiles = await _profiles.ListAsync();
+        var dlg = new VaultBulkImportDialog(_vault, profiles) { Owner = owner };
+        if (dlg.ShowDialog() == true && dlg.CreatedCount > 0)
+        {
+            await _dialogs.ConfirmAsync(
+                "Bulk import done",
+                $"Created {dlg.CreatedCount} vault item(s). They'll resolve through " +
+                "{{vault.SEED}}, {{vault.PASSWORD}} etc. for the profiles they're bound to.",
+                "OK", ConfirmSeverity.Success);
+            await ReloadAsync();
+        }
+    }
+
     [RelayCommand]
     private async Task EditAsync(VaultItemRow? row)
     {

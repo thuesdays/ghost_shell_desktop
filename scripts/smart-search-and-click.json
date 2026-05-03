@@ -1,91 +1,70 @@
 {
   "_meta": {
     "format": "ghost-shell-desktop-flow",
-    "version": 1,
+    "version": 2,
     "name": "GoodMedika",
-    "description": "Desktop port of ghost_shell_browser/scripts/smart-search-and-click.json. Same brand-SERP rotation logic, retargeted at the desktop runner's primitive set: 'loop' becomes 'foreach' (with 'var'/'body' instead of 'item_var'/'steps'), variable interpolation uses '{{item}}' instead of '{item}', and the web's compound 'commercial_inflate' / 'search_query' actions are emulated with 'navigate' + 'wait_for_selector' + 'pause' (the desktop runner doesn't have those compound actions yet — Selenium's GoToUrl auto-percent-encodes the Cyrillic query so plain navigate is enough). Behaviour matches: each iteration optionally pre-warms Google with a generic commercial query (~30 % chance), runs the brand search, walks every ad on the SERP, and clicks any ad whose domain isn't on the profile's my_domains list.",
-    "exported_at": "2026-05-02T18:30:00.000Z",
+    "description": "Desktop-native port of ghost_shell_browser/scripts/smart-search-and-click.json. Uses the new desktop-runtime handlers for `commercial_inflate` and `search_query` (Phase 38) so the legacy web logic executes 1:1 without macro emulation. Structural translations vs. the web original: `loop`→`foreach`, `item_var`→`params.var`, top-level `steps`→`body`, `then_steps`→`then`, `else_steps`→`else`, single-brace `{item}`→double-brace `{{item}}`. Comma-, newline-, and CR-delimited `items` strings all split correctly (Phase 38 fix).",
+    "exported_at": "2026-05-02T21:30:00.000Z",
     "ported_from": "ghost_shell_browser/scripts/smart-search-and-click.json"
   },
   "name": "GoodMedika",
-  "description": "Brand SERP rotation with optional commercial pre-warm. Click any non-own ad (competitors + targets). For target-only behaviour set only_on_target=true on click_ad — the ad_is_external outer condition is permissive enough to let it filter inside.",
+  "description": "Brand SERP rotation with commercial pre-warm. Click any non-own ad (competitors + targets). For target-only: set only_on_target=true on click_ad — the outer ad_is_external is permissive enough to let it filter inside. For pure competitors: switch the outer condition kind to ad_is_competitor.",
   "tags": [],
   "steps": [
     {
-      "_comment": "Top-level loop over the brand keyword list. The desktop runner's `foreach` mirrors the web's `loop`: it iterates each line of `items`, exposes the current value as ctx.Vars[var], and runs `body` per iteration. shuffle/random ordering is NOT yet supported on desktop foreach — items run top-to-bottom. If you need shuffling, duplicate the file with the brand list pre-shuffled.",
+      "_comment": "Top-level loop over brand keywords. The desktop foreach honors newline-delimited items in the same string so the existing 'one keyword per line' UX from the web carries over. shuffle=true randomises iteration order so we don't always hit Google with the same brand sequence.",
       "type": "foreach",
       "enabled": true,
       "params": {
         "var": "item",
-        "items": "goodmedika\nгудмедика\nгудмедіка"
+        "items": "goodmedika\nгудмедика\nгудмедіка",
+        "shuffle": true
       },
       "body": [
         {
-          "_comment": "Commercial pre-warm — emulates the web's `commercial_inflate` step. probability=0.3 means ~30 % of iterations get the warm-up. We navigate to a generic commercial query so Google's commercial-intent context absorbs the brand-adjacent signal; the next brand search lands in a richer ad context. wait_for_selector pauses until the SERP is rendered (#search), then a short dwell mimics scan time before we move on.",
-          "type": "navigate",
+          "_comment": "Pre-warm Google's commercial-intent context. probability=0.3 means ~30% of iterations get the warm-up; the rest fire the brand search cold (variation = more natural). click_organic=true gives a stronger signal at +~10s per pre-query. Native handler is now in ScriptRunner — no macro emulation.",
+          "type": "commercial_inflate",
           "enabled": true,
           "probability": 0.3,
           "params": {
-            "url": "https://www.google.com/search?q=instagram+{{item}}&hl=uk"
+            "brand": "{{item}}",
+            "n": 2,
+            "locale": "uk",
+            "dwell_min": 4,
+            "dwell_max": 10,
+            "click_organic": true
           }
         },
         {
-          "type": "wait_for_selector",
-          "enabled": true,
-          "probability": 0.3,
-          "params": {
-            "selector": "#search",
-            "timeout_sec": 12
-          }
-        },
-        {
-          "type": "pause",
-          "enabled": true,
-          "probability": 0.3,
-          "params": {
-            "min_sec": 4,
-            "max_sec": 10
-          }
-        },
-
-        {
-          "_comment": "Real brand search. Selenium auto-percent-encodes the query, so the Cyrillic spellings work without manual escaping. The desktop runner has no built-in retry-on-no-ads loop (the web's `search_query` wraps four attempts with 13–15 s gaps); foreach_ad handles the empty-SERP case by simply iterating zero items.",
-          "type": "navigate",
+          "_comment": "Brand search. max_attempts=4 means search_query refreshes the SERP up to 4 times if the first response has no ads (handles soft-blocks). retry_min/max gives the same 13-15s gap the legacy web used. fail_on_empty=false means an all-empty result set still lets the script continue to the next iteration's brand keyword instead of aborting.",
+          "type": "search_query",
           "enabled": true,
           "params": {
-            "url": "https://www.google.com/search?q={{item}}&hl=uk"
+            "query": "{{item}}",
+            "locale": "uk",
+            "max_attempts": 4,
+            "retry_min_sec": 13,
+            "retry_max_sec": 15,
+            "fail_on_empty": false,
+            "timeout_ms": 12000
           }
         },
         {
-          "type": "wait_for_selector",
-          "enabled": true,
-          "params": {
-            "selector": "#search",
-            "timeout_sec": 15
-          }
-        },
-        {
-          "type": "pause",
-          "enabled": true,
-          "params": {
-            "min_sec": 2,
-            "max_sec": 4
-          }
-        },
-
-        {
-          "_comment": "Walk every ad on the SERP. foreach_ad auto-calls parse_ads once per entry if the ad list is empty, so no explicit parse_ads step is needed before this. Inside the body, the if(ad_is_external) gate filters to non-own ads (covers competitors AND target-domain ads). To click ONLY pure competitors, switch the condition kind to ad_is_competitor.",
+          "_comment": "Walk every ad on the SERP. shuffle=true so we don't always click the top slot first (more natural). The if(ad_is_external) gate filters to non-own ads (covers BOTH competitors AND target-domain ads). To click ONLY pure competitors, switch this condition's kind to ad_is_competitor.",
           "type": "foreach_ad",
           "enabled": true,
+          "params": {
+            "shuffle": true
+          },
           "body": [
             {
-              "_comment": "ad_is_external = 'any ad NOT on my domain' (covers competitors AND target-domain ads). Use this when you want flexibility inside via only_on_target / skip_on_target. To click ONLY pure competitors (excluding targets), switch kind to ad_is_competitor.",
+              "_comment": "ad_is_external = 'any ad NOT on my domain' (covers competitors AND target-domain ads). Lets the inner click_ad filter further via only_on_target / skip_on_target. To click ONLY pure competitors (excluding targets), change kind to ad_is_competitor.",
               "type": "if",
               "enabled": true,
               "condition": { "kind": "ad_is_external" },
               "then": [
                 {
-                  "_comment": "skip_on_my_domain stays as a paranoid safety net (the outer ad_is_external already excludes own domain — but if my_domains is misconfigured at run-time, this is the second line of defence). only_on_target=false → click both competitors and targets. Flip to true if you want target-only. The desktop's click_ad uses a 2.5–6 s post-click dwell internally; dwell_min/dwell_max from the web schema are accepted as params but are no-ops for now (kept for forward-compat).",
+                  "_comment": "skip_on_my_domain stays as a paranoid safety net (the outer ad_is_external already excludes own domain, but if my_domains is misconfigured at runtime this is the second line of defence). only_on_target=false → click both competitors and targets. Flip to true if you want target-only. skip_on_blocked=true so the runner never opens domains in the global block list. Per-step ad-domain flags are top-level on the desktop step shape (not inside params).",
                   "type": "click_ad",
                   "enabled": true,
                   "skip_on_my_domain": true,
@@ -93,6 +72,7 @@
                   "only_on_target": false,
                   "skip_on_blocked": true,
                   "params": {
+                    "stamp_id": -1,
                     "dwell_min": 6,
                     "dwell_max": 18,
                     "scroll_after_click": true,
@@ -101,7 +81,7 @@
                   }
                 },
                 {
-                  "_comment": "Short between-click pause inside foreach_ad. probability=0.6 means most of the time we pause — but not always, so the click cadence varies.",
+                  "_comment": "Short between-click pause inside foreach_ad. probability=0.6 means most of the time we pause — but not always (foreach_ad already has its own scan-pause between iterations).",
                   "type": "pause",
                   "enabled": true,
                   "probability": 0.6,
@@ -115,7 +95,6 @@
             }
           ]
         },
-
         {
           "_comment": "Cool-down between query-loop iterations. Real users don't fire searches back-to-back without breathing room.",
           "type": "pause",

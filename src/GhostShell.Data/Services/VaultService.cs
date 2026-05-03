@@ -449,6 +449,72 @@ internal sealed class VaultService : IVaultService, IDisposable
         return result;
     }
 
+    public async Task<IReadOnlyDictionary<string, string>> ResolveAliasesAsync(
+        string profileName, IEnumerable<string> aliases, CancellationToken ct = default)
+    {
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (!IsUnlocked || string.IsNullOrEmpty(profileName)) return result;
+
+        var distinct = aliases
+            .Where(a => !string.IsNullOrEmpty(a))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (distinct.Count == 0) return result;
+
+        // Group aliases by their target kind so we issue at most ONE
+        // ListAsync per kind. The "" kind (TOTP — any kind that has a
+        // totp_secret field) gets a separate pass that walks every
+        // profile-bound item.
+        var byKind = new Dictionary<string, List<VaultAliases.AliasSpec>>(
+            StringComparer.OrdinalIgnoreCase);
+        foreach (var a in distinct)
+        {
+            var spec = VaultAliases.Get(a);
+            if (spec is null) continue;
+            if (!byKind.TryGetValue(spec.Kind, out var bucket))
+                byKind[spec.Kind] = bucket = new List<VaultAliases.AliasSpec>();
+            bucket.Add(spec);
+        }
+
+        foreach (var (kind, specs) in byKind)
+        {
+            // kind="" means "any kind" — search every profile-bound item.
+            var items = await ListAsync(
+                kind: string.IsNullOrEmpty(kind) ? null : kind,
+                profileName: profileName,
+                ct: ct);
+            if (items.Count == 0) continue;
+
+            // Pick the most recently-updated item if multiple match
+            // (e.g. user re-imported the same wallet — newer wins).
+            var item = items.OrderByDescending(i => i.UpdatedAt).First();
+
+            (VaultItem item, IReadOnlyDictionary<string, string> clear)? pair;
+            try { pair = await GetClearAsync(item.Id, ct); }
+            catch (InvalidOperationException) { return result; }   // locked
+            catch (CryptographicException)    { continue; }
+            if (pair is null) continue;
+
+            foreach (var spec in specs)
+            {
+                if (pair.Value.clear.TryGetValue(spec.Field, out var value)
+                    && !string.IsNullOrEmpty(value))
+                {
+                    result[spec.Alias] = value;
+                }
+                else if (string.Equals(spec.Field, "totp_secret", StringComparison.OrdinalIgnoreCase)
+                         && pair.Value.clear.TryGetValue("totp_secret", out var seed))
+                {
+                    // Compute live TOTP code for ${TOTP} convenience.
+                    var (code, _) = Totp.Compute(seed);
+                    result[spec.Alias] = code;
+                }
+            }
+            try { await TouchUsedAsync(item.Id, ct); } catch { /* non-fatal */ }
+        }
+        return result;
+    }
+
     // ─── Helpers ─────────────────────────────────────────────────
 
     /// <summary>Public-API check (no gate held). Subject to TOCTOU

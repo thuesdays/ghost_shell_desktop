@@ -1,0 +1,104 @@
+<!--
+  SPDX-License-Identifier: MIT
+  Copyright (c) 2026 Mykola Kovhanko <thuesdays@gmail.com>
+
+  Phase 64 — Bulk Start parameters dialog. Asks the user how many
+  seconds to wait between successive launches (stagger) and the
+  hard cap on simultaneously-running profiles (concurrency).
+-->
+<Window x:Class="GhostShell.App.Dialogs.BulkStartDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Bulk start"
+        Width="500" Height="380"
+        WindowStartupLocation="CenterOwner"
+        SizeToContent="Height"
+        Background="{DynamicResource BgBase}"
+        ShowInTaskbar="False"
+        ResizeMode="NoResize">
+
+    <StackPanel Margin="22">
+        <TextBlock x:Name="HeaderText"
+                   FontSize="16" FontWeight="Bold"
+                   Foreground="{DynamicResource TextPrimary}"/>
+
+        <TextBlock Text="Each profile launches its own Chrome window. Big batches saturate CPU/RAM quickly — the stagger gap and concurrency cap let you scale safely."
+                   Foreground="{DynamicResource TextDim}"
+                   FontSize="11.5"
+                   TextWrapping="Wrap" Margin="0,6,0,18"/>
+
+        <!-- Stagger seconds -->
+        <Grid Margin="0,0,0,16">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            <Grid Grid.Row="0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="Stagger between launches"
+                           Grid.Column="0"
+                           Foreground="{DynamicResource TextPrimary}"
+                           FontWeight="SemiBold"/>
+                <TextBlock Grid.Column="1"
+                           x:Name="StaggerLabel"
+                           Foreground="{DynamicResource HueTeal}"
+                           FontFamily="Cascadia Code, Consolas"
+                           FontWeight="Bold"/>
+            </Grid>
+            <Slider x:Name="StaggerSlider" Grid.Row="1"
+                    Minimum="0" Maximum="180"
+                    TickFrequency="5" IsSnapToTickEnabled="True"
+                    Value="30"
+                    Margin="0,6,0,0"
+                    ValueChanged="StaggerSlider_ValueChanged"/>
+        </Grid>
+
+        <!-- Concurrent cap -->
+        <Grid Margin="0,0,0,16">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            <Grid Grid.Row="0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="Max concurrent profiles"
+                           Grid.Column="0"
+                           Foreground="{DynamicResource TextPrimary}"
+                           FontWeight="SemiBold"/>
+                <TextBlock Grid.Column="1"
+                           x:Name="ConcurrentLabel"
+                           Foreground="{DynamicResource HueTeal}"
+                           FontFamily="Cascadia Code, Consolas"
+                           FontWeight="Bold"/>
+            </Grid>
+            <Slider x:Name="ConcurrentSlider" Grid.Row="1"
+                    Minimum="1" Maximum="20"
+                    TickFrequency="1" IsSnapToTickEnabled="True"
+                    Value="4"
+                    Margin="0,6,0,0"
+                    ValueChanged="ConcurrentSlider_ValueChanged"/>
+        </Grid>
+
+        <Border Background="#26F59E0B"
+                BorderBrush="#FFF59E0B" BorderThickness="1"
+                CornerRadius="4" Padding="10,7" Margin="0,4,0,18">
+            <TextBlock x:Name="WarningText"
+                       Foreground="{DynamicResource TextPrimary}"
+                       FontSize="11" TextWrapping="Wrap"/>
+        </Border>
+
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button Content="Cancel" Click="Cancel_Click"
+                    MinWidth="90" Padding="12,6" Margin="0,0,8,0"/>
+            <Button Content="▶  Start" Click="Confirm_Click"
+                    MinWidth="120" Padding="14,6"
+                    Background="#FF2DD4BF" Foreground="#FF0F1117" FontWeight="SemiBold"/>
+        </StackPanel>
+    </StackPanel>
+</Window>

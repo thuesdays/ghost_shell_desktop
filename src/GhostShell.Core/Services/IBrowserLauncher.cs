@@ -104,6 +104,32 @@ public interface IBrowserSession : IAsyncDisposable
         string script, object[]? args = null, CancellationToken ct = default);
 
     /// <summary>
+    /// Phase 68 — list every open window/tab handle that the driver
+    /// is attached to. Includes regular tabs, extension popups
+    /// (chrome-extension://...), DevTools, and detached child windows.
+    /// Used by ScriptRecorder to drain its event queue from EVERY
+    /// window so user actions inside an OKX/MetaMask popup are
+    /// captured the same as actions on the main page.
+    /// </summary>
+    Task<IReadOnlyList<string>> GetWindowHandlesAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Phase 68 — get the handle of the currently-focused window.
+    /// Pair with <see cref="SwitchToWindowAsync"/> + a finally block
+    /// to restore focus after a multi-window operation so the user's
+    /// active tab doesn't get yanked under their feet.
+    /// </summary>
+    Task<string> GetCurrentWindowHandleAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Phase 68 — switch driver focus to <paramref name="handle"/>.
+    /// Subsequent ExecuteScriptAsync / NavigateAsync calls target the
+    /// new window. No-op if the handle no longer exists; caller
+    /// should re-enumerate before retrying.
+    /// </summary>
+    Task SwitchToWindowAsync(string handle, CancellationToken ct = default);
+
+    /// <summary>
     /// Capture a PNG screenshot of the current viewport via CDP
     /// <c>Page.captureScreenshot</c>. Writes the bytes to
     /// <paramref name="path"/> (parent dir created if missing).

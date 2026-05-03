@@ -132,7 +132,13 @@ public sealed partial class MainViewModel : ObservableObject
         SidebarRow.Section("Monitoring"),
         new SidebarRow { PageKey = "scheduler", Label = "Scheduler", Icon = Glyph(0xE787), IconBrush = Hue("HueAmber")  }, // Calendar
         new SidebarRow { PageKey = "runs",      Label = "Runs",      Icon = Glyph(0xE823), IconBrush = Hue("HueOrange") }, // History
-        new SidebarRow { PageKey = "traffic",   Label = "Traffic",   Icon = Glyph(0xEA0B), IconBrush = Hue("HueBlue")   }, // BarChart
+        // Phase 64 — bulk-start run queue. 0xE71D = "Boards" (rows of cards).
+        new SidebarRow { PageKey = "queue",     Label = "Queue",     Icon = Glyph(0xE71D), IconBrush = Hue("HueTeal")   },
+        // Phase 62 — was 0xEA0B which renders as "Section" (a thin
+        // vertical bar) in Segoe MDL2 Assets, not a chart. Switched to
+        // 0xE9D9 "Bar Chart 4 Legend" which is the canonical Windows
+        // bar-chart glyph (multiple bars + base axis).
+        new SidebarRow { PageKey = "traffic",   Label = "Traffic",   Icon = Glyph(0xE9D9), IconBrush = Hue("HueBlue")   }, // BarChart4Legend
         new SidebarRow { PageKey = "logs",     Label = "Logs",      Icon = Glyph(0xE7C3), IconBrush = Hue("HueAmber")  }, // Page
 
         SidebarRow.Section(""),

@@ -19,6 +19,7 @@ internal sealed class NavigationService : INavigationService
         ["groups"]   = typeof(GroupsViewModel),
         ["scheduler"]= typeof(SchedulerViewModel),
         ["runs"]     = typeof(RunsViewModel),
+        ["queue"]    = typeof(QueueViewModel),    // Phase 64 — bulk run queue
         ["proxy"]    = typeof(ProxyViewModel),
         ["sessions"] = typeof(SessionsViewModel),
         ["fingerprint"] = typeof(FingerprintViewModel),

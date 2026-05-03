@@ -15,8 +15,9 @@ namespace GhostShell.Runtime.Browser;
 ///   1. Env-var override (<c>GHOSTSHELL_CHROMIUM_DIR</c>) — for tests / CI
 ///   2. <c>&lt;install&gt;\chromium\</c> — production layout from installer
 ///   3. <c>&lt;install&gt;\chrome_win64\</c> — alternate name some builds use
-///   4. Legacy ghost_shell_browser project's chrome_win64 — dev fallback
-///   5. Raw Chromium build output (out\GhostShell, out\Default) — Chromium devs
+///   4. <c>F:\projects\ghost_shell_desktop\chrome_win64\</c> — Phase 47 mirror
+///   5. <c>F:\projects\ghost_shell_browser\chrome_win64\</c> — legacy fallback
+///   6. Raw Chromium build output (out\GhostShell, out\Default) — Chromium devs
 ///
 /// Each candidate must contain BOTH <c>chrome.exe</c> and
 /// <c>chromedriver.exe</c>, otherwise we keep walking.
@@ -91,11 +92,21 @@ public sealed class ChromiumLocator : IChromiumLocator
             yield return (Path.Combine(asmDir, "chrome_win64"),   "<install>\\chrome_win64");
         }
 
-        // 4. legacy ghost_shell_browser project fallback (dev machines)
+        // 4. ghost_shell_desktop's own chrome_win64 (Phase 47 — sync_chromium.bat
+        // now mirrors the runtime here too, so `dotnet run` from the desktop
+        // repo finds chrome without needing the env var or stepping over to
+        // ghost_shell_browser. This takes priority over the legacy
+        // ghost_shell_browser path because the desktop repo may have a newer
+        // mirror after a fresh build.)
+        yield return (@"F:\projects\ghost_shell_desktop\chrome_win64",
+                      "desktop project chrome_win64");
+
+        // 5. legacy ghost_shell_browser project fallback (dev machines that
+        // run desktop without the Phase-47 mirror, or pre-Phase-47 layouts)
         yield return (@"F:\projects\ghost_shell_browser\chrome_win64",
                       "legacy ghost_shell_browser");
 
-        // 5. raw Chromium build output (Chromium devs working on patches)
+        // 6. raw Chromium build output (Chromium devs working on patches)
         yield return (@"F:\projects\chromium\src\out\GhostShell",
                       "Chromium build output (F:)");
         yield return (@"C:\src\chromium\src\out\GhostShell",

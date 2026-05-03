@@ -55,6 +55,9 @@
             <DataTemplate DataType="{x:Type vm:RunsViewModel}">
                 <views:RunsView/>
             </DataTemplate>
+            <DataTemplate DataType="{x:Type vm:QueueViewModel}">
+                <views:QueueView/>
+            </DataTemplate>
             <DataTemplate DataType="{x:Type vm:ProxyViewModel}">
                 <views:ProxyView/>
             </DataTemplate>

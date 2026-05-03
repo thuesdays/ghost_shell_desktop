@@ -97,6 +97,21 @@ public interface IVaultService
     Task<IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>>>
         ResolveAsync(IEnumerable<(long Id, string Field)> refs, CancellationToken ct = default);
 
+    /// <summary>
+    /// Phase 69 — resolve profile-scoped aliases (<c>{{vault.SEED}}</c>,
+    /// <c>{{vault.PRIVKEY}}</c>, etc) to their cleartext values for one
+    /// run. For each alias, walks <see cref="VaultAliases.All"/> to find
+    /// the (kind, field) pair, then ListAsync(profileName, kind) to find
+    /// the bound vault item, decrypts secrets, and returns the field.
+    /// Failed lookups (no bound item, vault locked, missing field) are
+    /// dropped silently — the runner's interpolation falls back to
+    /// leaving the placeholder verbatim. Returns alias→cleartext.
+    /// </summary>
+    Task<IReadOnlyDictionary<string, string>> ResolveAliasesAsync(
+        string profileName,
+        IEnumerable<string> aliases,
+        CancellationToken ct = default);
+
     // ─── Phase 26 — auto-lock + master-password rotation ────────────
 
     /// <summary>How long the vault stays unlocked after the last user

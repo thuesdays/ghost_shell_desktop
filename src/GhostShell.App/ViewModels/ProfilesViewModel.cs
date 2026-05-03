@@ -20,18 +20,31 @@ public sealed partial class ProfilesViewModel : BaseViewModel
     private readonly IDialogService  _dialogs;
     private readonly ILogger<ProfilesViewModel> _log;
 
+    // Phase 64 — optional services for bulk operations. Optional so
+    // existing test wiring without these doesn't break; in production
+    // DI provides them.
+    private readonly IRunQueueService? _queue;
+    private readonly IProxyTester? _proxyTester;
+    private readonly IProxyService? _proxyService;
+
     public ProfilesViewModel(
         IProfileService profiles,
         IProfileRunner runner,
         IFingerprintService fp,
         IDialogService dialogs,
-        ILogger<ProfilesViewModel> log)
+        ILogger<ProfilesViewModel> log,
+        IRunQueueService? queue = null,
+        IProxyTester? proxyTester = null,
+        IProxyService? proxyService = null)
     {
-        _profiles = profiles;
-        _runner   = runner;
-        _fp       = fp;
-        _dialogs  = dialogs;
-        _log      = log;
+        _profiles     = profiles;
+        _runner       = runner;
+        _fp           = fp;
+        _dialogs      = dialogs;
+        _log          = log;
+        _queue        = queue;
+        _proxyTester  = proxyTester;
+        _proxyService = proxyService;
 
         // Refresh row IsRunning when the runner's active set changes.
         // Marshal to the dispatcher AND skip while a reload is mid-
@@ -333,31 +346,139 @@ public sealed partial class ProfilesViewModel : BaseViewModel
         var picks = Items.Where(r => r.IsSelected && !r.IsRunning && !r.IsStarting).ToList();
         if (picks.Count == 0) return;
 
-        var ok = await _dialogs.ConfirmAsync(
-            $"Start {picks.Count} profile(s)?",
-            "Each profile launches its own Chrome window with its " +
-            "own user-data-dir and proxy. Big batches may saturate " +
-            "RAM / CPU — start small and scale up.",
-            "Start");
-        if (!ok) return;
+        // Phase 64 — staggered launches via the run queue. Replace the
+        // previous "loop and start synchronously" path which serialised
+        // launches and gave the user no control over pacing. Now: ask
+        // for stagger seconds + concurrency cap; enqueue all picks at
+        // computed times; the RunQueueService dispatcher fires them.
+        var opts = await _dialogs.ShowBulkStartOptionsAsync(picks.Count);
+        if (opts is null) return;
 
+        var names = picks.Select(r => r.Profile.Name).ToList();
+        if (_queue is not null)
+        {
+            var ids = _queue.EnqueueBatch(names, opts.StaggerSeconds, opts.MaxConcurrent, "bulk");
+            _log.LogInformation(
+                "Bulk-start: enqueued {N} profile(s) stagger={S}s cap={C} — see Queue page",
+                ids.Count, opts.StaggerSeconds, opts.MaxConcurrent);
+            // Phase 65 — DO NOT set row.IsStarting=true here. The queue
+            // dispatcher will eventually call _runner.StartAsync() which
+            // populates ActiveProfileNames; the existing ActiveChanged
+            // event subscription drives row.IsRunning automatically. If
+            // we set IsStarting=true here without ever resetting it, the
+            // bulk filter `!r.IsStarting` would permanently exclude the
+            // row from future bulk operations — see audit finding #1/#10.
+            // The queue page is the source of truth for "what's pending".
+        }
+        else
+        {
+            // Fallback if queue not available (shouldn't happen with DI).
+            foreach (var row in picks)
+            {
+                row.IsStarting = true;
+                try
+                {
+                    var runId = await Task.Run(() => _runner.StartAsync(row.Profile));
+                    _log.LogInformation("Bulk-start (legacy path): '{Name}' → run #{Run}",
+                        row.Profile.Name, runId);
+                    if (opts.StaggerSeconds > 0)
+                        await Task.Delay(TimeSpan.FromSeconds(opts.StaggerSeconds));
+                }
+                catch (Exception ex)
+                {
+                    _log.LogError(ex, "Bulk-start failed for '{Name}'", row.Profile.Name);
+                }
+                finally { row.IsStarting = false; }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Phase 64 — Bulk Test Proxies. Iterates selected rows that have
+    /// a proxy assigned and runs the proxy tester sequentially. Updates
+    /// the proxy's health/latency in DB so the next launch sees fresh
+    /// state.
+    /// </summary>
+    [RelayCommand]
+    private async Task BulkTestProxiesAsync()
+    {
+        var picks = Items.Where(r => r.IsSelected && !string.IsNullOrEmpty(r.ProxySlug)).ToList();
+        if (picks.Count == 0)
+        {
+            await _dialogs.ConfirmAsync(
+                "No proxies to test",
+                "Selected profiles have no proxy assigned.",
+                "OK");
+            return;
+        }
+        if (_proxyTester is null || _proxyService is null)
+        {
+            await _dialogs.ConfirmAsync(
+                "Proxy services unavailable",
+                "Internal: IProxyTester / IProxyService not wired in.",
+                "OK", ConfirmSeverity.Error);
+            return;
+        }
+
+        _log.LogInformation("Bulk-test: probing {N} proxies", picks.Count);
+        var ok = 0; var fail = 0;
         foreach (var row in picks)
         {
-            row.IsStarting = true;
             try
             {
-                var runId = await Task.Run(() => _runner.StartAsync(row.Profile));
-                _log.LogInformation("Bulk-start: '{Name}' → run #{Run}",
-                    row.Profile.Name, runId);
+                var proxy = await _proxyService.GetAsync(row.ProxySlug!);
+                if (proxy is null) { fail++; continue; }
+                var result = await _proxyTester.TestAsync(proxy);
+                await _proxyService.RecordTestResultAsync(proxy.Slug, result);
+                if (result.Ok) ok++; else fail++;
             }
             catch (Exception ex)
             {
-                _log.LogError(ex, "Bulk-start failed for '{Name}'", row.Profile.Name);
+                fail++;
+                _log.LogWarning(ex, "Bulk-test failed for proxy on '{P}'", row.Profile.Name);
             }
-            finally
-            {
-                row.IsStarting = false;
-            }
+        }
+        await _dialogs.ConfirmAsync(
+            "Proxy test complete",
+            $"{ok} ok · {fail} failed (out of {picks.Count}). " +
+            "Open the Proxies page for full diagnostics.",
+            "OK");
+    }
+
+    /// <summary>
+    /// Phase 64 — Bulk Self-Check. Triggers a fresh self-check probe on
+    /// each selected profile (whether or not it's running). Used to
+    /// re-score the whole farm after a major fingerprint template
+    /// change or Chromium update.
+    /// </summary>
+    [RelayCommand]
+    private async Task BulkSelfCheckAsync()
+    {
+        var picks = Items.Where(r => r.IsSelected).ToList();
+        if (picks.Count == 0) return;
+        var ok = await _dialogs.ConfirmAsync(
+            $"Self-check {picks.Count} profile(s)?",
+            "Each profile briefly launches its browser, runs ~25 fingerprint probes, and tears down. " +
+            "Stagger is the same as Bulk Start — choose carefully on big batches.",
+            "Run");
+        if (!ok) return;
+        var opts = await _dialogs.ShowBulkStartOptionsAsync(picks.Count);
+        if (opts is null) return;
+
+        // Phase 66 — probe-only launches: runAssignedScript=false (skip
+        // the user's GoodMedika / SERP-engagement script), restoreSession=false
+        // (skip the 30-60s cookie/storage restore since self-check is
+        // state-independent — canvas/audio/WebGL probes don't need real
+        // cookies). Self-check itself is auto-scheduled by Bootstrap 3s
+        // after the browser settles. Each profile is up for ~5s instead
+        // of ~minutes, so 100 profiles can be re-scored in a few minutes.
+        var names = picks.Select(r => r.Profile.Name).ToList();
+        if (_queue is not null)
+        {
+            _queue.EnqueueBatch(names, opts.StaggerSeconds, opts.MaxConcurrent,
+                source: "self-check", probeOnly: true);
+            _log.LogInformation(
+                "Bulk self-check: enqueued {N} probe-only launch(es)", names.Count);
         }
     }
 

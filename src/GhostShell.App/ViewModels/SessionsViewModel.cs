@@ -45,6 +45,7 @@ public sealed partial class SessionsViewModel : BaseViewModel
     private readonly IWarmupService   _warmup;
     private readonly IChromeImporter  _chrome;
     private readonly IDialogService   _dialogs;
+    private readonly ICookiePackService _packs;
     private readonly ILogger<SessionsViewModel> _log;
 
     // Theme brushes resolved once (avoid re-resolving inside hot
@@ -61,6 +62,7 @@ public sealed partial class SessionsViewModel : BaseViewModel
         IWarmupService  warmup,
         IChromeImporter chrome,
         IDialogService  dialogs,
+        ICookiePackService packs,
         ILogger<SessionsViewModel> log)
     {
         _sessions = sessions;
@@ -69,6 +71,7 @@ public sealed partial class SessionsViewModel : BaseViewModel
         _warmup   = warmup;
         _chrome   = chrome;
         _dialogs  = dialogs;
+        _packs    = packs;
         _log      = log;
 
         _okBrush   = (Brush)(Application.Current?.TryFindResource("OkBrush")    ?? Brushes.LimeGreen);
@@ -730,6 +733,70 @@ public sealed partial class SessionsViewModel : BaseViewModel
         }
     }
 
+    [RelayCommand]
+    private async Task SaveSnapshotAsPackAsync(SessionSnapshot? selected)
+    {
+        if (selected is null) return;
+        try
+        {
+            // Load the full snapshot payload: cookies + storage.
+            // Reuse ISessionService.GetPayloadAsync which is already
+            // wired for decompression + deserialization.
+            var payload = await _sessions.GetPayloadAsync(selected.Id);
+            if (payload is null)
+            {
+                await _dialogs.ConfirmAsync("Snapshot missing",
+                    "This snapshot has no payload (corrupted or deleted).",
+                    "OK", ConfirmSeverity.Error);
+                return;
+            }
+
+            // Generate a default pack name based on the profile name +
+            // snapshot ID. User can rename the pack later in Cookie Pool.
+            var packName = $"{selected.ProfileName} — snapshot #{selected.Id}";
+
+            // Build the pack metadata row. Slug must be unique; we use
+            // a timestamp-based format so parallel saves don't collide.
+            // Domains are derived from the snapshot's cookies.
+            var domains = payload.Cookies
+                .Select(c => c.Domain.TrimStart('.'))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(d => d)
+                .ToList();
+
+            var packMeta = new CookiePack
+            {
+                Label         = packName,
+                Slug          = $"snapshot-{selected.ProfileName}-{selected.Id}-{DateTime.UtcNow:yyyyMMdd-HHmmss}",
+                Domains       = domains,
+                CookiesCount  = payload.Cookies.Count,
+                AgeDays       = 0,
+                CaptchaRate   = 0,
+            };
+
+            // Persist to the cookie_packs table via ICookiePackService.UpsertAsync.
+            var packId = await _packs.UpsertAsync(packMeta, payload);
+
+            _log.LogInformation(
+                "Snapshot #{SnapshotId} saved as pack #{PackId}: '{Label}'",
+                selected.Id, packId, packMeta.Label);
+
+            await _dialogs.ConfirmAsync(
+                $"Saved as cookie pack '{packMeta.Label}'",
+                $"Pack #{packId}\n" +
+                $"Cookies: {payload.Cookies.Count}\n" +
+                $"Domains: {domains.Count}\n\n" +
+                "Open Cookie Pool from the sidebar to manage or rename your saved packs.",
+                "OK", ConfirmSeverity.Success);
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "Save snapshot as pack failed for snapshot #{Id}", selected.Id);
+            await _dialogs.ConfirmAsync("Could not save as pack",
+                ex.Message, "OK", ConfirmSeverity.Error);
+        }
+    }
+
     // ──────────────────────────────────────────────────────────────
     // Cookies tab
     // ──────────────────────────────────────────────────────────────
@@ -821,6 +888,93 @@ public sealed partial class SessionsViewModel : BaseViewModel
             _log.LogError(ex, "Cookies export failed");
             await _dialogs.ConfirmAsync(
                 "Export failed", ex.Message, "OK", ConfirmSeverity.Error);
+        }
+    }
+
+    [RelayCommand]
+    private async Task SaveFilteredCookiesAsPackAsync()
+    {
+        // Guard: must have cookies to save. If the visible filter is
+        // empty, offer to save all cookies instead.
+        if (_allCookieRows.Count == 0) return;
+        if (CookieRows.Count == 0)
+        {
+            await _dialogs.ConfirmAsync(
+                "No cookies match filter",
+                "The current filter has no results. Clear the filter to save all cookies from the latest snapshot.",
+                "OK", ConfirmSeverity.Info);
+            return;
+        }
+
+        try
+        {
+            // Build the SessionPayload from filtered cookies + empty
+            // storage (only snapshots capture storage; filtered cookies
+            // are display-only). Use SessionPayloadJson to serialize
+            // into the same format that cookie_packs expects.
+            var filteredCookies = CookieRows.Select(r => new CookieEntry
+            {
+                Domain      = r.Domain,
+                Name        = r.Name,
+                Value       = r.Value,
+                Path        = r.Path,
+                ExpiresUnixSec = r.ExpiresUnixSec,
+                Secure      = r.Secure,
+                HttpOnly    = r.HttpOnly,
+                SameSite    = r.SameSite,
+            }).ToList();
+
+            var payload = new SessionPayload
+            {
+                Cookies = filteredCookies,
+                Storage = Array.Empty<StorageEntry>(),
+            };
+
+            // Generate a pack name that describes the filtered set.
+            // Include count + optional filter term for context.
+            var filterDesc = !string.IsNullOrWhiteSpace(CookieFilter)
+                ? $" (filter: {CookieFilter.Trim()})"
+                : string.Empty;
+            var packName = $"{SelectedProfileRow?.Name ?? "profile"} — {filteredCookies.Count} cookies{filterDesc}";
+
+            // Build the pack metadata row. Derive domains from the
+            // filtered cookies to match the actual pack contents.
+            var domains = filteredCookies
+                .Select(c => c.Domain.TrimStart('.'))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(d => d)
+                .ToList();
+
+            var packMeta = new CookiePack
+            {
+                Label         = packName,
+                Slug          = $"filtered-{SelectedProfileRow?.Name ?? "profile"}-{DateTime.UtcNow:yyyyMMdd-HHmmss}",
+                Domains       = domains,
+                CookiesCount  = filteredCookies.Count,
+                AgeDays       = 0,
+                CaptchaRate   = 0,
+            };
+
+            // Persist to the cookie_packs table via ICookiePackService.UpsertAsync.
+            var packId = await _packs.UpsertAsync(packMeta, payload);
+
+            _log.LogInformation(
+                "Filtered cookies saved as pack #{PackId}: '{Label}' ({Count} cookies)",
+                packId, packMeta.Label, filteredCookies.Count);
+
+            await _dialogs.ConfirmAsync(
+                $"Saved as cookie pack '{packMeta.Label}'",
+                $"Pack #{packId}\n" +
+                $"Cookies: {filteredCookies.Count}\n" +
+                $"Domains: {domains.Count}\n\n" +
+                "Open Cookie Pool from the sidebar to manage or rename your saved packs.",
+                "OK", ConfirmSeverity.Success);
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "Save filtered cookies as pack failed");
+            await _dialogs.ConfirmAsync("Could not save as pack",
+                ex.Message, "OK", ConfirmSeverity.Error);
         }
     }
 

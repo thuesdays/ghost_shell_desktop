@@ -60,6 +60,11 @@
                             Margin="0,0,8,4"
                             Style="{StaticResource ButtonPrimary}"
                             Visibility="{Binding IsUnlocked, Converter={StaticResource InverseBoolToVis}}"/>
+                    <Button Content="📥  Bulk import"
+                            Command="{Binding BulkImportCommand}"
+                            Margin="0,0,8,4"
+                            ToolTip="Paste CSV / load a file / fetch a Google Sheet to create many credentials at once. Auto-binds rows to profiles by name."
+                            Visibility="{Binding IsUnlocked, Converter={StaticResource BoolToVis}}"/>
                     <Button Content="+  Add item"
                             Command="{Binding AddCommand}"
                             Style="{StaticResource ButtonPrimary}"

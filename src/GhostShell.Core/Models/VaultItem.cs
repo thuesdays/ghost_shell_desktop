@@ -134,3 +134,55 @@ public static class VaultKinds
         return null;
     }
 }
+
+/// <summary>
+/// Phase 69 — profile-scoped vault aliases. Lets scripts reference a
+/// profile's bound credential without hardcoding numeric vault IDs:
+///   {{vault.SEED}}    → profile's crypto_wallet.seed_phrase
+///   {{vault.PRIVKEY}} → profile's crypto_wallet.private_key
+///   {{vault.PASS}}    → profile's crypto_wallet.wallet_password
+///   {{vault.USERNAME}}→ profile's account.username
+///   {{vault.PASSWORD}}→ profile's account.password
+///   {{vault.TOTP}}    → first item with a totp_secret field
+/// At resolution time, the runner finds the vault item where
+/// <see cref="VaultItem.ProfileName"/> matches the running profile +
+/// <see cref="VaultItem.Kind"/> matches the alias's expected kind,
+/// decrypts secrets, and returns the alias's mapped field. Lets a
+/// single script run unchanged across 100 profiles, each pulling its
+/// own seed phrase / login from its bound vault entry.
+/// </summary>
+public static class VaultAliases
+{
+    public sealed record AliasSpec(string Alias, string Kind, string Field);
+
+    /// <summary>The full alias catalog. Add entries here when a new
+    /// profile-bound credential type emerges.</summary>
+    public static readonly IReadOnlyList<AliasSpec> All = new[]
+    {
+        // Crypto wallet — most common bulk-import case.
+        new AliasSpec("SEED",      "crypto_wallet", "seed_phrase"),
+        new AliasSpec("PRIVKEY",   "crypto_wallet", "private_key"),
+        new AliasSpec("PASS",      "crypto_wallet", "wallet_password"),
+        new AliasSpec("ADDR",      "crypto_wallet", "address"),
+        new AliasSpec("DERIV",     "crypto_wallet", "derivation_path"),
+        // Account — username/password login flows.
+        new AliasSpec("USERNAME",  "account",       "username"),
+        new AliasSpec("PASSWORD",  "account",       "password"),
+        // Email-specific (gmail/outlook/yahoo).
+        new AliasSpec("EMAIL",     "email",         "username"),
+        new AliasSpec("EMAILPASS", "email",         "password"),
+        // 2FA — kind="" means any kind that has a totp_secret field.
+        new AliasSpec("TOTP",      "",              "totp_secret"),
+        // Social media — username/password + optional session cookie.
+        new AliasSpec("SOCIAL",    "social",        "username"),
+        new AliasSpec("SOCIALPASS","social",        "password"),
+    };
+
+    private static readonly Dictionary<string, AliasSpec> _byAlias =
+        All.ToDictionary(a => a.Alias, a => a, StringComparer.OrdinalIgnoreCase);
+
+    public static AliasSpec? Get(string alias)
+        => _byAlias.TryGetValue(alias ?? "", out var spec) ? spec : null;
+
+    public static bool IsKnown(string alias) => _byAlias.ContainsKey(alias ?? "");
+}

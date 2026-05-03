@@ -58,7 +58,13 @@ public sealed class BrowserLauncher : IBrowserLauncher
     public async Task<IBrowserSession> LaunchAsync(
         Profile profile, CancellationToken ct = default)
     {
-        var status = _locator.Locate();
+        // _locator.Locate() walks the filesystem looking for chrome.exe
+        // / chromedriver.exe. On a cold disk this can take 100-300ms.
+        // Wrap in Task.Run so it doesn't block the UI thread when
+        // LaunchAsync is called from a UI button (Probe in profile,
+        // Run, etc.). Multiple call sites benefit — runtime code stays
+        // unaware of who's calling it.
+        var status = await Task.Run(() => _locator.Locate(), ct);
         if (!status.Found)
         {
             throw new InvalidOperationException(
@@ -246,10 +252,34 @@ public sealed class BrowserLauncher : IBrowserLauncher
         // Spawn chromedriver. Selenium handles the handshake → first
         // chrome.exe boot. From this point we OWN both processes
         // until DisposeAsync runs.
+        //
+        // CRITICAL — wrap the constructor in Task.Run.
+        //
+        // `new ChromeDriver(...)` is FULLY SYNCHRONOUS: it spawns
+        // chromedriver.exe, blocks on the WebSocket handshake, waits
+        // for chrome.exe to register a DevTools port, then runs the
+        // initial about:blank navigate. End-to-end this takes 2-7
+        // seconds on a fresh launch.
+        //
+        // When LaunchAsync is called on the UI thread (e.g. from the
+        // Fingerprint page's "Probe in profile" button or any other
+        // direct UI command path), every sync line above this point
+        // also ran on the UI thread — and the very next thing here
+        // would freeze WPF for the full ChromeDriver init duration.
+        // Symptom: clicking "Probe in profile" makes the whole window
+        // unresponsive for 5-7 seconds.
+        //
+        // Task.Run offloads the constructor to a thread-pool thread
+        // and we await its completion. The await yields back to the
+        // SynchronizationContext, so the UI repaints / accepts input
+        // throughout the launch. No semantic change — the calling
+        // method is already async, callers already await us.
         ChromeDriver driver;
         try
         {
-            driver = new ChromeDriver(service, options, TimeSpan.FromSeconds(60));
+            driver = await Task.Run(
+                () => new ChromeDriver(service, options, TimeSpan.FromSeconds(60)),
+                ct);
         }
         catch (Exception ex)
         {

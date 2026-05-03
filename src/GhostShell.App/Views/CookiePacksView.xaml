@@ -26,7 +26,7 @@
                                                   Path=PlacementTarget.DataContext}"/>
             <Separator/>
             <MenuItem Header="Delete"
-                      Command="{Binding DeleteCommand}"
+                      Command="{Binding DeleteCookiePackCommand}"
                       CommandParameter="{Binding RelativeSource={RelativeSource AncestorType=ContextMenu},
                                                   Path=PlacementTarget.DataContext}"/>
         </ContextMenu>
@@ -101,6 +101,33 @@
                         <DataGridTextColumn Header="AGE"     Binding="{Binding AgeDays, StringFormat='{}{0}d'}" Width="60" IsReadOnly="True"/>
                         <DataGridTextColumn Header="CAPTCHA" Binding="{Binding CaptchaRate, StringFormat='{}{0:P1}'}" Width="80" IsReadOnly="True"/>
                         <DataGridTextColumn Header="UPDATED" Binding="{Binding UpdatedAt, StringFormat='{}{0:yyyy-MM-dd HH:mm}'}" Width="140" IsReadOnly="True"/>
+
+                        <!-- Per-row action column with delete button.
+                             Uses trash/delete icon (Segoe Fluent E74D) in danger red.
+                             Mirrors RunsView pattern: single RowActionDanger button. -->
+                        <DataGridTemplateColumn Header="" Width="100" IsReadOnly="True">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <StackPanel Orientation="Horizontal"
+                                                HorizontalAlignment="Center"
+                                                VerticalAlignment="Center">
+                                        <!-- Delete button — marked danger red (ErrBrush).
+                                             Calls DeleteCookiePackAsync on the VM with
+                                             the row's CookiePack as CommandParameter. -->
+                                        <Button Style="{StaticResource RowActionDanger}"
+                                                ToolTip="Delete this pack"
+                                                Command="{Binding DataContext.DeleteCookiePackCommand,
+                                                          Source={x:Reference PageRoot}}"
+                                                CommandParameter="{Binding}">
+                                            <TextBlock Style="{StaticResource RowActionIcon}"
+                                                       FontSize="14"
+                                                       Foreground="{StaticResource ErrBrush}"
+                                                       Text="&#xE74D;"/>
+                                        </Button>
+                                    </StackPanel>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
                     </DataGrid.Columns>
                 </DataGrid>
             </Border>

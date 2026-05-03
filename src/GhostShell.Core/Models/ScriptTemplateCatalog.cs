@@ -36,7 +36,7 @@ public static class ScriptTemplateCatalog
     /// <summary>Distinct categories in the catalog, in the order they
     /// should appear in the picker UI.</summary>
     public static IReadOnlyList<string> Categories =>
-        new[] { "Auth", "Social", "Search", "Shopping", "News", "Utility" };
+        new[] { "Auth", "Wallet", "Social", "Search", "Shopping", "News", "Utility" };
 
     private static readonly ScriptTemplate[] _all =
     {
@@ -401,6 +401,164 @@ public static class ScriptTemplateCatalog
               {"type":"dwell","params":{"min_ms":2000,"max_ms":4500}},
               {"type":"extract_text","params":{"selector":"title","save_as":"page_title"}},
               {"type":"http_request","params":{"method":"POST","url":"https://example.com/webhook","body":"{\"profile\":\"{{ad_title}}\",\"title\":\"{{page_title}}\"}","timeout_sec":15}}
+            ]
+            """),
+
+        // ─── WALLET ───────────────────────────────────────────────
+        // Phase 67 — bulk wallet import scripts. The pattern: open the
+        // extension's onboarding page, click "Import existing wallet",
+        // paste the seed phrase / private key from the user's vault,
+        // set a password, and confirm. Run on 100+ profiles in parallel
+        // via Bulk Start (Phase 64) to provision a farm in minutes.
+        //
+        // SAFETY: seed phrases / private keys MUST live in the Vault
+        // (Phase 24-26). Templates reference them via {{vault.SEED}}
+        // — the runner expands at execution time, never logs the
+        // expanded value, and clears the in-memory bag on script
+        // completion. NEVER hardcode a key into a script JSON.
+        //
+        // Selectors below are best-guess for the wallet's current
+        // onboarding UI as of late 2025. Wallets ship UI changes
+        // weekly — if the template breaks, open the script in the
+        // visual editor and adjust selectors via the recorder.
+
+        new("wallet.okx.seed",
+            "OKX Wallet — import by seed phrase",
+            "Wallet", "🔐",
+            "Import an existing wallet into the OKX extension via 12/24-word seed " +
+            "phrase. Vault refs: SEED (seed phrase) + PASS (new local password). " +
+            "OKX usually auto-opens its onboarding tab on first launch — the " +
+            "template waits for that, then walks the import flow. " +
+            "Build a profile farm by Bulk Start with this script assigned.",
+            """
+            [
+              {"type":"wait_for_url","params":{"pattern":"chrome-extension://.*okx|okxweb3","timeout_ms":30000}},
+              {"type":"dwell","params":{"min_ms":1500,"max_ms":3000}},
+              {"type":"click_selector","params":{"selector":"button:contains('Import wallet'), [data-testid='import-wallet'], a[href*='import']","fallback_text":"Import wallet"}},
+              {"type":"dwell","params":{"min_ms":800,"max_ms":1800}},
+              {"type":"click_selector","params":{"selector":"button:contains('Seed phrase'), [data-testid='seed-phrase'], button[data-import-type='seed']","fallback_text":"Seed phrase"}},
+              {"type":"dwell","params":{"min_ms":800,"max_ms":1800}},
+              {"type":"type","params":{"selector":"textarea, input[type='password'][placeholder*='phrase' i], [contenteditable='true']","text":"{{vault.SEED}}","min_ms":40,"max_ms":120}},
+              {"type":"dwell","params":{"min_ms":600,"max_ms":1400}},
+              {"type":"click_selector","params":{"selector":"button:contains('Confirm'), button:contains('Continue'), button[type='submit']","fallback_text":"Confirm"}},
+              {"type":"wait_for_selector","params":{"selector":"input[type='password'][name*='pass' i], input[placeholder*='password' i]","timeout_ms":15000}},
+              {"type":"type","params":{"selector":"input[type='password'][name*='pass' i]:nth-of-type(1), input[type='password']:nth-of-type(1)","text":"{{vault.PASS}}","min_ms":50,"max_ms":140}},
+              {"type":"dwell","params":{"min_ms":300,"max_ms":700}},
+              {"type":"type","params":{"selector":"input[type='password']:nth-of-type(2), input[placeholder*='confirm' i]","text":"{{vault.PASS}}","min_ms":50,"max_ms":140}},
+              {"type":"dwell","params":{"min_ms":300,"max_ms":700}},
+              {"type":"click_selector","params":{"selector":"input[type='checkbox'], [role='checkbox']"}},
+              {"type":"dwell","params":{"min_ms":400,"max_ms":900}},
+              {"type":"click_selector","params":{"selector":"button[type='submit'], button:contains('Confirm'), button:contains('Continue')","fallback_text":"Confirm"}},
+              {"type":"dwell","params":{"min_ms":3000,"max_ms":6000}}
+            ]
+            """),
+
+        new("wallet.okx.privkey",
+            "OKX Wallet — import by private key",
+            "Wallet", "🔑",
+            "Same as the seed-phrase variant but uses a single hex private key. " +
+            "Vault refs: PRIVKEY (hex without 0x or with — OKX accepts both) + " +
+            "PASS (local password).",
+            """
+            [
+              {"type":"wait_for_url","params":{"pattern":"chrome-extension://.*okx|okxweb3","timeout_ms":30000}},
+              {"type":"dwell","params":{"min_ms":1500,"max_ms":3000}},
+              {"type":"click_selector","params":{"selector":"button:contains('Import wallet'), [data-testid='import-wallet']","fallback_text":"Import wallet"}},
+              {"type":"dwell","params":{"min_ms":800,"max_ms":1800}},
+              {"type":"click_selector","params":{"selector":"button:contains('Private key'), [data-testid='private-key'], button[data-import-type='privkey']","fallback_text":"Private key"}},
+              {"type":"dwell","params":{"min_ms":800,"max_ms":1800}},
+              {"type":"type","params":{"selector":"input[type='password'][placeholder*='private' i], textarea[placeholder*='private' i]","text":"{{vault.PRIVKEY}}","min_ms":40,"max_ms":120}},
+              {"type":"dwell","params":{"min_ms":600,"max_ms":1400}},
+              {"type":"click_selector","params":{"selector":"button:contains('Confirm'), button[type='submit']","fallback_text":"Confirm"}},
+              {"type":"wait_for_selector","params":{"selector":"input[type='password'][name*='pass' i]","timeout_ms":15000}},
+              {"type":"type","params":{"selector":"input[type='password']:nth-of-type(1)","text":"{{vault.PASS}}","min_ms":50,"max_ms":140}},
+              {"type":"dwell","params":{"min_ms":300,"max_ms":700}},
+              {"type":"type","params":{"selector":"input[type='password']:nth-of-type(2)","text":"{{vault.PASS}}","min_ms":50,"max_ms":140}},
+              {"type":"dwell","params":{"min_ms":400,"max_ms":900}},
+              {"type":"click_selector","params":{"selector":"input[type='checkbox']"}},
+              {"type":"click_selector","params":{"selector":"button[type='submit'], button:contains('Confirm')","fallback_text":"Confirm"}},
+              {"type":"dwell","params":{"min_ms":3000,"max_ms":6000}}
+            ]
+            """),
+
+        new("wallet.metamask.seed",
+            "MetaMask — import by seed phrase",
+            "Wallet", "🦊",
+            "Import an existing wallet into MetaMask via the 12/24-word recovery " +
+            "phrase. Each word goes into a separate input — the script types them " +
+            "space-separated and MetaMask auto-distributes via paste handler. " +
+            "Vault refs: SEED (recovery phrase) + PASS (local password ≥ 8 chars).",
+            """
+            [
+              {"type":"wait_for_url","params":{"pattern":"chrome-extension://.*onboarding|metamask","timeout_ms":30000}},
+              {"type":"dwell","params":{"min_ms":1500,"max_ms":3000}},
+              {"type":"click_selector","params":{"selector":"input[type='checkbox'][data-testid='onboarding-terms-checkbox'], input[data-testid*='terms']"}},
+              {"type":"click_selector","params":{"selector":"button[data-testid='onboarding-import-wallet'], button:contains('Import an existing wallet')","fallback_text":"Import an existing wallet"}},
+              {"type":"dwell","params":{"min_ms":1000,"max_ms":2000}},
+              {"type":"click_selector","params":{"selector":"button[data-testid='metametrics-no-thanks'], button:contains('No thanks')","fallback_text":"No thanks"}},
+              {"type":"wait_for_selector","params":{"selector":"input[data-testid='import-srp__srp-word-0'], input[placeholder*='Recovery']","timeout_ms":15000}},
+              {"type":"dwell","params":{"min_ms":800,"max_ms":1500}},
+              {"type":"type","params":{"selector":"input[data-testid='import-srp__srp-word-0']","text":"{{vault.SEED}}","min_ms":50,"max_ms":140}},
+              {"type":"dwell","params":{"min_ms":1500,"max_ms":3000}},
+              {"type":"click_selector","params":{"selector":"button[data-testid='import-srp-confirm'], button:contains('Confirm Secret Recovery Phrase')","fallback_text":"Confirm Secret Recovery Phrase"}},
+              {"type":"wait_for_selector","params":{"selector":"input[data-testid='create-password-new'], input[autocomplete='new-password']","timeout_ms":15000}},
+              {"type":"type","params":{"selector":"input[data-testid='create-password-new'], input[autocomplete='new-password']:nth-of-type(1)","text":"{{vault.PASS}}","min_ms":50,"max_ms":140}},
+              {"type":"type","params":{"selector":"input[data-testid='create-password-confirm'], input[autocomplete='new-password']:nth-of-type(2)","text":"{{vault.PASS}}","min_ms":50,"max_ms":140}},
+              {"type":"click_selector","params":{"selector":"input[data-testid='create-password-terms'], input[type='checkbox']:nth-of-type(1)"}},
+              {"type":"click_selector","params":{"selector":"button[data-testid='create-password-import'], button:contains('Import my wallet')","fallback_text":"Import my wallet"}},
+              {"type":"dwell","params":{"min_ms":4000,"max_ms":7000}},
+              {"type":"click_selector","params":{"selector":"button[data-testid='onboarding-complete-done'], button:contains('Got it')","fallback_text":"Got it"}}
+            ]
+            """),
+
+        new("wallet.metamask.privkey",
+            "MetaMask — import by private key (existing wallet)",
+            "Wallet", "🔑",
+            "Adds a private-key account to a MetaMask instance that's ALREADY " +
+            "set up (it doesn't bootstrap a fresh extension). Run after the " +
+            "seed-import template has finished, or on profiles where MetaMask " +
+            "is unlocked. Vault ref: PRIVKEY.",
+            """
+            [
+              {"type":"wait_for_url","params":{"pattern":"chrome-extension://.*home\\\\.html|metamask","timeout_ms":30000}},
+              {"type":"dwell","params":{"min_ms":1500,"max_ms":3000}},
+              {"type":"click_selector","params":{"selector":"button[data-testid='account-menu-icon'], [aria-label='Account menu']"}},
+              {"type":"dwell","params":{"min_ms":600,"max_ms":1400}},
+              {"type":"click_selector","params":{"selector":"button[data-testid='multichain-account-menu-popover-action-button'], button:contains('Add account or hardware wallet')","fallback_text":"Add account or hardware wallet"}},
+              {"type":"dwell","params":{"min_ms":600,"max_ms":1400}},
+              {"type":"click_selector","params":{"selector":"button[data-testid='multichain-account-menu-popover-add-imported-account'], button:contains('Import account')","fallback_text":"Import account"}},
+              {"type":"wait_for_selector","params":{"selector":"input#private-key-box, input[id*='private']","timeout_ms":15000}},
+              {"type":"type","params":{"selector":"input#private-key-box, input[id*='private']","text":"{{vault.PRIVKEY}}","min_ms":50,"max_ms":140}},
+              {"type":"dwell","params":{"min_ms":500,"max_ms":1100}},
+              {"type":"click_selector","params":{"selector":"button[data-testid='import-account-confirm-button'], button:contains('Import')","fallback_text":"Import"}},
+              {"type":"dwell","params":{"min_ms":2500,"max_ms":4500}}
+            ]
+            """),
+
+        new("wallet.phantom.seed",
+            "Phantom (Solana) — import by seed phrase",
+            "Wallet", "👻",
+            "Import an existing Solana wallet into Phantom via the 12/24-word seed. " +
+            "Vault refs: SEED + PASS. Phantom's onboarding auto-opens on first " +
+            "extension launch.",
+            """
+            [
+              {"type":"wait_for_url","params":{"pattern":"chrome-extension://.*phantom|onboarding\\\\.html","timeout_ms":30000}},
+              {"type":"dwell","params":{"min_ms":1500,"max_ms":3000}},
+              {"type":"click_selector","params":{"selector":"button:contains('I already have a wallet'), button[data-id='already-have-wallet']","fallback_text":"I already have a wallet"}},
+              {"type":"dwell","params":{"min_ms":800,"max_ms":1800}},
+              {"type":"click_selector","params":{"selector":"button:contains('Import Secret Recovery Phrase'), button[data-id='secret-phrase']","fallback_text":"Import Secret Recovery Phrase"}},
+              {"type":"wait_for_selector","params":{"selector":"input[name='word-0'], textarea[placeholder*='phrase' i]","timeout_ms":15000}},
+              {"type":"dwell","params":{"min_ms":600,"max_ms":1400}},
+              {"type":"type","params":{"selector":"input[name='word-0'], textarea[placeholder*='phrase' i]","text":"{{vault.SEED}}","min_ms":50,"max_ms":140}},
+              {"type":"dwell","params":{"min_ms":1000,"max_ms":2000}},
+              {"type":"click_selector","params":{"selector":"button[type='submit'], button:contains('Continue'), button:contains('Import')","fallback_text":"Continue"}},
+              {"type":"wait_for_selector","params":{"selector":"input[type='password'][name='password']","timeout_ms":15000}},
+              {"type":"type","params":{"selector":"input[type='password'][name='password']","text":"{{vault.PASS}}","min_ms":50,"max_ms":140}},
+              {"type":"type","params":{"selector":"input[type='password'][name='confirmPassword'], input[type='password']:nth-of-type(2)","text":"{{vault.PASS}}","min_ms":50,"max_ms":140}},
+              {"type":"click_selector","params":{"selector":"input[type='checkbox']"}},
+              {"type":"click_selector","params":{"selector":"button[type='submit']:contains('Continue'), button[type='submit']","fallback_text":"Continue"}},
+              {"type":"dwell","params":{"min_ms":3000,"max_ms":6000}}
             ]
             """),
     };

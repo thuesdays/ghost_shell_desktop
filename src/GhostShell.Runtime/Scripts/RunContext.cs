@@ -66,6 +66,19 @@ public sealed class RunContext
     public string CurrentAdHref { get; set; } = "";
 
     /// <summary>
+    /// The ad's *display URL* — the green-text "goodmedika.com.ua/ua"
+    /// that Google shows under the ad title. This is the ONLY reliable
+    /// signal of the advertiser's identity when the click goes through
+    /// an affiliate tracker (e.g. the user advertises goodmedika.com.ua
+    /// via partner site 120na80.com.ua, the click href is the partner
+    /// domain, but the display URL is the real advertiser). Treated as
+    /// an additional source for ad_is_mine/ad_is_target/ad_is_external/
+    /// ad_is_competitor checks — if either the click host OR the
+    /// display host matches a list, the gate fires.
+    /// </summary>
+    public string CurrentAdDisplayUrl { get; set; } = "";
+
+    /// <summary>
     /// Phase 24 — credential-vault references resolved at run start.
     /// Shape: <c>{ "12": { "username": "...", "password": "..." } }</c>.
     /// Read by <c>InterpolateVars</c> when a <c>{{vault.&lt;id&gt;.&lt;field&gt;}}</c>
@@ -74,6 +87,17 @@ public sealed class RunContext
     /// </summary>
     public Dictionary<string, IReadOnlyDictionary<string, string>> Vault { get; }
         = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Phase 69 — profile-scoped vault aliases resolved at run start.
+    /// Shape: <c>{ "SEED": "abandon abandon ...", "PASS": "..." }</c>.
+    /// Populated from <c>IVaultService.ResolveAliasesAsync(profileName, aliases)</c>
+    /// before script execution. <c>InterpolateVars</c> consults this
+    /// for <c>{{vault.SEED}}</c>-style placeholders. Missing aliases
+    /// fall through to literal placeholder text.
+    /// </summary>
+    public Dictionary<string, string> VaultAliases { get; }
+        = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>Pop a fresh var-name without colliding with existing keys.</summary>
     public string NextVarName(string baseName)

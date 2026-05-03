@@ -29,8 +29,30 @@ public interface IProfileRunner
     /// run id (matches the row inserted into <c>runs</c>). Throws
     /// <see cref="InvalidOperationException"/> if the profile is
     /// already running.
+    ///
+    /// <para>When <paramref name="runAssignedScript"/> is true (default)
+    /// the profile's assigned/default script kicks off automatically
+    /// after the session settles — the standard "Run" button flow.
+    /// Set it to <c>false</c> for "browser-only" launches such as the
+    /// Fingerprint page's "Probe in profile" command, where we want
+    /// a clean session for tester URLs and the user's GoodMedika /
+    /// search-and-click script must NOT side-effect the probe results
+    /// (the probe just lost a quarter of its tab budget to ad
+    /// navigations and the user's CTR analytics show fake clicks).</para>
+    ///
+    /// <para>When <paramref name="restoreSession"/> is true (default)
+    /// the latest saved session snapshot is auto-restored — cookies
+    /// + per-origin localStorage. This can take 30+ seconds for fat
+    /// snapshots (200 cookies, 20 storage origins each requiring a
+    /// dedicated navigation to set its localStorage). Set false for
+    /// flows that don't care about state — Fingerprint probes grade
+    /// canvas/audio/WebGL signals which are state-independent, so
+    /// skipping restore cuts probe latency from ~60s to ~5s.</para>
     /// </summary>
-    Task<long> StartAsync(Profile profile, CancellationToken ct = default);
+    Task<long> StartAsync(
+        Profile profile, CancellationToken ct = default,
+        bool runAssignedScript = true,
+        bool restoreSession = true);
 
     /// <summary>
     /// Stop any in-flight run for the named profile. No-op if it

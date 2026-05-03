@@ -338,6 +338,49 @@ public sealed partial class RunsViewModel : BaseViewModel
     }
 
     /// <summary>
+    /// Phase 53 — per-row "Delete" action. Removes a finished run
+    /// from history permanently (no undo). Prompts with a styled
+    /// confirm dialog showing the run's profile and timestamp.
+    /// Only works on finished (non-running) rows.
+    /// </summary>
+    [RelayCommand]
+    private async Task DeleteRunAsync(Run? selected)
+    {
+        if (selected is null || selected.IsRunning) return;
+
+        var ok = await _dialogs.ConfirmAsync(
+            "Delete run?",
+            $"Run #{selected.Id} from profile '{selected.ProfileName}' " +
+            $"started at {selected.StartedAt:yyyy-MM-dd HH:mm:ss} will be " +
+            "permanently deleted from history. This cannot be undone.",
+            "Delete",
+            ConfirmSeverity.Warning);
+        if (!ok) return;
+
+        try
+        {
+            var deleted = await _runs.DeleteAsync(selected.Id);
+            if (deleted)
+            {
+                _log.LogInformation("Run #{Run} deleted by user", selected.Id);
+                await ReloadAsync();
+            }
+            else
+            {
+                _log.LogWarning("Run #{Run} could not be deleted (still running or missing)", selected.Id);
+                await _dialogs.ConfirmAsync("Could not delete",
+                    "Run is still active or no longer exists.", "OK", ConfirmSeverity.Warning);
+            }
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "Could not delete run #{Run}", selected.Id);
+            await _dialogs.ConfirmAsync("Could not delete run",
+                ex.Message, "OK", ConfirmSeverity.Error);
+        }
+    }
+
+    /// <summary>
     /// Per-row "View logs" action. Mirrors the legacy
     /// <c>Runs.viewLogs(runId)</c>: pin the Logs page to the run's
     /// profile + window so the user lands on already-narrowed

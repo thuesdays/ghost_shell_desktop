@@ -409,11 +409,20 @@
                             Margin="6,0,0,0"/>
                 </StackPanel>
                 <StackPanel Grid.Column="1" Orientation="Horizontal">
-                    <Button Content="▶  Start selected"
+                    <Button Content="▶  Start (staggered)"
                             Command="{Binding BulkStartCommand}"
                             Style="{StaticResource ButtonPrimary}"
-                            Margin="0,0,8,0"/>
-                    <Button Content="🗑  Delete selected"
+                            Margin="0,0,8,0"
+                            ToolTip="Phase 64 — pick stagger seconds + concurrency cap, then enqueue to the run queue"/>
+                    <Button Content="🌐  Test proxies"
+                            Command="{Binding BulkTestProxiesCommand}"
+                            Margin="0,0,8,0"
+                            ToolTip="Test all proxies on selected profiles + record results"/>
+                    <Button Content="🩺  Self-check"
+                            Command="{Binding BulkSelfCheckCommand}"
+                            Margin="0,0,8,0"
+                            ToolTip="Run a fresh self-check probe on each selected profile"/>
+                    <Button Content="🗑  Delete"
                             Command="{Binding BulkDeleteCommand}"
                             Style="{StaticResource ButtonDanger}"/>
                 </StackPanel>

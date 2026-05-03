@@ -295,16 +295,83 @@ public static class AdParser
     }
 
     /// <summary>
+    /// Unwrap a Google (or Google-Ads) tracker URL to its real
+    /// destination. Google ads come back as
+    /// <c>https://www.google.com/aclk?...&amp;adurl=https://realsite.com/...</c>
+    /// — the OUTER host is always <c>www.google.com</c>, which would
+    /// trip the own-domain guard against the SERP page host on every
+    /// single ad. Extract the actual landing URL from <c>adurl</c>
+    /// (ads) or <c>q</c> (organic) query params before any host-based
+    /// gate runs. Returns the input unchanged when it isn't a
+    /// recognised redirector.
+    ///
+    /// Recognised redirectors:
+    ///   • <c>www.google.com/aclk</c> — main ad click redirector
+    ///   • <c>www.google.com/url</c>  — organic result redirector
+    ///   • <c>googleadservices.com/pagead/aclk</c> — alt ad redirect
+    ///   • <c>www.googleadservices.com/pagead/aclk</c> — same, with www
+    /// </summary>
+    public static string UnwrapAdRedirect(string url)
+    {
+        if (string.IsNullOrEmpty(url)) return url;
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var u)) return url;
+        var host = u.Host.ToLowerInvariant();
+        if (host.StartsWith("www.")) host = host[4..];
+        var path = u.AbsolutePath.ToLowerInvariant();
+        var isGoogleRedirector =
+            (host == "google.com" && (path == "/aclk" || path == "/url"))
+            || (host == "googleadservices.com" && path.StartsWith("/pagead/aclk"));
+        if (!isGoogleRedirector) return url;
+        try
+        {
+            // Manual query-string parse — avoids dragging in
+            // System.Web.HttpUtility (not available by default in this
+            // assembly's reference set). Two-pass: prefer adurl (ad
+            // redirector), fall back to q (organic redirector).
+            string? adurl = null, q = null;
+            var query = u.Query.StartsWith("?") ? u.Query[1..] : u.Query;
+            foreach (var pair in query.Split('&', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var eq = pair.IndexOf('=');
+                if (eq <= 0) continue;
+                var key = pair[..eq];
+                var val = Uri.UnescapeDataString(pair[(eq + 1)..]);
+                if (string.Equals(key, "adurl", StringComparison.OrdinalIgnoreCase)) adurl = val;
+                else if (string.Equals(key, "q", StringComparison.OrdinalIgnoreCase)) q ??= val;
+            }
+            var dest = adurl ?? q;
+            if (string.IsNullOrEmpty(dest)) return url;
+            // Validate that the unwrapped value is actually an absolute
+            // URL — otherwise we'd silently swap in a path-only string
+            // and break downstream Uri parsing. If not absolute, fall
+            // back to the original (the guard then errs on the side of
+            // rejecting, which is safer than letting a malformed URL
+            // through unchecked).
+            return Uri.TryCreate(dest, UriKind.Absolute, out _) ? dest : url;
+        }
+        catch
+        {
+            return url;
+        }
+    }
+
+    /// <summary>
     /// Own-domain guard: returns true iff <paramref name="adHref"/>'s
     /// host equals the current page's host. Used to prevent the
     /// runner from clicking a "self-ad" (rare but real on some
     /// SERPs that surface the same domain you came from).
+    ///
+    /// The ad href is run through <see cref="UnwrapAdRedirect"/>
+    /// first — Google's <c>www.google.com/aclk?...</c> wrapper would
+    /// otherwise always match the SERP page host and reject every
+    /// ad on Google as a "self-click".
     /// </summary>
     public static async Task<bool> IsSelfClickAsync(
         IBrowserSession session, string adHref, CancellationToken ct = default)
     {
         if (string.IsNullOrEmpty(adHref)) return false;
-        if (!Uri.TryCreate(adHref, UriKind.Absolute, out var au)) return false;
+        var unwrapped = UnwrapAdRedirect(adHref);
+        if (!Uri.TryCreate(unwrapped, UriKind.Absolute, out var au)) return false;
         try
         {
             var pageUrl = await session.ExecuteScriptAsync(

@@ -6,7 +6,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Step params"
-        Width="700" Height="560"
+        Width="760" Height="640"
         WindowStartupLocation="CenterOwner"
         WindowStyle="None"
         ResizeMode="CanResize"
@@ -55,35 +55,130 @@
             </Border>
 
             <Grid Grid.Row="2" Margin="18,0,18,8">
-                <!-- Form view -->
+                <!-- Form view. The DockPanel lets the optional CONDITION
+                     section dock at the top for if / while_loop, with
+                     the regular params form scrolling beneath it. The
+                     ScrollViewer itself wraps the entire form so the
+                     condition panel scrolls with the params if the
+                     dialog is too short to show everything. -->
                 <ScrollViewer x:Name="FormScroll"
                               VerticalScrollBarVisibility="Auto"
                               HorizontalScrollBarVisibility="Disabled">
-                    <ItemsControl x:Name="FieldsList">
-                        <ItemsControl.ItemTemplate>
-                            <DataTemplate>
-                                <Grid Margin="0,4">
+                    <StackPanel>
+                        <!-- ─── Condition panel (if / while_loop only) ───
+                             Visibility set in code-behind based on
+                             actionType. The kind combo drives the inner
+                             ConditionFieldsList — selecting a new kind
+                             rebuilds the field set (e.g. picking
+                             url_contains shows a "needle" textbox,
+                             ad_is_external shows nothing, random shows
+                             a "probability" slider, etc.). -->
+                        <Border x:Name="ConditionPanel"
+                                Visibility="Collapsed"
+                                Margin="0,0,0,12"
+                                Padding="12,10"
+                                CornerRadius="6"
+                                Background="{StaticResource BgRaised}"
+                                BorderBrush="{StaticResource Border}"
+                                BorderThickness="1">
+                            <StackPanel>
+                                <TextBlock Text="CONDITION"
+                                           Style="{StaticResource CardHeader}"
+                                           FontSize="10"
+                                           FontWeight="Bold"
+                                           Margin="0,0,0,2"/>
+                                <TextBlock Text="When this evaluates to true the branch fires. Pick a kind, then fill in its parameters."
+                                           Style="{StaticResource DimText}"
+                                           FontSize="10"
+                                           TextWrapping="Wrap"
+                                           Margin="0,0,0,8"/>
+                                <Grid Margin="0,0,0,4">
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="180"/>
                                         <ColumnDefinition Width="*"/>
                                     </Grid.ColumnDefinitions>
                                     <StackPanel Grid.Column="0">
-                                        <TextBlock Text="{Binding Label}"
+                                        <TextBlock Text="Kind *"
                                                    Style="{StaticResource MutedText}"
                                                    FontSize="11"
                                                    FontWeight="SemiBold"/>
-                                        <TextBlock Text="{Binding Hint}"
+                                        <TextBlock Text="condition kind"
                                                    Style="{StaticResource DimText}"
                                                    FontSize="10"
                                                    TextWrapping="Wrap"/>
                                     </StackPanel>
-                                    <ContentControl Grid.Column="1"
-                                                    Content="{Binding Editor}"
-                                                    VerticalAlignment="Center"/>
+                                    <ComboBox Grid.Column="1"
+                                              x:Name="ConditionKindCombo"
+                                              SelectionChanged="OnConditionKindChanged"
+                                              VerticalAlignment="Center"/>
                                 </Grid>
-                            </DataTemplate>
-                        </ItemsControl.ItemTemplate>
-                    </ItemsControl>
+                                <!-- Per-kind sub-fields. Same row template
+                                     as the params form below. -->
+                                <ItemsControl x:Name="ConditionFieldsList">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Grid Margin="0,4">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="180"/>
+                                                    <ColumnDefinition Width="*"/>
+                                                </Grid.ColumnDefinitions>
+                                                <StackPanel Grid.Column="0">
+                                                    <TextBlock Text="{Binding Label}"
+                                                               Style="{StaticResource MutedText}"
+                                                               FontSize="11"
+                                                               FontWeight="SemiBold"/>
+                                                    <TextBlock Text="{Binding Hint}"
+                                                               Style="{StaticResource DimText}"
+                                                               FontSize="10"
+                                                               TextWrapping="Wrap"/>
+                                                </StackPanel>
+                                                <ContentControl Grid.Column="1"
+                                                                Content="{Binding Editor}"
+                                                                VerticalAlignment="Center"/>
+                                            </Grid>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                                <!-- Compound (and/or/not) hint — when kind
+                                     is and/or/not the children tree is
+                                     too rich for a typed form, so we
+                                     point users at JSON view. -->
+                                <TextBlock x:Name="CompoundHint"
+                                           Visibility="Collapsed"
+                                           Margin="0,4,0,0"
+                                           Foreground="{StaticResource WarnBrush}"
+                                           FontSize="10"
+                                           TextWrapping="Wrap"
+                                           Text="Compound conditions (and/or/not) carry a list of child conditions. Flip to JSON view to edit those — the typed form keeps the kind but won't show child editors."/>
+                            </StackPanel>
+                        </Border>
+                        <!-- Regular params -->
+                        <ItemsControl x:Name="FieldsList">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Grid Margin="0,4">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="180"/>
+                                            <ColumnDefinition Width="*"/>
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel Grid.Column="0">
+                                            <TextBlock Text="{Binding Label}"
+                                                       Style="{StaticResource MutedText}"
+                                                       FontSize="11"
+                                                       FontWeight="SemiBold"/>
+                                            <TextBlock Text="{Binding Hint}"
+                                                       Style="{StaticResource DimText}"
+                                                       FontSize="10"
+                                                       TextWrapping="Wrap"/>
+                                        </StackPanel>
+                                        <ContentControl Grid.Column="1"
+                                                        Content="{Binding Editor}"
+                                                        VerticalAlignment="Center"/>
+                                    </Grid>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </StackPanel>
                 </ScrollViewer>
 
                 <!-- JSON view -->

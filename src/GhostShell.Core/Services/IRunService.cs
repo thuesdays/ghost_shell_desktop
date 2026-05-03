@@ -72,6 +72,14 @@ public interface IRunService
     /// never touched. Returns rows deleted.
     /// </summary>
     Task<int> ClearAsync(DateTime? olderThan, CancellationToken ct = default);
+
+    /// <summary>
+    /// Phase 53 — delete a single run by ID. Used when the user
+    /// clicks the trash icon on a runs-table row. Only deletes if
+    /// the run has finished (exit_code is not NULL). Returns true
+    /// if deleted; false if the run is still running.
+    /// </summary>
+    Task<bool> DeleteAsync(long runId, CancellationToken ct = default);
 }
 
 public enum RunStatusFilter

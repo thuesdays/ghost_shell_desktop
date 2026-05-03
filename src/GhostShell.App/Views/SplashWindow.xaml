@@ -1,0 +1,107 @@
+<!--
+  SPDX-License-Identifier: MIT
+  Copyright (c) 2026 Mykola Kovhanko <thuesdays@gmail.com>
+-->
+<Window x:Class="GhostShell.App.Views.SplashWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False"
+        SizeToContent="WidthAndHeight"
+        WindowStartupLocation="CenterScreen"
+        Background="Transparent"
+        MouseLeftButtonDown="Window_MouseLeftButtonDown">
+
+    <!-- Borderless, transparent, draggable splash window with progress bar.
+         Matches Dolphin Anty's splash style: centered modal, rounded border,
+         dark gradient background with teal accent, progress bar, stage caption.
+         The Window itself is transparent; the rounded border + gradient live
+         in a nested Border inside the content so rounded corners render cleanly. -->
+
+    <!-- Background set ONCE via the property element below; the
+         attribute form (Background="Transparent") is removed here
+         because XAML parser rejects setting Background twice on the
+         same element (MC3024). The gradient IS the splash visual. -->
+    <Border CornerRadius="12">
+        <!-- Dark gradient background — BgBase → HueTeal tint (BgBase darkened
+             slightly on one side, teal shimmer on the other for visual interest). -->
+        <Border.Background>
+            <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                <GradientStop Color="#FF0F1117" Offset="0"/>    <!-- BgBase -->
+                <GradientStop Color="#FF0A1A1E" Offset="0.5"/>  <!-- slightly darker -->
+                <GradientStop Color="#FF0D2327" Offset="1"/>    <!-- teal tint -->
+            </LinearGradientBrush>
+        </Border.Background>
+
+        <!-- Padding around the content; inner container. -->
+        <StackPanel Orientation="Vertical" Margin="40,50,40,40" VerticalAlignment="Center">
+
+            <!-- Logo — 32x32 app icon, centered. -->
+            <Image x:Name="LogoImage"
+                   Width="32"
+                   Height="32"
+                   Margin="0,0,0,20"
+                   HorizontalAlignment="Center"
+                   Source="pack://application:,,,/Assets/AppIcon-256.png"/>
+
+            <!-- App title — "Ghost Shell" in 24pt white, centered, bold. -->
+            <TextBlock Text="Ghost Shell"
+                       FontSize="24"
+                       FontWeight="Bold"
+                       Foreground="White"
+                       HorizontalAlignment="Center"
+                       Margin="0,0,0,6"
+                       FontFamily="/Assets/Fonts/#Inter, Inter, Segoe UI Variable Text, Segoe UI, Arial"/>
+
+            <!-- Subtitle — "Stealth automation profiles" in muted/dim color. -->
+            <TextBlock Text="Stealth automation profiles"
+                       FontSize="12"
+                       Foreground="#FF5C6473"
+                       HorizontalAlignment="Center"
+                       Margin="0,0,0,24"/>
+
+            <!-- Progress bar — 240px wide, 6px tall, modern rounded style.
+                 Indeterminate=False so we control the Value; foreground is teal,
+                 background is darkish with subtle border. -->
+            <ProgressBar x:Name="ProgressBar"
+                         Width="240"
+                         Height="6"
+                         Margin="0,0,0,12"
+                         HorizontalAlignment="Center"
+                         Value="0"
+                         Maximum="100"
+                         Foreground="#FF2DD4BF"
+                         Background="#1F2DD4BF"
+                         BorderBrush="Transparent">
+                <ProgressBar.Template>
+                    <ControlTemplate TargetType="ProgressBar">
+                        <!-- Rounded outer container -->
+                        <Border CornerRadius="3"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}">
+                            <!-- Inner progress fill, also rounded -->
+                            <Grid x:Name="PART_Track">
+                                <Border x:Name="PART_Indicator"
+                                        CornerRadius="3"
+                                        Background="{TemplateBinding Foreground}"
+                                        HorizontalAlignment="Left"/>
+                            </Grid>
+                        </Border>
+                    </ControlTemplate>
+                </ProgressBar.Template>
+            </ProgressBar>
+
+            <!-- Stage caption — "Loading database…" etc, muted color, centered. -->
+            <TextBlock x:Name="StageMessageBlock"
+                       Text="Initializing…"
+                       FontSize="11"
+                       Foreground="#FF98A1B3"
+                       HorizontalAlignment="Center"
+                       FontFamily="Cascadia Code, Cascadia Mono, Consolas"/>
+
+        </StackPanel>
+    </Border>
+</Window>

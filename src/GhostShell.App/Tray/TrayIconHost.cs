@@ -390,8 +390,10 @@ public sealed class TrayIconHost : IHostedService, IDisposable
     {
         if (Application.Current.MainWindow is { } w)
         {
-            w.Visibility = Visibility.Collapsed;
-            w.ShowInTaskbar = false;
+            // Phase 69b — Hide() (Visibility=Hidden) is enough to drop the
+            // window from the taskbar; explicit ShowInTaskbar=false would
+            // force HWND recreation, which we want to avoid (splash flicker).
+            w.Hide();
         }
     }
 
@@ -399,9 +401,15 @@ public sealed class TrayIconHost : IHostedService, IDisposable
     {
         if (Application.Current.MainWindow is { } w)
         {
+            // Phase 69b — no ShowInTaskbar manipulation. The hide path
+            // (MainWindow.OnClosing) just calls Hide(), which removes
+            // the window from the taskbar via Visibility=Hidden. On
+            // restore we just call Show() — WPF puts the window back
+            // in the taskbar automatically. Toggling ShowInTaskbar
+            // forced HWND recreation, which re-fired Window.Loaded
+            // and was the upstream cause of the splash flicker.
             if (w.Visibility != Visibility.Visible) w.Show();
             if (w.WindowState == WindowState.Minimized) w.WindowState = WindowState.Normal;
-            w.ShowInTaskbar = true;
             w.Activate();
             w.Topmost = true;
             w.Topmost = false;

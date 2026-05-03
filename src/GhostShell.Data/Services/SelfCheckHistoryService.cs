@@ -26,7 +26,7 @@ public sealed class SelfCheckHistoryService : ISelfCheckHistoryService
         geo_country AS GeoCountry, geo_city AS GeoCity,
         webrtc_leaked AS WebRtcLeaked, webrtc_local_ip AS WebRtcLocalIp,
         timezone_actual AS TimezoneActual, timezone_expected AS TimezoneExpected,
-        ua_actual AS UaActual, score, note, raw_json AS RawJson
+        ua_actual AS UaActual, score, note, raw_json AS RawJson, tests_json AS TestsJson
     """;
 
     public async Task<long> InsertAsync(SelfCheckResult r, CancellationToken ct = default)
@@ -37,13 +37,13 @@ public sealed class SelfCheckHistoryService : ISelfCheckHistoryService
                  exit_ip, geo_country, geo_city,
                  webrtc_leaked, webrtc_local_ip,
                  timezone_actual, timezone_expected,
-                 ua_actual, score, note, raw_json)
+                 ua_actual, score, note, raw_json, tests_json)
             VALUES
                 (@ProfileName, @RunId, @RanAt,
                  @ExitIp, @GeoCountry, @GeoCity,
                  @WebRtcLeaked, @WebRtcLocalIp,
                  @TimezoneActual, @TimezoneExpected,
-                 @UaActual, @Score, @Note, @RawJson)
+                 @UaActual, @Score, @Note, @RawJson, @TestsJson)
             RETURNING id;
         """;
         var id = await _db.QueueAsync(c => c.ExecuteScalarAsync<long>(sql, new
@@ -55,7 +55,7 @@ public sealed class SelfCheckHistoryService : ISelfCheckHistoryService
             WebRtcLeaked = r.WebRtcLeaked ? 1 : 0,
             r.WebRtcLocalIp,
             r.TimezoneActual, r.TimezoneExpected, r.UaActual,
-            r.Score, r.Note, r.RawJson,
+            r.Score, r.Note, r.RawJson, r.TestsJson,
         }), ct);
         _log.LogInformation(
             "Self-check #{Id} for '{Profile}' score={Score} ip={Ip} tz={Tz} webrtc={Leak}",

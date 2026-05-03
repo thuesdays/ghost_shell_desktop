@@ -108,7 +108,18 @@ public static class ScriptActionSchema
         ["catch_ads"]   = Array.Empty<ParamField>(),
         ["click_ad"]    = new[]
         {
-            new ParamField("stamp_id", "Stamp id (-1 = random)", ParamFieldKind.Int, "-1"),
+            // Phase 38 — full web-parity schema. The runner currently
+            // implements the click + own-domain guard + post-click dwell
+            // (2.5–6 s hardcoded). The remaining fields are accepted as
+            // params for forward-compat with the legacy ghost_shell_browser
+            // and read by the click-ad analytics so existing scripts
+            // don't lose their settings on round-trip.
+            new ParamField("stamp_id",           "Stamp id (-1 = random)",        ParamFieldKind.Int,  "-1"),
+            new ParamField("dwell_min",          "Min landing dwell (sec)",       ParamFieldKind.Int,  "6"),
+            new ParamField("dwell_max",          "Max landing dwell (sec)",       ParamFieldKind.Int,  "18"),
+            new ParamField("scroll_after_click", "Scroll the landing page",       ParamFieldKind.Bool, "true"),
+            new ParamField("close_after",        "Close tab after dwell",         ParamFieldKind.Bool, "true"),
+            new ParamField("deep_dive",          "Click a 2nd link on landing",   ParamFieldKind.Bool, "false"),
         },
         ["solve_captcha"] = new[]
         {
@@ -160,20 +171,21 @@ public static class ScriptActionSchema
             new ParamField("scan_dwell_min",   "Min between-ad (sec)", ParamFieldKind.Int,  "3"),
             new ParamField("scan_dwell_max",   "Max between-ad (sec)", ParamFieldKind.Int,  "8"),
         },
-        ["if"] = new[]
-        {
-            // Display-only summary — the real condition tree lives in
-            // step.Condition and is edited via JSON view (see comment
-            // above). Once we have a graphical condition builder this
-            // will render the tree inline.
-            new ParamField("__condition_hint", "Condition (edit in JSON view)", ParamFieldKind.String, "(see step.condition)"),
-        },
+        // The `if` step has no `params.*` keys of its own — the
+        // condition tree lives in step.condition and is edited via
+        // the dedicated Condition panel that the typed-form dialog
+        // renders for "if" / "while_loop". HasSchema("if") still
+        // returns true (the key exists), so the dialog stays in
+        // form mode and the condition panel is shown; the empty
+        // params list just means no extra rows appear below it.
+        // (Use Array.Empty<T>() — `new[] { }` can't infer the
+        // element type, same reason `extension_close` uses it.)
+        ["if"] = Array.Empty<ParamField>(),
         ["while_loop"] = new[]
         {
-            // The condition itself is edited via the JSON view (the
-            // typed form doesn't expose the condition tree yet —
-            // condition builder is a future iteration). max_iterations
-            // gives the loop a hard cap so it can't spin forever.
+            // Loop condition lives in step.condition (edited via the
+            // Condition panel — same as `if`). max_iterations gives
+            // the loop a hard cap so it can't spin forever.
             new ParamField("max_iterations", "Max iterations (cap)", ParamFieldKind.Int, "1000"),
         },
         ["switch_tab"] = new[]
@@ -184,6 +196,31 @@ public static class ScriptActionSchema
         {
             new ParamField("min_sec", "Min seconds", ParamFieldKind.Int, "3"),
             new ParamField("max_sec", "Max seconds", ParamFieldKind.Int, "8"),
+        },
+
+        // ─── Search compound actions (Phase 38 — web parity) ──────
+        // search_query and commercial_inflate are compound actions
+        // ported from the legacy ghost_shell_browser. They wrap
+        // navigate + wait + parse_ads + (optional) retry-on-empty
+        // into a single step so user-authored scripts stay short.
+        ["search_query"] = new[]
+        {
+            new ParamField("query",         "Search query (supports {{vars}})", ParamFieldKind.String, "{{item}}", Required: true),
+            new ParamField("locale",        "Google locale (hl=...)",           ParamFieldKind.String, "uk"),
+            new ParamField("max_attempts",  "Retry on empty SERP (count)",      ParamFieldKind.Int,    "4"),
+            new ParamField("retry_min_sec", "Retry pause min (sec)",            ParamFieldKind.Int,    "13"),
+            new ParamField("retry_max_sec", "Retry pause max (sec)",            ParamFieldKind.Int,    "15"),
+            new ParamField("fail_on_empty", "Throw if no ads after retries",    ParamFieldKind.Bool,   "false"),
+            new ParamField("timeout_ms",    "wait_for_selector timeout (ms)",   ParamFieldKind.Int,    "12000"),
+        },
+        ["commercial_inflate"] = new[]
+        {
+            new ParamField("brand",         "Brand seed (supports {{vars}})",   ParamFieldKind.String, "{{item}}", Required: true),
+            new ParamField("n",             "Pre-warm queries to fire",         ParamFieldKind.Int,    "2"),
+            new ParamField("locale",        "Google locale (hl=...)",           ParamFieldKind.String, "uk"),
+            new ParamField("dwell_min",     "Per-query dwell min (sec)",        ParamFieldKind.Int,    "4"),
+            new ParamField("dwell_max",     "Per-query dwell max (sec)",        ParamFieldKind.Int,    "10"),
+            new ParamField("click_organic", "Click first organic result",       ParamFieldKind.Bool,   "false"),
         },
         ["refresh"] = new[]
         {

@@ -59,7 +59,8 @@ public sealed class ScriptRunner : IScriptRunner
         CancellationToken ct = default,
         IEnumerable<string>? myDomains = null,
         IEnumerable<string>? targetDomains = null,
-        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>>? vault = null)
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>>? vault = null,
+        IReadOnlyDictionary<string, string>? vaultAliases = null)
     {
         var startedAt = DateTime.UtcNow;
         var stepLog = new List<Dictionary<string, object?>>();
@@ -112,6 +113,9 @@ public sealed class ScriptRunner : IScriptRunner
         // we start executing, so the runner never holds the master key.
         if (vault is not null)
             foreach (var kv in vault) ctx.Vault[kv.Key] = kv.Value;
+        // Phase 69 — pre-resolved profile-scoped aliases.
+        if (vaultAliases is not null)
+            foreach (var kv in vaultAliases) ctx.VaultAliases[kv.Key] = kv.Value;
         var counters = new RunCounters();
         string? lastError = null;
         var aborted = false;
@@ -183,7 +187,23 @@ public sealed class ScriptRunner : IScriptRunner
                    : counters.Failed == 0 && counters.Executed > 0 ? "ok"
                    : counters.Executed > 0              ? "partial"
                    : "failed";
-        return Finalise(runId, startedAt, status, counters, lastError, stepLog, ctx);
+        var result = Finalise(runId, startedAt, status, counters, lastError, stepLog, ctx);
+
+        // Phase 61c — surface aborts to the caller. Previously a
+        // ScriptAbortException (browser session died, NoSuchWindow,
+        // proxy timeout) was caught above and ExecuteAsync returned
+        // normally, leading RealProfileRunner to log "Script completed"
+        // for runs that actually crashed. Re-throw so the caller's
+        // catch (Exception) branch fires and the run row + log line
+        // both reflect the crash. We don't re-throw on
+        // OperationCanceledException — that's a clean user-initiated
+        // stop, RealProfileRunner already handles it specially.
+        if (aborted && lastError is not "cancelled")
+        {
+            throw new ScriptAbortException(
+                $"script aborted: {lastError ?? "unknown"} (status={status}, executed={counters.Executed}, failed={counters.Failed})");
+        }
+        return result;
     }
 
     /// <summary>
@@ -603,11 +623,17 @@ public sealed class ScriptRunner : IScriptRunner
                     ctx.Vars["ad_href"]  = ad.Href;
                     ctx.Vars["ad_title"] = ad.Title ?? "";
                     ctx.Vars["ad_id"]    = ad.StampId.ToString();
-                    ctx.CurrentAdHref    = ad.Href;
+                    // Same unwrap + display-URL plumbing as the linear
+                    // path above — graph-mode foreach_ad MUST share the
+                    // same gate-input shape, otherwise scripts behave
+                    // differently in the two layouts.
+                    ctx.CurrentAdHref       = AdParser.UnwrapAdRedirect(ad.Href);
+                    ctx.CurrentAdDisplayUrl = ad.DisplayUrl ?? "";
                     await ExecuteSubGraphAsync(g, bodyStart, loopNode.Id, s, ctx, counters, log, runId, profileName, ct);
                     await Humanizer.IdleAsync(800, 2200, ct);
                 }
                 ctx.CurrentAdHref = "";
+                ctx.CurrentAdDisplayUrl = "";
             }
             finally { ctx.AdLoopDepth--; }
         }
@@ -700,6 +726,24 @@ public sealed class ScriptRunner : IScriptRunner
         List<Dictionary<string, object?>> log, long runId, string profileName, CancellationToken ct)
     {
         var type = step.Type.ToLowerInvariant();
+
+        // ── Phase 60 — Universal step ENTRY log ───────────────────────
+        // One LogInformation line per step gives the user a top-level
+        // trail of EVERY action the script took: navigates, clicks,
+        // searches, dwells, conditionals, loops. Each line names the
+        // step type plus the most useful 1-2 params for that type.
+        // This is the line the user grep's when they see suspicious
+        // activity ("why did we open my domain?") — it tells them
+        // exactly which step initiated each browser action.
+        try
+        {
+            var paramSnap = StepParamSnapshot(step, ctx);
+            _log.LogInformation(
+                "▶ STEP {Type}{Params}  (run #{Run}, profile '{Profile}')",
+                type, paramSnap, runId, profileName);
+        }
+        catch { /* logging shouldn't ever throw */ }
+
         switch (type)
         {
             // ── Control flow ──────────────────────────────────────
@@ -733,39 +777,198 @@ public sealed class ScriptRunner : IScriptRunner
             }
             case "foreach_ad":
             {
-                // Re-entrance guard: parse_ads inside the body must
-                // not corrupt the snapshot we're iterating. We bump
-                // a depth counter so the inner parse_ads detects it
-                // and short-circuits instead of mutating ctx.Ads
-                // mid-iteration.
+                // ─── Architectural redesign (Phase 41) ────────────────
+                //
+                // The OLD implementation took ONE snapshot of ctx.Ads at
+                // loop entry, then iterated. After the first click_ad
+                // the browser was on the AD'S landing page, not the
+                // SERP — but the next iteration kept trying to click
+                // ads from the original snapshot whose DOM stamps no
+                // longer existed. Symptom from the user's logs:
+                // "Ad click failed (all 4 tiers): https://kim-medical..."
+                // because tier-1 querySelector('[data-gs-ad-id="N"]')
+                // returned null on the kim-medical landing page.
+                //
+                // NEW model — per-iteration RESYNC:
+                //   1. Capture the SERP URL at loop entry ("home base").
+                //   2. Each iteration: check current URL; if not on
+                //      SERP, navigate back (the ad click took us to a
+                //      landing page that we now want to leave).
+                //   3. Re-parse_ads on the (possibly re-rendered) SERP
+                //      so DOM stamps (data-gs-ad-id) are FRESH.
+                //   4. Pick the next ad whose host we haven't clicked
+                //      yet — host-keyed instead of stamp-keyed because
+                //      stamps reset on every parse, but advertiser
+                //      hosts are stable across rerenders.
+                //   5. Replace ctx.Ads with [target] so click_ad's
+                //      Random.Next picks THIS specific ad (the body's
+                //      click_ad takes ctx.Ads[Random.Next] when no
+                //      stamp_id is set).
+                //   6. Execute body, restore ctx.Ads, continue.
+                //
+                // Cap iterations at 50 — bounded to prevent runaway
+                // loops if the SERP keeps showing new ads or the
+                // resync fails.
                 ctx.AdLoopDepth++;
                 try
                 {
-                    if (ctx.Ads.Count == 0)
+                    var serpUrl = await GetCurrentUrlAsync(s, ct);
+                    if (string.IsNullOrEmpty(serpUrl))
                     {
-                        var parsed = await AdParser.ParseAsync(s, ct);
-                        ctx.Ads.AddRange(parsed);
+                        _log.LogWarning("foreach_ad: couldn't read SERP URL at entry — using best-effort snapshot mode");
                     }
-                    // Snapshot — defends against external mutation
-                    // even if a sibling task touches ctx.Ads.
-                    var snapshot = ctx.Ads.ToList();
-                    foreach (var ad in snapshot)
+                    var clickedHosts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    const int maxIterations = 50;
+                    for (var iter = 0; iter < maxIterations; iter++)
                     {
                         ct.ThrowIfCancellationRequested();
-                        ctx.Vars["ad_href"]  = ad.Href;
-                        ctx.Vars["ad_title"] = ad.Title ?? "";
-                        ctx.Vars["ad_id"]    = ad.StampId.ToString();
-                        // CurrentAdHref drives the per-step domain
-                        // filter gate (Phase 17 web-parity). Setting
-                        // it here so the filter sees a host while the
-                        // body executes.
-                        ctx.CurrentAdHref = ad.Href;
-                        var flow = await ExecuteStepsAsync(step.Body, s, ctx, counters, log, runId, profileName, ct);
+
+                        // ── RESYNC: ensure we're on the SERP ──────────
+                        // After the first click_ad navigates to an ad's
+                        // landing page, the browser is no longer on the
+                        // SERP. Navigating back here ensures the next
+                        // parse_ads sees the right DOM. We compare host
+                        // + path (ignoring query/hash) because Google
+                        // sometimes appends &sxsrf=... params per request.
+                        if (!string.IsNullOrEmpty(serpUrl))
+                        {
+                            var curUrl = await GetCurrentUrlAsync(s, ct);
+                            if (!IsSameSerpPage(curUrl, serpUrl))
+                            {
+                                _log.LogInformation(
+                                    "foreach_ad iter {N}: not on SERP (cur='{Cur}'), navigating back to '{Serp}'",
+                                    iter, curUrl, serpUrl);
+                                try
+                                {
+                                    await s.NavigateAsync(serpUrl, ct);
+                                    // Settle — Google's SERP renders
+                                    // ads after main content, give it
+                                    // 1.5-3s before we re-parse.
+                                    await Humanizer.IdleAsync(1500, 3000, ct);
+                                }
+                                catch (Exception navEx)
+                                {
+                                    _log.LogWarning(navEx,
+                                        "foreach_ad iter {N}: navigation back to SERP failed — aborting loop",
+                                        iter);
+                                    break;
+                                }
+                            }
+                        }
+
+                        // ── RE-PARSE: fresh DOM stamps every iteration
+                        // The previous iteration's stamps (data-gs-ad-id)
+                        // are dead after ANY DOM mutation — Google's
+                        // SERP re-renders aggressively. Always start
+                        // with a fresh parse.
+                        List<AdRecord> freshAds;
+                        try
+                        {
+                            freshAds = await AdParser.ParseAsync(s, ct);
+                        }
+                        catch (Exception parseEx)
+                        {
+                            _log.LogWarning(parseEx,
+                                "foreach_ad iter {N}: parse_ads failed — aborting loop", iter);
+                            break;
+                        }
+                        // Phase 45 — record EVERY observed ad to the
+                        // competitor table. Without this, the
+                        // Competitors page stayed empty even when the
+                        // script clicked through dozens of advertiser
+                        // domains (Phase 41 redesign bypasses the
+                        // `parse_ads` action which was the only place
+                        // recording happened previously).
+                        if (freshAds.Count > 0)
+                        {
+                            await RecordCompetitorsAsync(freshAds, ctx, runId, profileName, ct);
+                        }
+                        if (freshAds.Count == 0)
+                        {
+                            _log.LogInformation(
+                                "foreach_ad iter {N}: no ads on SERP, ending loop", iter);
+                            break;
+                        }
+
+                        // ── PICK: next unclicked advertiser host ──────
+                        // Track by host (not exact href) because Google
+                        // shows the same advertiser with slightly
+                        // different tracker URLs per impression. Without
+                        // host-keyed dedup the loop would click the
+                        // same advertiser N times in a row.
+                        AdRecord? target = null;
+                        foreach (var ad in freshAds)
+                        {
+                            // Prefer host of UNWRAPPED click URL — that's
+                            // the actual destination, not Google's aclk.
+                            var unwrapped = AdParser.UnwrapAdRedirect(ad.Href);
+                            var host = ExtractHost(unwrapped);
+                            if (string.IsNullOrEmpty(host)) continue;
+                            if (clickedHosts.Contains(host)) continue;
+                            target = ad;
+                            break;
+                        }
+                        if (target is null)
+                        {
+                            _log.LogInformation(
+                                "foreach_ad iter {N}: all {Total} ads' hosts already visited, ending loop",
+                                iter, freshAds.Count);
+                            break;
+                        }
+
+                        // ── BIND CONTEXT for the body ─────────────────
+                        ctx.Vars["ad_href"]  = target.Href;
+                        ctx.Vars["ad_title"] = target.Title ?? "";
+                        ctx.Vars["ad_id"]    = target.StampId.ToString();
+                        ctx.CurrentAdHref       = AdParser.UnwrapAdRedirect(target.Href);
+                        ctx.CurrentAdDisplayUrl = target.DisplayUrl ?? "";
+
+                        // Mark host as clicked NOW (before body runs)
+                        // so even if the body throws / skips / bypasses
+                        // we don't infinite-loop on the same advertiser.
+                        var targetHost = ExtractHost(ctx.CurrentAdHref);
+                        if (!string.IsNullOrEmpty(targetHost))
+                            clickedHosts.Add(targetHost);
+
+                        // Diagnostic: dump what the gate will see.
+                        _log.LogInformation(
+                            "foreach_ad iter {N}: target host='{Host}', display='{Disp}', stamp={Stamp}, my=[{My}], target=[{Tg}]",
+                            iter, targetHost,
+                            ExtractHost(ctx.CurrentAdDisplayUrl),
+                            target.StampId,
+                            string.Join(",", ctx.MyDomains),
+                            string.Join(",", ctx.TargetDomains));
+
+                        // Replace ctx.Ads with [target] so the body's
+                        // click_ad picks THIS ad (it does ctx.Ads[
+                        // Random.Next(Count)] when no stamp_id is set).
+                        // We also set ctx.Ads to the fresh full list
+                        // first if the user wants the body to reason
+                        // about counts/density, but the most common
+                        // pattern is "click one ad" — single-element
+                        // list is the safer default.
+                        var savedAds = ctx.Ads.ToList();
+                        ctx.Ads.Clear();
+                        ctx.Ads.Add(target);
+                        StepFlow flow;
+                        try
+                        {
+                            flow = await ExecuteStepsAsync(step.Body, s, ctx, counters, log, runId, profileName, ct);
+                        }
+                        finally
+                        {
+                            // Restore the full ad list for any siblings
+                            // outside foreach_ad that read ctx.Ads.
+                            ctx.Ads.Clear();
+                            ctx.Ads.AddRange(freshAds);
+                        }
                         if (flow == StepFlow.Break) break;
+
                         // Inter-ad pause to look organic.
                         await Humanizer.IdleAsync(800, 2200, ct);
                     }
                     ctx.CurrentAdHref = "";
+                    ctx.CurrentAdDisplayUrl = "";
                 }
                 finally { ctx.AdLoopDepth--; }
                 break;
@@ -790,38 +993,234 @@ public sealed class ScriptRunner : IScriptRunner
                 }
                 ctx.Ads.Clear();
                 ctx.Ads.AddRange(await AdParser.ParseAsync(s, ct));
-
-                // Phase 34: record competitor observations, excluding blocked domains.
-                try
+                await RecordCompetitorsAsync(ctx.Ads, ctx, runId, profileName, ct);
+                break;
+            }
+            // ── Web-parity compound actions (Phase 38) ─────────────
+            // Native handlers for the legacy ghost_shell_browser
+            // `search_query` and `commercial_inflate` step types.
+            // Without these, imported web scripts that use them
+            // silently throw NotSupportedException at the default
+            // case — the run finishes with no visible work because
+            // the catch path logs at Warning and steps continue.
+            case "search_query":
+            {
+                var query = InterpolateVars(ParamString(step, "query") ?? "", ctx);
+                if (string.IsNullOrWhiteSpace(query))
                 {
-                    var batch = new List<CompetitorRecord>();
-                    var capturedAt = DateTime.UtcNow;
-                    foreach (var ad in ctx.Ads)
-                    {
-                        var host = ExtractHost(ad.Href);
-                        if (string.IsNullOrEmpty(host)) continue;
-                        if (DomainMatches(host, ctx.BlockDomains)) continue;
-                        batch.Add(new CompetitorRecord
-                        {
-                            RunId = runId,
-                            ProfileName = profileName,
-                            CapturedAt = capturedAt,
-                            Query = ctx.Vars.TryGetValue("current_query", out var q) ? q : "",
-                            Domain = host,
-                            AdTitle = ad.Title,
-                            DisplayUrl = ad.DisplayUrl,
-                            ClickUrl = ad.Href,
-                        });
-                    }
-                    if (batch.Count > 0)
-                        _ = _competitors.RecordBatchAsync(batch, ct);
+                    _log.LogWarning("search_query: empty query, skipping");
+                    break;
                 }
-                catch (Exception ex)
+                var locale = ParamString(step, "locale") ?? "uk";
+                var maxAttempts = Math.Max(1, ParamInt(step, "max_attempts", 4));
+                var retryMinSec = Math.Max(1, ParamInt(step, "retry_min_sec", 13));
+                var retryMaxSec = Math.Max(retryMinSec, ParamInt(step, "retry_max_sec", 15));
+                var timeoutMs = Math.Max(1000, ParamInt(step, "timeout_ms", 12000));
+                var failOnEmpty = ParamBool(step, "fail_on_empty", false);
+                var url = $"https://www.google.com/search?q={Uri.EscapeDataString(query)}&hl={Uri.EscapeDataString(locale)}";
+
+                for (int attempt = 1; attempt <= maxAttempts; attempt++)
                 {
-                    _log.LogWarning(ex, "Failed to record competitor batch for parse_ads");
+                    ct.ThrowIfCancellationRequested();
+                    _log.LogInformation(
+                        "search_query: '{Q}' attempt {A}/{Max} → {Url}",
+                        query, attempt, maxAttempts, url);
+                    try { await s.NavigateAsync(url, ct); }
+                    catch (Exception ex) { _log.LogDebug(ex, "search_query navigate threw — continuing"); }
+
+                    // Best-effort wait for the SERP to render. Don't
+                    // throw if #search isn't there in time — Google
+                    // sometimes redirects to a consent page; fall
+                    // through to parse_ads which will return zero.
+                    var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+                    while (DateTime.UtcNow < deadline)
+                    {
+                        var hit = await s.ExecuteScriptAsync(
+                            "return !!document.querySelector('#search');",
+                            null, ct);
+                        if (hit is true) break;
+                        await Task.Delay(250, ct);
+                    }
+
+                    // Parse ads now so foreach_ad inside the same
+                    // script body gets a populated list. Phase 34
+                    // analytics still fires (parse_ads handler does
+                    // the competitor-record write).
+                    ctx.Ads.Clear();
+                    ctx.Ads.AddRange(await AdParser.ParseAsync(s, ct));
+                    if (ctx.Ads.Count > 0)
+                    {
+                        _log.LogInformation("search_query: '{Q}' returned {N} ad(s)", query, ctx.Ads.Count);
+                        break;
+                    }
+                    if (attempt < maxAttempts)
+                    {
+                        var pauseMs = Random.Shared.Next(retryMinSec * 1000, retryMaxSec * 1000 + 1);
+                        _log.LogInformation(
+                            "search_query: '{Q}' returned 0 ads, refreshing in {Ms} ms",
+                            query, pauseMs);
+                        await Task.Delay(pauseMs, ct);
+                    }
+                }
+
+                if (ctx.Ads.Count == 0 && failOnEmpty)
+                    throw new InvalidOperationException(
+                        $"search_query '{query}' returned no ads after {maxAttempts} attempts");
+                break;
+            }
+            case "commercial_inflate":
+            {
+                var brand = InterpolateVars(ParamString(step, "brand") ?? "", ctx);
+                if (string.IsNullOrWhiteSpace(brand))
+                {
+                    _log.LogWarning("commercial_inflate: empty brand seed, skipping");
+                    break;
+                }
+                var n = Math.Clamp(ParamInt(step, "n", 2), 1, 10);
+                var locale = ParamString(step, "locale") ?? "uk";
+                var dwellMin = Math.Max(1, ParamInt(step, "dwell_min", 4));
+                var dwellMax = Math.Max(dwellMin, ParamInt(step, "dwell_max", 10));
+                var clickOrganic = ParamBool(step, "click_organic", false);
+
+                // Generic commercial-intent query templates. The aim
+                // is to seed Google's per-session signal with a few
+                // searches that LOOK like commercial intent for the
+                // brand, so the subsequent search_query lands in a
+                // richer ad context.
+                var templates = new[]
+                {
+                    brand + " отзывы",
+                    brand + " цена",
+                    "купить " + brand,
+                    "instagram " + brand,
+                    brand + " магазин",
+                    brand + " доставка",
+                };
+                for (int i = 0; i < n; i++)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    var q = templates[Random.Shared.Next(templates.Length)];
+                    var url = $"https://www.google.com/search?q={Uri.EscapeDataString(q)}&hl={Uri.EscapeDataString(locale)}";
+                    _log.LogInformation(
+                        "commercial_inflate: pre-warm {I}/{N} '{Q}'", i + 1, n, q);
+                    try
+                    {
+                        await s.NavigateAsync(url, ct);
+                        var deadline = DateTime.UtcNow.AddSeconds(8);
+                        while (DateTime.UtcNow < deadline)
+                        {
+                            var hit = await s.ExecuteScriptAsync(
+                                "return !!document.querySelector('#search');", null, ct);
+                            if (hit is true) break;
+                            await Task.Delay(250, ct);
+                        }
+
+                        // Optional click-first-organic for stronger
+                        // signal. Best-effort; if no organic anchor
+                        // is visible (consent page, captcha) we just
+                        // dwell on the SERP.
+                        //
+                        // Phase 58b — CRITICAL FIX: hard-block clicking the
+                        // first organic result if its href host matches
+                        // ctx.MyDomains. Previously the JS just did
+                        // `a.closest('a').click()` with NO own-domain check,
+                        // which is how 'goodmedika доставка' search → click
+                        // → goodmedika.com.ua → billed-as-fraud-click
+                        // happened. This is the SAME class of bug as the
+                        // click_ad ctx-stale issue, just a different code
+                        // path. Resolve the anchor URL FIRST (DOM read), let
+                        // the C# layer match against MyDomains, only then
+                        // execute the click. Title-substring also blocked
+                        // (e.g. "Купить лекарства | GoodMedika.com.ua").
+                        if (clickOrganic)
+                        {
+                            try
+                            {
+                                // 1) Read the first-organic anchor's href + title
+                                //    without clicking it.
+                                var organicJson = await s.ExecuteScriptAsync(
+                                    "var a=document.querySelector('#search a h3');" +
+                                    "if(!a) return null;" +
+                                    "var anchor=a.closest('a');" +
+                                    "if(!anchor||!anchor.href) return null;" +
+                                    "return JSON.stringify({href:anchor.href,title:(a.innerText||a.textContent||'').slice(0,200)});",
+                                    null, ct) as string;
+
+                                bool blocked = false;
+                                string? href = null, title = null;
+                                if (!string.IsNullOrEmpty(organicJson))
+                                {
+                                    try
+                                    {
+                                        using var d = System.Text.Json.JsonDocument.Parse(organicJson);
+                                        href  = d.RootElement.TryGetProperty("href",  out var h) ? h.GetString() : null;
+                                        title = d.RootElement.TryGetProperty("title", out var t) ? t.GetString() : null;
+                                    }
+                                    catch { /* fall through, blocked stays false */ }
+                                }
+
+                                if (!string.IsNullOrEmpty(href))
+                                {
+                                    var organicHost = ExtractHost(href);
+                                    if (!string.IsNullOrEmpty(organicHost) &&
+                                        DomainMatches(organicHost, ctx.MyDomains))
+                                    {
+                                        blocked = true;
+                                        _log.LogWarning(
+                                            "commercial_inflate SKIP click_organic (own-domain): " +
+                                            "first-organic href={Href} host={Host} matched MyDomains=[{My}]",
+                                            href, organicHost, string.Join(",", ctx.MyDomains));
+                                    }
+                                    // Title substring guard — affiliate links sometimes
+                                    // route through a tracker so the host doesn't match
+                                    // but the visible title contains the brand root.
+                                    if (!blocked && !string.IsNullOrEmpty(title))
+                                    {
+                                        foreach (var d in ctx.MyDomains)
+                                        {
+                                            var root = DomainRoot(d);
+                                            if (root.Length >= 4 &&
+                                                title!.Contains(root, StringComparison.OrdinalIgnoreCase))
+                                            {
+                                                blocked = true;
+                                                _log.LogWarning(
+                                                    "commercial_inflate SKIP click_organic (own-brand-in-title): " +
+                                                    "first-organic title='{Title}' contains brand-root '{Root}'",
+                                                    title, root);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if (!blocked)
+                                {
+                                    _log.LogInformation(
+                                        "commercial_inflate: clicking first-organic href={Href}",
+                                        href ?? "(unknown)");
+                                    await s.ExecuteScriptAsync(
+                                        "var a=document.querySelector('#search a h3');" +
+                                        "if(a){a.closest('a').click();}",
+                                        null, ct);
+                                }
+                            }
+                            catch (Exception cex)
+                            {
+                                _log.LogDebug(cex, "commercial_inflate: click_organic skipped");
+                            }
+                        }
+
+                        await Humanizer.IdleAsync(dwellMin * 1000, dwellMax * 1000, ct);
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.LogDebug(ex,
+                            "commercial_inflate: iteration {I} failed (continuing)", i + 1);
+                    }
                 }
                 break;
             }
+
             case "click_ad":
             {
                 if (ctx.Ads.Count == 0)
@@ -834,13 +1233,159 @@ public sealed class ScriptRunner : IScriptRunner
                     target = ctx.Ads[Random.Shared.Next(ctx.Ads.Count)];
                 if (target is null)
                     throw new InvalidOperationException("no matching ad to click");
+
+                // ── Phase 58 — CRITICAL FIX: sync ctx.CurrentAd* to the picked
+                // target BEFORE any guard runs. Previously this assignment
+                // happened ONLY inside foreach_ad's iteration body (line 885).
+                // Standalone `click_ad` steps that ran outside foreach_ad
+                // picked a random target but kept ctx.CurrentAdHref pointing
+                // at whatever ad parse_ads / a previous loop iteration last
+                // touched — which meant the AnyHostMatches pre-click guard
+                // below was checking the WRONG ad. That's how own-domain
+                // ads were slipping through and getting clicked + billed.
+                // Set them now from this iteration's target.
+                ctx.CurrentAdHref       = AdParser.UnwrapAdRedirect(target.Href);
+                ctx.CurrentAdDisplayUrl = target.DisplayUrl ?? "";
+                if (!string.IsNullOrEmpty(target.Title))
+                    ctx.Vars["ad_title"] = target.Title;
+
+                // ── Diagnostic chain: log the FULL provenance of this click
+                // attempt so the user can audit every domain-guard decision.
+                // raw_href is the href as parsed from the SERP DOM; unwrapped
+                // is what we get after stripping Google's aclk/url redirector;
+                // unwrapped_host is what AnyHostMatches will see; my_domains
+                // is the configured skip set. With this in the log a single
+                // glance tells you whether the guard SHOULD have caught it.
+                var rawHostDiag       = ExtractHost(target.Href);
+                var unwrappedHostDiag = ExtractHost(ctx.CurrentAdHref);
+                var dispHostDiag      = ExtractHost(ctx.CurrentAdDisplayUrl);
+                _log.LogInformation(
+                    "click_ad PRECHECK: ad #{Id} raw_host={Raw} → unwrapped_host={Unwrapped} " +
+                    "display_host={Disp} title={Title} my_domains=[{My}] target_domains=[{T}] block_domains=[{B}]",
+                    target.StampId,
+                    rawHostDiag,
+                    unwrappedHostDiag,
+                    dispHostDiag,
+                    target.Title?.Length > 60 ? target.Title[..60] + "…" : target.Title,
+                    string.Join(",", ctx.MyDomains),
+                    string.Join(",", ctx.TargetDomains),
+                    string.Join(",", ctx.BlockDomains));
+
                 if (await AdParser.IsSelfClickAsync(s, target.Href, ct))
-                    throw new InvalidOperationException(
-                        $"own-domain guard: ad href {target.Href} matches page host");
+                {
+                    _log.LogWarning(
+                        "click_ad SKIP (self-click): ad #{Id} href {Href} matches current page host",
+                        target.StampId, target.Href);
+                    await RecordActionEventAsync(
+                        step, ctx, runId, profileName,
+                        "skipped", "self_click_page_host", 0, null, ct);
+                    break;
+                }
+
+                // ── Pre-click belt-and-braces check ────────────────
+                // Even though the if-condition / per-step filters
+                // already gated this call, we run AnyHostMatches one
+                // more time against MyDomains as a hard last line of
+                // defence. Edge-case: a power user runs a click_ad
+                // step with NO if-gate and NO skip_on_my_domain flag
+                // (the schema doesn't require either). Without this
+                // check, MyDomains config silently has no effect on
+                // such scripts → fraud-click. We make MyDomains a
+                // GLOBAL skip rule that no script can bypass.
+                if (AnyHostMatches(ctx, ctx.MyDomains))
+                {
+                    _log.LogWarning(
+                        "click_ad SKIP (own-domain hard guard): ad #{Id} click_host={ClickHost} " +
+                        "display_host={DispHost} matched MyDomains=[{My}]",
+                        target.StampId,
+                        ExtractHost(ctx.CurrentAdHref),
+                        ExtractHost(ctx.CurrentAdDisplayUrl),
+                        string.Join(",", ctx.MyDomains));
+                    await RecordActionEventAsync(
+                        step, ctx, runId, profileName,
+                        "skipped", "own_domain_hard_guard", 0, null, ct);
+                    break;
+                }
+                if (AnyHostMatches(ctx, ctx.BlockDomains))
+                {
+                    _log.LogWarning(
+                        "click_ad SKIP (block-list): ad #{Id} click_host={ClickHost} " +
+                        "matched BlockDomains=[{B}]",
+                        target.StampId,
+                        ExtractHost(ctx.CurrentAdHref),
+                        string.Join(",", ctx.BlockDomains));
+                    await RecordActionEventAsync(
+                        step, ctx, runId, profileName,
+                        "skipped", "block_list", 0, null, ct);
+                    break;
+                }
+
                 var tier = await AdParser.ClickAsync(s, target, ct);
                 _log.LogInformation("Ad #{Id} clicked via tier {Tier}", target.StampId, tier);
                 ctx.AdsClicked++;
                 counters.AdsClicked++;
+
+                // ── Post-click safety net ──────────────────────────
+                // The pre-click checks rely on inputs that may lie
+                // (Google's redirector hosts, ad networks that
+                // anonymise the destination). The ground-truth comes
+                // AFTER the navigation: location.href on the landing
+                // page. If we ended up on a profile-owned domain, we
+                // just self-clicked our own ad — back out immediately
+                // (close the tab) and log a warning so the user can
+                // grep for the pattern and add the offending tracker
+                // domain to MyDomains. This catches any redirect
+                // chain we couldn't anticipate.
+                try
+                {
+                    // Brief settle so the SPA / redirect chain has
+                    // time to commit a final URL before we sample.
+                    await Task.Delay(800, ct);
+                    var landing = await s.ExecuteScriptAsync(
+                        "return location.href;", null, ct) as string;
+                    if (!string.IsNullOrEmpty(landing)
+                        && Uri.TryCreate(landing, UriKind.Absolute, out var lu))
+                    {
+                        var landingHost = lu.Host.ToLowerInvariant();
+                        if (landingHost.StartsWith("www.")) landingHost = landingHost[4..];
+                        if (DomainMatches(landingHost, ctx.MyDomains))
+                        {
+                            _log.LogWarning(
+                                "POST-CLICK: ad #{Id} landed on own domain '{Host}' — closing tab. " +
+                                "Add the source tracker (click_host={ClickHost}, display={DispHost}) " +
+                                "to MyDomains so the next iteration's pre-check filters it out.",
+                                target.StampId, landingHost,
+                                ExtractHost(ctx.CurrentAdHref),
+                                ExtractHost(ctx.CurrentAdDisplayUrl));
+                            // Close the offending tab so we're back
+                            // on the SERP. ClickAsync may have opened
+                            // a new tab (tier 2/3); window.close() in
+                            // that tab returns to the opener.
+                            try
+                            {
+                                await s.ExecuteScriptAsync(
+                                    "window.close(); history.back();", null, ct);
+                            }
+                            catch { /* best-effort tear-down */ }
+                            // Don't count this as a successful click —
+                            // it shouldn't have happened.
+                            ctx.AdsClicked--;
+                            counters.AdsClicked--;
+                            // Surface to the action-events log so the
+                            // user sees the skip in the analytics view.
+                            await RecordActionEventAsync(
+                                step, ctx, runId, profileName,
+                                "skipped", "post_click_own_domain", 0, null, ct);
+                        }
+                    }
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception postEx)
+                {
+                    // Non-fatal — the safety net itself failing
+                    // shouldn't crash the whole script. Just log.
+                    _log.LogDebug(postEx, "click_ad post-click safety net errored");
+                }
                 // Post-click dwell — let the landing render before
                 // anything next would interact.
                 await Humanizer.IdleAsync(2500, 6000, ct);
@@ -1491,28 +2036,100 @@ public sealed class ScriptRunner : IScriptRunner
             && !step.OnlyOnMyDomain && !step.OnlyOnTarget
             && !step.SkipOnBlocked && !step.OnlyOnBlocked) return false;
 
-        var host = ExtractHost(ctx.CurrentAdHref);
-        var hasAd = !string.IsNullOrEmpty(host);
+        // ── Three-source ad-host matching ──────────────────────────
+        // (1) click host — what the user navigates to (often a
+        //     redirector / partner). Pre-unwrapped in foreach_ad.
+        // (2) display host — the green-text URL Google shows under
+        //     the ad title. Most reliable signal of advertiser ID
+        //     when the click goes through an affiliate tracker.
+        // (3) ad title — last-ditch keyword match. If the ad title
+        //     contains a my-domain root word (e.g. "goodmedika"),
+        //     count it as the user's own ad even when the click /
+        //     display hosts hide that fact.
+        // The gate fires if ANY of these three signals matches the
+        // relevant set — "be over-eager about skip_on_my_domain to
+        // never fraud-click yourself" trumps "be precise" because
+        // the cost of a false-skip (one missed competitor click) is
+        // much smaller than the cost of a self-click.
+        var clickHost = ExtractHost(ctx.CurrentAdHref);
+        var dispHost  = ExtractHost(ctx.CurrentAdDisplayUrl);
+        var hasAd = !string.IsNullOrEmpty(clickHost) || !string.IsNullOrEmpty(dispHost);
 
         // only_on_* gates: when set, REQUIRE the ad to match. When no
         // ad is in scope, treat as "policy not satisfied" → skip.
-        if (step.OnlyOnMyDomain && !(hasAd && DomainMatches(host, ctx.MyDomains)))
+        if (step.OnlyOnMyDomain && !(hasAd && AnyHostMatches(ctx, ctx.MyDomains)))
         { reason = "only_on_my_domain"; return true; }
-        if (step.OnlyOnTarget && !(hasAd && DomainMatches(host, ctx.TargetDomains)))
+        if (step.OnlyOnTarget && !(hasAd && AnyHostMatches(ctx, ctx.TargetDomains)))
         { reason = "only_on_target"; return true; }
-        if (step.OnlyOnBlocked && !(hasAd && DomainMatches(host, ctx.BlockDomains)))
+        if (step.OnlyOnBlocked && !(hasAd && AnyHostMatches(ctx, ctx.BlockDomains)))
         { reason = "only_on_blocked"; return true; }
 
         // skip_on_* gates: only fire when there IS an ad and it
         // matches. With no ad, policy doesn't apply → don't skip.
-        if (step.SkipOnMyDomain && hasAd && DomainMatches(host, ctx.MyDomains))
+        if (step.SkipOnMyDomain && hasAd && AnyHostMatches(ctx, ctx.MyDomains))
         { reason = "skip_on_my_domain"; return true; }
-        if (step.SkipOnTarget && hasAd && DomainMatches(host, ctx.TargetDomains))
+        if (step.SkipOnTarget && hasAd && AnyHostMatches(ctx, ctx.TargetDomains))
         { reason = "skip_on_target"; return true; }
-        if (step.SkipOnBlocked && hasAd && DomainMatches(host, ctx.BlockDomains))
+        if (step.SkipOnBlocked && hasAd && AnyHostMatches(ctx, ctx.BlockDomains))
         { reason = "blocked"; return true; }
 
         return false;
+    }
+
+    /// <summary>
+    /// Triple-source ad-host match: click URL, display URL, ad title
+    /// keyword. Returns true if ANY of the three signals matches a
+    /// domain in <paramref name="set"/>. This is the same logic
+    /// ConditionEvaluator.AdHostMatches uses, plus a third pass
+    /// scanning the ad title for the unqualified domain root (e.g.
+    /// "goodmedika" anywhere in the title matches a "goodmedika.com.ua"
+    /// entry in the set). Keeping the implementation here mirrors the
+    /// per-step filters' code locality with the rest of ScriptRunner.
+    /// </summary>
+    private static bool AnyHostMatches(RunContext ctx, HashSet<string> set)
+    {
+        if (set.Count == 0) return false;
+        var clickHost = ExtractHost(ctx.CurrentAdHref);
+        if (!string.IsNullOrEmpty(clickHost) && DomainMatches(clickHost, set))
+            return true;
+        var dispHost = ExtractHost(ctx.CurrentAdDisplayUrl);
+        if (!string.IsNullOrEmpty(dispHost) && DomainMatches(dispHost, set))
+            return true;
+        // Title keyword scan — strip the TLD/SLD off each entry to get
+        // the brand root (e.g. "goodmedika.com.ua" → "goodmedika"),
+        // then do a case-insensitive substring search in the ad title
+        // and (if available) ad_title var. Only meaningful when the
+        // brand has a distinctive root — generic brands like "shop"
+        // or "store" would over-match, so we require ≥4 chars.
+        if (ctx.Vars.TryGetValue("ad_title", out var title) && !string.IsNullOrEmpty(title))
+        {
+            foreach (var d in set)
+            {
+                var root = DomainRoot(d);
+                if (root.Length < 4) continue;
+                if (title.Contains(root, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// "goodmedika.com.ua" → "goodmedika"; "shop.example.com" → "example";
+    /// "example" → "example". Strips the public-suffix-ish tail by
+    /// taking the leftmost label that's at least 4 chars long. Good
+    /// enough for affiliate-tracker matching; not a full PSL parse.
+    /// </summary>
+    private static string DomainRoot(string domain)
+    {
+        if (string.IsNullOrWhiteSpace(domain)) return "";
+        var d = domain.Trim().ToLowerInvariant();
+        if (d.StartsWith("www.")) d = d[4..];
+        var parts = d.Split('.', StringSplitOptions.RemoveEmptyEntries);
+        // Take the second-to-last label if there's a multi-part domain
+        // (best heuristic for "shop.example.com" → "example"); fall
+        // back to the first-and-only label for bare names.
+        return parts.Length >= 2 ? parts[^2] : parts.FirstOrDefault() ?? "";
     }
 
     /// <summary>
@@ -1609,6 +2226,219 @@ public sealed class ScriptRunner : IScriptRunner
         return h.StartsWith("www.") ? h[4..] : h;
     }
 
+    /// <summary>
+    /// Phase 60 — render the most useful 1-2 params for a step type
+    /// inline with the dispatcher's entry log. Returns either an empty
+    /// string (no useful params) or a leading-space-prefixed bracket
+    /// expression like "  url=…" or "  query='goodmedika' n=2".
+    /// We render a SHORT snapshot — the goal is to make every step
+    /// recognisable at a glance, not to dump every field.
+    /// </summary>
+    private static string StepParamSnapshot(ScriptStep step, RunContext ctx)
+    {
+        string Trim(string? v, int max = 80)
+        {
+            if (string.IsNullOrEmpty(v)) return "";
+            return v.Length <= max ? v : v[..(max - 1)] + "…";
+        }
+
+        var t = step.Type.ToLowerInvariant();
+        var sb = new System.Text.StringBuilder();
+        sb.Append("  ");
+        switch (t)
+        {
+            case "navigate":
+            case "open_url":
+                sb.Append("url=").Append(Trim(InterpolateVars(ParamString(step, "url") ?? "", ctx), 100));
+                break;
+            case "search_query":
+            case "google_search":
+                sb.Append("q='").Append(Trim(InterpolateVars(ParamString(step, "query") ?? "", ctx), 60)).Append("'");
+                var locale = ParamString(step, "locale");
+                if (!string.IsNullOrEmpty(locale)) sb.Append(" hl=").Append(locale);
+                break;
+            case "commercial_inflate":
+                sb.Append("brand='").Append(Trim(InterpolateVars(ParamString(step, "brand") ?? "", ctx), 40)).Append("'")
+                  .Append(" n=").Append(ParamInt(step, "n", 2))
+                  .Append(" click_organic=").Append(ParamBool(step, "click_organic", false));
+                break;
+            case "click":
+            case "click_selector":
+                sb.Append("sel='").Append(Trim(ParamString(step, "selector"), 60)).Append("'");
+                break;
+            case "click_ad":
+                var stamp = ParamInt(step, "stamp_id", -1);
+                sb.Append(stamp >= 0 ? $"stamp_id={stamp}" : "random pick");
+                sb.Append(", parsed_ads=").Append(ctx.Ads.Count);
+                break;
+            case "type":
+            case "fill":
+            case "type_text":
+                sb.Append("sel='").Append(Trim(ParamString(step, "selector"), 50)).Append("' value='")
+                  .Append(Trim(InterpolateVars(ParamString(step, "value") ?? "", ctx), 40)).Append("'");
+                break;
+            case "parse_ads":
+                sb.Append("(scan SERP)");
+                break;
+            case "foreach":
+                sb.Append("var=").Append(ParamString(step, "var") ?? "item")
+                  .Append(", body_steps=").Append(step.Body.Count);
+                break;
+            case "foreach_ad":
+                sb.Append("max_iters=").Append(ParamInt(step, "max", 5))
+                  .Append(", body_steps=").Append(step.Body.Count);
+                break;
+            case "if":
+                sb.Append("cond=").Append(Trim(step.Condition?.ToString(), 50))
+                  .Append(", then=").Append(step.Then.Count)
+                  .Append(", else=").Append(step.Else.Count);
+                break;
+            case "while":
+                sb.Append("cond=").Append(Trim(step.Condition?.ToString(), 50))
+                  .Append(", body=").Append(step.Body.Count);
+                break;
+            case "dwell":
+            case "sleep":
+            case "wait":
+                sb.Append("min=").Append(ParamInt(step, "min", 1000)).Append("ms")
+                  .Append(" max=").Append(ParamInt(step, "max", 3000)).Append("ms");
+                break;
+            case "set_var":
+            case "set":
+                sb.Append("name=").Append(ParamString(step, "name"))
+                  .Append(" value='").Append(Trim(InterpolateVars(ParamString(step, "value") ?? "", ctx), 40)).Append("'");
+                break;
+            case "scroll":
+                sb.Append("dir=").Append(ParamString(step, "direction") ?? "down")
+                  .Append(", px=").Append(ParamInt(step, "amount", 600));
+                break;
+            case "screenshot":
+                sb.Append("name=").Append(ParamString(step, "name") ?? "(auto)");
+                break;
+            case "extension_open":
+                sb.Append("ext=").Append(ParamString(step, "extension_id"))
+                  .Append(", path=").Append(ParamString(step, "path"));
+                break;
+            case "extension_click":
+            case "extension_fill":
+                sb.Append("sel='").Append(Trim(ParamString(step, "selector"), 60)).Append("'");
+                break;
+            case "captcha_solve":
+                sb.Append("kind=").Append(ParamString(step, "kind") ?? "auto");
+                break;
+            case "break":
+            case "continue":
+                sb.Append("(loop control)");
+                break;
+            default:
+                // Unknown step type — show first param key/value to help
+                // identify it in a custom-script log.
+                if (step.Params.Count > 0)
+                {
+                    var first = step.Params.First();
+                    sb.Append(first.Key).Append("=").Append(Trim(first.Value?.ToString(), 40));
+                }
+                else sb.Length = 0; // no useful params, drop the leading space
+                break;
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Record observed ads to the competitor table. Extracted from the
+    /// `parse_ads` case so foreach_ad's per-iteration re-parse can ALSO
+    /// record competitors — without this, runs that use the modern
+    /// foreach_ad architecture (re-parse every lap, no explicit
+    /// `parse_ads` step) silently never populated the Competitors page,
+    /// even when the script clicked dozens of competitor ads.
+    ///
+    /// Skips domains in the user's BlockDomains set, fires the DB
+    /// write fire-and-forget so a slow Sqlite tick doesn't stall the
+    /// script. Errors are logged but never re-thrown.
+    /// </summary>
+    private async Task RecordCompetitorsAsync(
+        IEnumerable<AdRecord> ads, RunContext ctx,
+        long runId, string profileName, CancellationToken ct)
+    {
+        try
+        {
+            var batch = new List<CompetitorRecord>();
+            var capturedAt = DateTime.UtcNow;
+            foreach (var ad in ads)
+            {
+                var host = ExtractHost(ad.Href);
+                if (string.IsNullOrEmpty(host)) continue;
+                if (DomainMatches(host, ctx.BlockDomains)) continue;
+                batch.Add(new CompetitorRecord
+                {
+                    RunId = runId,
+                    ProfileName = profileName,
+                    CapturedAt = capturedAt,
+                    Query = ctx.Vars.TryGetValue("current_query", out var q) ? q : "",
+                    Domain = host,
+                    AdTitle = ad.Title,
+                    DisplayUrl = ad.DisplayUrl,
+                    ClickUrl = ad.Href,
+                });
+            }
+            if (batch.Count > 0)
+            {
+                await _competitors.RecordBatchAsync(batch, ct);
+                _log.LogInformation(
+                    "Recorded {N} competitor observations for run #{R}",
+                    batch.Count, runId);
+            }
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "Failed to record competitor batch");
+        }
+    }
+
+    /// <summary>
+    /// Read window.location.href off the live browser session. Returns
+    /// "" on any failure (driver dead, JS threw, navigation in flight)
+    /// — callers treat empty as "couldn't read" and fall back gracefully.
+    /// Used by foreach_ad's per-iteration resync to detect when a
+    /// click navigated us away from the SERP.
+    /// </summary>
+    private static async Task<string> GetCurrentUrlAsync(IBrowserSession s, CancellationToken ct)
+    {
+        try
+        {
+            var url = await s.ExecuteScriptAsync("return location.href;", null, ct) as string;
+            return url ?? "";
+        }
+        catch
+        {
+            return "";
+        }
+    }
+
+    /// <summary>
+    /// "Are we on the SAME SERP page" — host + path equality, ignoring
+    /// query string differences (Google appends &amp;sxsrf=, &amp;ei=,
+    /// session tokens per request that change every refresh) and
+    /// ignoring fragment. Both sides empty → false; one side empty →
+    /// false. We can't compare full URLs because Google would always
+    /// look "different" between page reloads.
+    ///
+    /// Trade-off: we accept that "/search" + "/search" matches even
+    /// when the QUERY differs (q=goodmedika vs q=other). Inside
+    /// foreach_ad we entered the loop on a SERP for one specific
+    /// query, so a different /search?q=... would be a script bug
+    /// (someone navigated mid-loop) — better to navigate back to the
+    /// captured serpUrl than to keep iterating on the wrong page.
+    /// </summary>
+    private static bool IsSameSerpPage(string a, string b)
+    {
+        if (string.IsNullOrEmpty(a) || string.IsNullOrEmpty(b)) return false;
+        if (!Uri.TryCreate(a, UriKind.Absolute, out var ua)) return false;
+        if (!Uri.TryCreate(b, UriKind.Absolute, out var ub)) return false;
+        return string.Equals(ua.Host, ub.Host, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(ua.AbsolutePath, ub.AbsolutePath, StringComparison.OrdinalIgnoreCase);
+    }
+
     /// <summary>True if <paramref name="host"/> matches one of
     /// <paramref name="set"/> (exact host or any registered suffix
     /// match — ".example.com" entries cover sub-domains).</summary>
@@ -1648,12 +2478,33 @@ public sealed class ScriptRunner : IScriptRunner
             {
                 case string s when s.StartsWith("$"):
                     if (ctx.Vars.TryGetValue(s[1..], out var v))
-                        return v.Split(',', StringSplitOptions.RemoveEmptyEntries
-                                          | StringSplitOptions.TrimEntries);
+                        return SplitItemsString(v);
                     return Array.Empty<string>();
                 case string s:
-                    return s.Split(',', StringSplitOptions.RemoveEmptyEntries
-                                       | StringSplitOptions.TrimEntries);
+                    return SplitItemsString(s);
+
+                // System.Text.Json deserialises `IReadOnlyDictionary<string, object?>`
+                // values as JsonElement (NOT raw .NET types), so a JSON string
+                // like `"items": "a\nb\nc"` lands here as
+                // `JsonElement{ValueKind=String}`. Without these two cases
+                // the switch fell through to `Array.Empty<string>()` and the
+                // foreach silently iterated zero times — exactly the
+                // symptom of "browser launches, lands on chrome://new-tab,
+                // never navigates". The $varname prefix is honoured here
+                // too so dynamic refs work whether the value arrived as a
+                // raw string (older code paths) or a JsonElement (the
+                // normal deserialised path).
+                case JsonElement el when el.ValueKind == JsonValueKind.String:
+                {
+                    var s = el.GetString() ?? "";
+                    if (s.StartsWith("$"))
+                    {
+                        return ctx.Vars.TryGetValue(s[1..], out var v2)
+                            ? SplitItemsString(v2)
+                            : Array.Empty<string>();
+                    }
+                    return SplitItemsString(s);
+                }
                 case JsonElement el when el.ValueKind == JsonValueKind.Array:
                     return el.EnumerateArray()
                              .Select(e => e.ValueKind == JsonValueKind.String
@@ -1667,6 +2518,24 @@ public sealed class ScriptRunner : IScriptRunner
         }
         return Array.Empty<string>();
     }
+
+    /// <summary>
+    /// Split a free-form items string on commas, newlines, and
+    /// carriage returns. The legacy web project's UI offered a
+    /// textarea where users typed one keyword per line; ours kept
+    /// the same semantic but the original splitter only honoured
+    /// commas, so a newline-delimited list collapsed into one
+    /// giant item with embedded `\n` characters — the foreach then
+    /// iterated once with a malformed value (e.g. a search URL
+    /// containing literal newlines), the SERP returned no ads, and
+    /// the rest of the script silently no-op'd. Phase 38 fix:
+    /// split on `, \n \r` together so all three layouts work
+    /// (CSV, single-line, multiline).
+    /// </summary>
+    private static string[] SplitItemsString(string s)
+        => s.Split(new[] { ',', '\n', '\r' },
+                   StringSplitOptions.RemoveEmptyEntries
+                 | StringSplitOptions.TrimEntries);
 
     /// <summary>
     /// Pull a column out of a CSV file for foreach iteration. Honours
@@ -1854,6 +2723,17 @@ public sealed class ScriptRunner : IScriptRunner
         System.Text.RegularExpressions.RegexOptions.Compiled,
         TimeSpan.FromMilliseconds(200));
 
+    /// <summary>
+    /// Phase 69 — alias form, profile-scoped: <c>{{vault.SEED}}</c>.
+    /// One identifier (no dot-separated path), letters/digits/underscore.
+    /// Resolved via <see cref="GhostShell.Core.Models.VaultAliases"/>
+    /// catalog + per-profile vault item lookup at run start.
+    /// </summary>
+    private static readonly System.Text.RegularExpressions.Regex VaultAliasPattern = new(
+        @"\{\{\s*vault\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}",
+        System.Text.RegularExpressions.RegexOptions.Compiled,
+        TimeSpan.FromMilliseconds(200));
+
     private static string InterpolateVars(string src, RunContext ctx)
     {
         if (string.IsNullOrEmpty(src)) return src;
@@ -1873,6 +2753,22 @@ public sealed class ScriptRunner : IScriptRunner
                     var field = m.Groups[2].Value;
                     if (!ctx.Vault.TryGetValue(id, out var bag)) return m.Value;
                     if (!bag.TryGetValue(field, out var v))      return m.Value;
+                    if (v.Length > MaxInterpolatedValue)
+                        v = v[..MaxInterpolatedValue];
+                    return v;
+                });
+            }
+            // Phase 69 — alias form: {{vault.SEED}} → profile-bound
+            // crypto_wallet.seed_phrase. Resolved aliases live in
+            // ctx.VaultAliases (alias→cleartext) — populated by the
+            // runner BEFORE script execution from a single
+            // ResolveAliasesAsync round-trip.
+            if (ctx.VaultAliases.Count > 0)
+            {
+                src = VaultAliasPattern.Replace(src, m =>
+                {
+                    var alias = m.Groups[1].Value;
+                    if (!ctx.VaultAliases.TryGetValue(alias, out var v)) return m.Value;
                     if (v.Length > MaxInterpolatedValue)
                         v = v[..MaxInterpolatedValue];
                     return v;
@@ -1913,6 +2809,34 @@ public sealed class ScriptRunner : IScriptRunner
             }
         }
         return seen.Select(x => (x.Item1, x.Item2)).ToList();
+    }
+
+    /// <summary>
+    /// Phase 69 — companion to <see cref="CollectVaultRefs"/>: scan the
+    /// script's JSON for <c>{{vault.ALIAS}}</c> single-identifier
+    /// placeholders. The runner passes the result to
+    /// <c>IVaultService.ResolveAliasesAsync(profileName, aliases)</c>
+    /// at run start so all profile-bound credentials materialise in
+    /// one round-trip. Aliases are case-insensitive but de-duped to
+    /// the canonical form from <see cref="GhostShell.Core.Models.VaultAliases.All"/>.
+    /// Unknown aliases are silently dropped — the placeholder will
+    /// fall through to literal text at interpolation time, which the
+    /// user can grep for in the log to identify typos.
+    /// </summary>
+    public static IReadOnlyList<string> CollectVaultAliases(params string?[] jsonPayloads)
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var json in jsonPayloads)
+        {
+            if (string.IsNullOrEmpty(json)) continue;
+            foreach (System.Text.RegularExpressions.Match m in VaultAliasPattern.Matches(json))
+            {
+                var alias = m.Groups[1].Value;
+                if (GhostShell.Core.Models.VaultAliases.IsKnown(alias))
+                    seen.Add(alias);
+            }
+        }
+        return seen.ToList();
     }
 
     private static string? ParamString(ScriptStep step, string key)
@@ -1984,11 +2908,16 @@ public sealed class ScriptRunner : IScriptRunner
     }
 
     /// <summary>
-    /// Hard-abort signal — only used when a step has
-    /// <c>abort_on_error=true</c> and threw. Walks all the way out
-    /// of nested loops/conditions to the top-level executor.
+    /// Hard-abort signal — used when a step has
+    /// <c>abort_on_error=true</c> and threw, OR when the browser
+    /// session dies mid-run (NoSuchWindow, proxy timeout). Walks all
+    /// the way out of nested loops/conditions to the top-level executor.
+    /// Phase 61c — promoted to public so the abort is visible to the
+    /// caller (RealProfileRunner) which previously couldn't tell
+    /// "script ran cleanly" from "script aborted because the browser
+    /// died" — both reached the same successful-completion code path.
     /// </summary>
-    private sealed class ScriptAbortException : Exception
+    public sealed class ScriptAbortException : Exception
     {
         public ScriptAbortException(string m) : base(m) { }
     }

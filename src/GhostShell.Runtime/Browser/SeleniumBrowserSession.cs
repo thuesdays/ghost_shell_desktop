@@ -176,19 +176,39 @@ internal sealed class SeleniumBrowserSession : IBrowserSession
         IEnumerable<string> origins, CancellationToken ct = default) =>
         Task.Run<IReadOnlyList<StorageEntry>>(() =>
         {
+            // Phase 50 — CDP DOMStorage instead of per-origin navigation.
+            //
+            // OLD behaviour: navigate to https://origin, then eval
+            // localStorage. For a 50-domain profile that's 50 page
+            // loads = ~45 seconds + visible "chaotic page opening"
+            // for the user. Every snapshot save did this.
+            //
+            // NEW behaviour: enable CDP DOMStorage domain ONCE, then
+            // call DOMStorage.getDOMStorageItems for each (origin,
+            // isLocalStorage) pair. Zero page loads, runs entirely
+            // through DevTools protocol — invisible to the user.
+            //
+            // Compatibility note: getDOMStorageItems works for ANY
+            // security origin Chrome has data for, even origins
+            // we've never visited in THIS session — Chrome reads
+            // straight from the on-disk leveldb store.
             var result = new List<StorageEntry>();
+            if (_driver is not ChromeDriver chromeDriver) return result;
+            try { chromeDriver.ExecuteCdpCommand("DOMStorage.enable", new Dictionary<string, object>()); }
+            catch (Exception ex)
+            {
+                _log.LogDebug(ex, "DOMStorage.enable failed — falling through with empty result");
+                return result;
+            }
             foreach (var origin in origins.Distinct(StringComparer.OrdinalIgnoreCase))
             {
                 if (ct.IsCancellationRequested) break;
                 try
                 {
                     if (!IsHttpOrigin(origin)) continue;
-                    NavigateWithBudget(origin, TimeSpan.FromSeconds(12));
-
-                    var local   = ReadStorageDict("localStorage");
-                    var session = ReadStorageDict("sessionStorage");
+                    var local   = ReadStorageViaCdp(chromeDriver, origin, isLocalStorage: true);
+                    var session = ReadStorageViaCdp(chromeDriver, origin, isLocalStorage: false);
                     if (local.Count == 0 && session.Count == 0) continue;
-
                     result.Add(new StorageEntry
                     {
                         Origin         = origin,
@@ -204,9 +224,63 @@ internal sealed class SeleniumBrowserSession : IBrowserSession
             return result;
         }, ct);
 
+    /// <summary>
+    /// Read DOMStorage entries for (origin, isLocalStorage) via CDP
+    /// — no navigation needed. The CDP response shape is:
+    ///   { "entries": [["key1","val1"], ["key2","val2"], ...] }
+    /// where entries[N] is either a List&lt;object&gt; or an
+    /// object[] depending on the Selenium driver version. Both are
+    /// IEnumerable&lt;object&gt; with [0]=key, [1]=value as strings.
+    /// </summary>
+    private static Dictionary<string, string> ReadStorageViaCdp(
+        ChromeDriver driver, string origin, bool isLocalStorage)
+    {
+        var dict = new Dictionary<string, string>();
+        try
+        {
+            var storageId = new Dictionary<string, object>
+            {
+                ["securityOrigin"] = origin,
+                ["isLocalStorage"] = isLocalStorage,
+            };
+            var args = new Dictionary<string, object> { ["storageId"] = storageId };
+            var resp = driver.ExecuteCdpCommand("DOMStorage.getDOMStorageItems", args)
+                       as IDictionary<string, object>;
+            if (resp is null) return dict;
+            if (!resp.TryGetValue("entries", out var entriesObj)) return dict;
+            if (entriesObj is not System.Collections.IEnumerable entries) return dict;
+            foreach (var entry in entries)
+            {
+                if (entry is not System.Collections.IList kv) continue;
+                if (kv.Count < 2) continue;
+                var key = kv[0]?.ToString() ?? "";
+                var val = kv[1]?.ToString() ?? "";
+                if (!string.IsNullOrEmpty(key)) dict[key] = val;
+            }
+        }
+        catch
+        {
+            // Per-origin failures are non-fatal. ICU errors / origin
+            // not in store / DOMStorage temporarily unavailable —
+            // empty dict is the safe default.
+        }
+        return dict;
+    }
+
     public Task SetStorageAsync(IEnumerable<StorageEntry> entries, CancellationToken ct = default) =>
         Task.Run(() =>
         {
+            // Phase 50 — CDP DOMStorage.setDOMStorageItem instead of
+            // per-origin navigation + JS. Zero page loads to write
+            // hundreds of localStorage entries across dozens of
+            // origins. Same trade-off as GetStorageAsync above.
+            if (_driver is not ChromeDriver chromeDriver) return;
+            try { chromeDriver.ExecuteCdpCommand("DOMStorage.enable", new Dictionary<string, object>()); }
+            catch (Exception ex)
+            {
+                _log.LogDebug(ex, "DOMStorage.enable failed — storage restore skipped");
+                return;
+            }
             foreach (var e in entries)
             {
                 if (ct.IsCancellationRequested) return;
@@ -215,9 +289,10 @@ internal sealed class SeleniumBrowserSession : IBrowserSession
 
                 try
                 {
-                    NavigateWithBudget(e.Origin, TimeSpan.FromSeconds(12));
-                    WriteStorageDict("localStorage",   e.LocalStorage);
-                    WriteStorageDict("sessionStorage", e.SessionStorage);
+                    foreach (var kv in e.LocalStorage)
+                        WriteStorageViaCdp(chromeDriver, e.Origin, true, kv.Key, kv.Value);
+                    foreach (var kv in e.SessionStorage)
+                        WriteStorageViaCdp(chromeDriver, e.Origin, false, kv.Key, kv.Value);
                 }
                 catch (Exception ex)
                 {
@@ -225,6 +300,39 @@ internal sealed class SeleniumBrowserSession : IBrowserSession
                 }
             }
         }, ct);
+
+    /// <summary>
+    /// Write a single (key, value) into the DOMStorage entry table
+    /// for (origin, isLocalStorage) via CDP. Per-key call because
+    /// CDP's setDOMStorageItem takes a single pair; high-volume
+    /// storage restore (hundreds of items) still adds zero page
+    /// loads — each call is a small DevTools round-trip (&lt;5ms).
+    /// </summary>
+    private static void WriteStorageViaCdp(
+        ChromeDriver driver, string origin, bool isLocalStorage, string key, string value)
+    {
+        try
+        {
+            var storageId = new Dictionary<string, object>
+            {
+                ["securityOrigin"] = origin,
+                ["isLocalStorage"] = isLocalStorage,
+            };
+            var args = new Dictionary<string, object>
+            {
+                ["storageId"] = storageId,
+                ["key"]       = key,
+                ["value"]     = value,
+            };
+            driver.ExecuteCdpCommand("DOMStorage.setDOMStorageItem", args);
+        }
+        catch
+        {
+            // Per-key write failures are non-fatal; the rest of the
+            // restore continues. Common cause: origin's storage was
+            // disabled by a Chrome policy.
+        }
+    }
 
     public Task<object?> ExecuteScriptAsync(
         string script, object[]? args = null, CancellationToken ct = default) =>
@@ -240,6 +348,35 @@ internal sealed class SeleniumBrowserSession : IBrowserSession
             return args is { Length: > 0 } a
                 ? js.ExecuteScript(script, a)
                 : js.ExecuteScript(script);
+        }, ct);
+
+    public Task<IReadOnlyList<string>> GetWindowHandlesAsync(CancellationToken ct = default) =>
+        Task.Run<IReadOnlyList<string>>(() =>
+        {
+            // Selenium is sync — offload to thread pool. WindowHandles
+            // is cheap (~5ms) but we keep the same off-thread pattern
+            // as ExecuteScriptAsync to avoid blocking the recorder
+            // poll loop's UI thread continuation.
+            if (_driver is null) return Array.Empty<string>();
+            return _driver.WindowHandles.ToList();
+        }, ct);
+
+    public Task<string> GetCurrentWindowHandleAsync(CancellationToken ct = default) =>
+        Task.Run(() => _driver?.CurrentWindowHandle ?? "", ct);
+
+    public Task SwitchToWindowAsync(string handle, CancellationToken ct = default) =>
+        Task.Run(() =>
+        {
+            if (_driver is null || string.IsNullOrEmpty(handle)) return;
+            try { _driver.SwitchTo().Window(handle); }
+            catch (OpenQA.Selenium.NoSuchWindowException)
+            {
+                // Caller is expected to re-enumerate after a NoSuchWindow.
+                // Swallow rather than throw — the recorder's per-tick
+                // window enumeration tolerates a window vanishing
+                // between snapshot and switch (extension popups close
+                // mid-poll all the time).
+            }
         }, ct);
 
     public Task<string> CaptureScreenshotAsync(string path, CancellationToken ct = default) =>

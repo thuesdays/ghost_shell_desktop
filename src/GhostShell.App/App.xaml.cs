@@ -18,6 +18,7 @@ using GhostShell.Runtime;
 using GhostShell.Runtime.Browser;
 using GhostShell.Runtime.Diagnostics;
 using GhostShell.Runtime.ProxyAuth;
+using GhostShell.Runtime.Queue;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -199,6 +200,12 @@ public partial class App : Application
     {
         BootTrace("Building host");
 
+        // Show splash screen before anything else. It will remain visible
+        // and update with progress as we initialize services and the DB.
+        var splash = new Views.SplashWindow();
+        splash.Show();
+        splash.SetProgress(5, "Initializing…");
+
         Host = Microsoft.Extensions.Hosting.Host.CreateDefaultBuilder()
             .UseGhostShellLogging()
             .ConfigureServices((_, s) =>
@@ -213,9 +220,15 @@ public partial class App : Application
                 // Background runner (Phase 1 stub)
                 s.AddHostedService<RunnerHost>();
 
-                // Diagnostics: Phase 2 ships a deterministic stub.
-                // Phase 3 swaps in a real HttpClient-based probe.
-                s.AddSingleton<IProxyTester, StubProxyTester>();
+                // Diagnostics: Phase 61 — real proxy tester with TCP
+                // reachability + HTTP/SOCKS5/SOCKS4 auto-detect against
+                // ip-api.com. Replaced the deterministic StubProxyTester
+                // which always returned "ok" with random metadata, masking
+                // dead/wrong-protocol proxies until the actual browser
+                // launch failed with ERR_PROXY_CONNECTION_FAILED. The new
+                // probe mirrors what the browser will do at launch time
+                // and surfaces per-scheme attempts in the diagnostic log.
+                s.AddSingleton<IProxyTester, HttpProxyTester>();
 
                 // ─── Phase 3: real browser pipeline ──────────────
                 // ChromiumLocator finds the patched build on disk;
@@ -266,6 +279,23 @@ public partial class App : Application
                 // ─── Phase 12: Scripts (model + runner) ─────────
                 s.AddSingleton<IScriptRunner, GhostShell.Runtime.Scripts.ScriptRunner>();
 
+                // ─── Phase 63: Browser Action Recorder ──────────
+                // Singleton — only one recording at a time across the
+                // app. ScriptRecorder hooks into a live IBrowserSession
+                // via JS injection + polling, generates ScriptStep[]
+                // from user gestures.
+                s.AddSingleton<IScriptRecorder, GhostShell.Runtime.Recording.ScriptRecorder>();
+
+                // ─── Phase 64: Run Queue ────────────────────────
+                // In-memory dispatcher for staggered bulk starts.
+                // Registered as both IRunQueueService (for VMs) and
+                // IHostedService (so the dispatcher loop runs).
+                s.AddSingleton<RunQueueService>();
+                s.AddSingleton<IRunQueueService>(sp =>
+                    sp.GetRequiredService<RunQueueService>());
+                s.AddHostedService(sp =>
+                    sp.GetRequiredService<RunQueueService>());
+
                 // ─── Phase 13F: Captcha auto-solve (manual default) ───
                 // Phase 14: 2captcha integration available — set
                 // TwoCaptchaConfig.ApiKey via Settings to switch.
@@ -301,6 +331,7 @@ public partial class App : Application
                 s.AddSingleton<SettingsViewModel>();
                 s.AddSingleton<FingerprintViewModel>();
                 s.AddSingleton<ScriptsViewModel>();
+                s.AddSingleton<QueueViewModel>();   // Phase 64
                 s.AddSingleton<VaultViewModel>();
                 s.AddSingleton<ExtensionsViewModel>();
                 s.AddSingleton<DomainsViewModel>();
@@ -352,11 +383,15 @@ public partial class App : Application
 
         bootLogger.LogInformation("════════════════════════════════════════════════════════════");
 
+        // Update splash: migrations about to start.
+        splash.SetProgress(20, "Opening database…");
+
         try
         {
             // Apply migrations BEFORE the first VM resolves a service
             // that touches the DB — otherwise OverviewViewModel's
             // OnNavigatedToAsync would race against schema creation.
+            splash.SetProgress(30, "Migrating schema…");
             Host.Services.GetRequiredService<MigrationRunner>().Run();
 
             // Phase 31 hot-fix — repair stale ext_id values left over
@@ -385,7 +420,13 @@ public partial class App : Application
             return;
         }
 
+        // Update splash: services loading, about to start host.
+        splash.SetProgress(50, "Loading services…");
+
         await Host.StartAsync();
+
+        // Update splash: host started, building UI.
+        splash.SetProgress(70, "Initializing UI…");
 
         // ─── Window creation guard ──────────────────────────────────
         // OnStartup is `async void`, so an exception inside MainWindow
@@ -398,11 +439,100 @@ public partial class App : Application
         // process exits cleanly.
         try
         {
+            // Update splash: almost ready.
+            splash.SetProgress(90, "Almost ready…");
+
             var window = new MainWindow
             {
                 DataContext = Host.Services.GetRequiredService<MainViewModel>(),
             };
             MainWindow = window;
+
+            // Close splash once the main window is shown.
+            //
+            // Phase 69b — the previous Loaded-based approach was unreliable.
+            // Two chronic failure modes we observed in the wild:
+            //
+            //   1. After ShowInTaskbar toggling on tray-minimize, WPF would
+            //      recreate the HWND and re-fire Window.Loaded. The replayed
+            //      handler hit splash.BeginAnimation on a long-Closed Window
+            //      and (perversely) resurrected its visual.
+            //   2. On some setups the fade animation never fired Completed
+            //      (e.g. when the dispatcher was busy during boot), leaving
+            //      the splash Window alive indefinitely. As soon as the user
+            //      hid the MainWindow to tray, the splash — which was never
+            //      Close()d — became the only visible app window.
+            //
+            // The new path is paranoid:
+            //   • Subscribe to ContentRendered BEFORE Show() — that's the
+            //     most reliable "first paint complete" signal in WPF and
+            //     fires after Show() schedules the first frame.
+            //   • A single-fire CloseSplashOnce() helper guarded by a flag,
+            //     so re-entries from any source (re-fired event, race with
+            //     fallback timer, exception path) become no-ops.
+            //   • A 5-second DispatcherTimer fallback that force-closes the
+            //     splash even if ContentRendered never arrives. We'd rather
+            //     show a momentarily empty desktop than a stuck splash.
+            //   • No animation, no Opacity tween — Close() runs synchronously
+            //     after a tiny perceptual beat at 100%.
+            //   • All references (handler delegate, timer) are nulled after
+            //     the close so nothing hangs onto the splash Window.
+            var splashClosed = false;
+            EventHandler? contentRenderedHandler = null;
+            System.Windows.Threading.DispatcherTimer? splashFallback = null;
+
+            void CloseSplashOnce()
+            {
+                if (splashClosed) return;
+                splashClosed = true;
+                try
+                {
+                    if (contentRenderedHandler is not null)
+                        window.ContentRendered -= contentRenderedHandler;
+                }
+                catch { /* unsubscribe failures don't matter — flag is the real guard */ }
+                contentRenderedHandler = null;
+
+                try
+                {
+                    splashFallback?.Stop();
+                }
+                catch { /* timer may already be torn down */ }
+                splashFallback = null;
+
+                try
+                {
+                    splash.SetProgress(100, "Ready");
+                    splash.Hide();
+                    splash.Close();
+                }
+                catch (Exception splashEx)
+                {
+                    bootLogger.LogWarning(splashEx, "Splash close failed (non-fatal)");
+                }
+            }
+
+            contentRenderedHandler = (_, _) => CloseSplashOnce();
+            window.ContentRendered += contentRenderedHandler;
+
+            // Belt-and-braces: even if ContentRendered never fires (rare
+            // dispatcher-starvation cases observed during slow startups),
+            // force-close after 5s. Any subsequent ContentRendered will
+            // hit splashClosed=true and no-op.
+            splashFallback = new System.Windows.Threading.DispatcherTimer
+            {
+                Interval = TimeSpan.FromSeconds(5),
+            };
+            splashFallback.Tick += (_, _) =>
+            {
+                bootLogger.LogWarning("Splash close fallback timer fired — ContentRendered didn't arrive in 5s");
+                CloseSplashOnce();
+            };
+            splashFallback.Start();
+
+            // NOW show the window — by this point ContentRendered has a
+            // subscriber, the fallback timer is armed, and the splash will
+            // definitely close one way or another.
             window.Show();
 
             // Phase 26 — start the auto-lock idle watcher only after

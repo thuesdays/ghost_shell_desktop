@@ -15,21 +15,37 @@
              Background="Transparent">
 
     <UserControl.Resources>
+        <!-- Phase 52 — context menu width fix. User reported menu was too narrow
+             and had a "strange line" (the Separator). Set MinWidth="160" to give
+             Edit and Delete buttons breathing room. Remove Separator between items
+             as they're visually distinct enough on hover. Increase MenuItem padding
+             for better breathing room inside menu items. -->
         <ContextMenu x:Key="ProxyRowMenu"
-                     DataContext="{Binding DataContext, Source={x:Reference PageRoot}}">
+                     DataContext="{Binding DataContext, Source={x:Reference PageRoot}}"
+                     MinWidth="160">
+            <ContextMenu.Resources>
+                <!-- Hide separators globally in this menu — the items are
+                     visually distinct on hover, no need for explicit dividers. -->
+                <Style TargetType="Separator">
+                    <Setter Property="Visibility" Value="Collapsed"/>
+                </Style>
+            </ContextMenu.Resources>
             <MenuItem Header="Test now"
                       Command="{Binding TestOneCommand}"
                       CommandParameter="{Binding RelativeSource={RelativeSource AncestorType=ContextMenu},
-                                                  Path=PlacementTarget.DataContext}"/>
+                                                  Path=PlacementTarget.DataContext}"
+                      Padding="12,6"/>
             <MenuItem Header="Edit…"
                       Command="{Binding EditCommand}"
                       CommandParameter="{Binding RelativeSource={RelativeSource AncestorType=ContextMenu},
-                                                  Path=PlacementTarget.DataContext}"/>
+                                                  Path=PlacementTarget.DataContext}"
+                      Padding="12,6"/>
             <Separator/>
             <MenuItem Header="Delete"
                       Command="{Binding DeleteCommand}"
                       CommandParameter="{Binding RelativeSource={RelativeSource AncestorType=ContextMenu},
-                                                  Path=PlacementTarget.DataContext}"/>
+                                                  Path=PlacementTarget.DataContext}"
+                      Padding="12,6"/>
         </ContextMenu>
     </UserControl.Resources>
 
@@ -136,7 +152,38 @@
                         </DataGrid.RowStyle>
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="NAME"     Binding="{Binding Name}"        Width="*" IsReadOnly="True"/>
-                            <DataGridTextColumn Header="STATUS"   Binding="{Binding Health}"      Width="80" IsReadOnly="True"/>
+                            <!-- Phase 52 — coloured status pill so user can scan the grid for
+                                 failed proxies without reading text. Match the verdict-ellipse
+                                 pattern from FingerprintView's external testers. Green=Healthy,
+                                 Red=Critical, Orange=Warning, Grey=Unknown. Ellipse precedes
+                                 text in a horizontal StackPanel for compact scanning. -->
+                            <DataGridTemplateColumn Header="STATUS" Width="80" IsReadOnly="True">
+                                <DataGridTemplateColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="4,0">
+                                            <Ellipse Width="8" Height="8" VerticalAlignment="Center" Margin="0,0,6,0">
+                                                <Ellipse.Style>
+                                                    <Style TargetType="Ellipse">
+                                                        <Setter Property="Fill" Value="{StaticResource TextDim}"/>
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding Health}" Value="Healthy">
+                                                                <Setter Property="Fill" Value="{StaticResource OkBrush}"/>
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding Health}" Value="Critical">
+                                                                <Setter Property="Fill" Value="{StaticResource ErrBrush}"/>
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding Health}" Value="Warning">
+                                                                <Setter Property="Fill" Value="{StaticResource WarnBrush}"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </Ellipse.Style>
+                                            </Ellipse>
+                                            <TextBlock Text="{Binding Health}" VerticalAlignment="Center"/>
+                                        </StackPanel>
+                                    </DataTemplate>
+                                </DataGridTemplateColumn.CellTemplate>
+                            </DataGridTemplateColumn>
                             <DataGridTextColumn Header="URL"      Binding="{Binding Url}"         Width="2*" IsReadOnly="True">
                                 <DataGridTextColumn.ElementStyle>
                                     <Style TargetType="TextBlock"

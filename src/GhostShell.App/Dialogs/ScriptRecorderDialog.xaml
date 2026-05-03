@@ -1,0 +1,203 @@
+<!--
+  SPDX-License-Identifier: MIT
+  Copyright (c) 2026 Mykola Kovhanko <thuesdays@gmail.com>
+
+  Phase 63 — Browser Action Recorder dialog. Opens a profile in a
+  visible Chromium window, attaches the recorder, shows captured
+  steps live in a list, and saves the result as a new Script when
+  the user clicks Stop.
+-->
+<Window x:Class="GhostShell.App.Dialogs.ScriptRecorderDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Record browser actions"
+        Width="780" Height="640"
+        WindowStartupLocation="CenterOwner"
+        Background="{DynamicResource BgBase}"
+        ShowInTaskbar="False">
+
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>     <!-- Header -->
+            <RowDefinition Height="Auto"/>     <!-- Setup row (profile + URL) -->
+            <RowDefinition Height="Auto"/>     <!-- Status banner -->
+            <RowDefinition Height="*"/>        <!-- Captured steps list -->
+            <RowDefinition Height="Auto"/>     <!-- Footer buttons -->
+        </Grid.RowDefinitions>
+
+        <!-- Header -->
+        <StackPanel Grid.Row="0" Orientation="Vertical" Margin="0,0,0,18">
+            <TextBlock Text="🎬  Record browser actions"
+                       FontSize="18" FontWeight="Bold"
+                       Foreground="{DynamicResource TextPrimary}"/>
+            <TextBlock Text="Pick a profile + start URL, click Start. Interact with the browser; every click, type, scroll, and navigation is captured into a new script. Stop when done — review steps, then Save."
+                       FontSize="11.5"
+                       Foreground="{DynamicResource TextDim}"
+                       TextWrapping="Wrap" Margin="0,4,0,0"/>
+        </StackPanel>
+
+        <!-- Setup -->
+        <Grid Grid.Row="1" IsEnabled="{Binding IsIdle}" Margin="0,0,0,12">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+
+            <StackPanel Grid.Column="0" Margin="0,0,8,0">
+                <TextBlock Text="Profile"
+                           FontSize="11"
+                           Foreground="{DynamicResource TextDim}"
+                           Margin="0,0,0,4"/>
+                <ComboBox ItemsSource="{Binding ProfileNames}"
+                          SelectedItem="{Binding SelectedProfile, Mode=TwoWay}"
+                          MinWidth="220"
+                          Padding="6,4"/>
+            </StackPanel>
+
+            <StackPanel Grid.Column="1" Margin="8,0,8,0">
+                <TextBlock Text="Start URL"
+                           FontSize="11"
+                           Foreground="{DynamicResource TextDim}"
+                           Margin="0,0,0,4"/>
+                <TextBox Text="{Binding StartUrl, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                         Padding="6,4"/>
+            </StackPanel>
+
+            <Button Grid.Column="2"
+                    Content="●  Start recording"
+                    Command="{Binding StartCommand}"
+                    Background="#FFEF4444" Foreground="White" FontWeight="SemiBold"
+                    Padding="14,6" MinWidth="160"
+                    VerticalAlignment="Bottom"/>
+        </Grid>
+
+        <!-- Status banner — only visible while recording -->
+        <Border Grid.Row="2"
+                Visibility="{Binding IsRecording, Converter={StaticResource BoolToVis}}"
+                Background="#26EF4444"
+                BorderBrush="#FFEF4444" BorderThickness="0,0,0,2"
+                CornerRadius="6"
+                Padding="12,8" Margin="0,0,0,12">
+            <StackPanel Orientation="Horizontal">
+                <Ellipse Width="10" Height="10" Fill="#FFEF4444" VerticalAlignment="Center"/>
+                <TextBlock Margin="10,0,0,0" VerticalAlignment="Center" Foreground="White">
+                    <Run Text="REC"/>
+                    <Run Text="·"/>
+                    <Run Text="{Binding StatusLine, Mode=OneWay}" FontWeight="SemiBold"/>
+                </TextBlock>
+                <Button Content="⏸  Pause" Command="{Binding PauseCommand}"
+                        Margin="20,0,0,0" Padding="10,3"
+                        Visibility="{Binding IsPaused, Converter={StaticResource InverseBoolToVis}}"/>
+                <Button Content="▶  Resume" Command="{Binding ResumeCommand}"
+                        Margin="20,0,0,0" Padding="10,3"
+                        Visibility="{Binding IsPaused, Converter={StaticResource BoolToVis}}"/>
+                <Button Content="⏹  Stop" Command="{Binding StopCommand}"
+                        Margin="8,0,0,0" Padding="10,3" Background="#FFEF4444" Foreground="White"/>
+            </StackPanel>
+        </Border>
+
+        <!-- Captured steps list -->
+        <Border Grid.Row="3"
+                Background="{DynamicResource BgRaised}"
+                BorderBrush="{DynamicResource Border}" BorderThickness="1"
+                CornerRadius="8">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <Grid Grid.Row="0" Margin="14,10,14,8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="Captured steps" Grid.Column="0"
+                               FontSize="12" FontWeight="SemiBold"
+                               Foreground="{DynamicResource TextPrimary}"/>
+                    <TextBlock Grid.Column="1"
+                               FontSize="11"
+                               Foreground="{DynamicResource TextDim}">
+                        <Run Text="{Binding CapturedCount, Mode=OneWay}"/>
+                        <Run Text="step(s)"/>
+                    </TextBlock>
+                </Grid>
+
+                <ListBox Grid.Row="1"
+                         ItemsSource="{Binding CapturedSteps}"
+                         Background="Transparent"
+                         BorderThickness="0"
+                         Margin="6,0,6,6"
+                         ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                         VirtualizingPanel.IsVirtualizing="True"
+                         VirtualizingPanel.VirtualizationMode="Recycling">
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <Grid Margin="6,3" >
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="60"/>
+                                    <ColumnDefinition Width="80"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0"
+                                           Text="{Binding Index, StringFormat='#{0}'}"
+                                           Foreground="{DynamicResource TextDim}"
+                                           FontFamily="Cascadia Code, Consolas"
+                                           FontSize="11"/>
+                                <Border Grid.Column="1"
+                                        CornerRadius="3"
+                                        Padding="6,1"
+                                        Margin="0,0,8,0"
+                                        HorizontalAlignment="Left"
+                                        Background="{Binding TypeBrush}">
+                                    <TextBlock Text="{Binding Type}"
+                                               FontSize="10"
+                                               FontWeight="SemiBold"
+                                               Foreground="White"/>
+                                </Border>
+                                <TextBlock Grid.Column="2"
+                                           Text="{Binding Description}"
+                                           Foreground="{DynamicResource TextPrimary}"
+                                           FontSize="12"
+                                           TextTrimming="CharacterEllipsis"/>
+                            </Grid>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+            </Grid>
+        </Border>
+
+        <!-- Footer -->
+        <Grid Grid.Row="4" Margin="0,16,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+
+            <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                <TextBlock Text="Save as:" Foreground="{DynamicResource TextDim}"
+                           VerticalAlignment="Center" Margin="0,0,8,0"/>
+                <!-- Phase 66 — TextBox is always editable. Previously
+                     IsEnabled was bound to HasCaptured (only enable
+                     after first step captured) which left the field
+                     read-only during the prep-and-record phase and
+                     made it look broken. The actual gate on saving
+                     stays on the Save button (CanSave property). -->
+                <TextBox Text="{Binding ScriptName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                         MinWidth="240" Padding="6,3"/>
+            </StackPanel>
+
+            <StackPanel Grid.Column="1" Orientation="Horizontal">
+                <Button Content="Cancel"
+                        Command="{Binding CancelCommand}"
+                        MinWidth="100" Padding="12,6" Margin="0,0,8,0"/>
+                <Button Content="💾  Save script"
+                        Command="{Binding SaveCommand}"
+                        MinWidth="140" Padding="14,6"
+                        Background="#FF2DD4BF" Foreground="#FF0F1117" FontWeight="SemiBold"
+                        IsEnabled="{Binding CanSave}"/>
+            </StackPanel>
+        </Grid>
+    </Grid>
+</Window>

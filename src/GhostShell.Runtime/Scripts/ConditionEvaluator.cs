@@ -167,12 +167,18 @@ public sealed class ConditionEvaluator
                 //   • Legacy <c>own_domain</c> with explicit "href" param
                 //     → compare to live page host.
                 //   • New <c>ad_is_mine</c> reads <c>ctx.CurrentAdHref</c>
-                //     and compares to <c>ctx.MyDomains</c>.
+                //     AND <c>ctx.CurrentAdDisplayUrl</c> and tests both
+                //     against <c>ctx.MyDomains</c>. The display URL is
+                //     critical for affiliate-tracker scenarios — when
+                //     a partner site (e.g. 120na80.com.ua) wraps the
+                //     real advertiser (goodmedika.com.ua), the click
+                //     host is the partner but the display URL still
+                //     names the advertiser. Without checking the
+                //     display URL, the gate misses these and the user
+                //     ends up clicking their own ad.
                 if (kind == "ad_is_mine")
                 {
-                    var host = ExtractHost(ctx.CurrentAdHref);
-                    return !string.IsNullOrEmpty(host)
-                        && DomainMatches(host, ctx.MyDomains);
+                    return AdHostMatches(ctx, ctx.MyDomains);
                 }
                 var href = ParamString(cond.Params, "href")
                     ?? ctx.CurrentAdHref;  // fall back to current ad
@@ -183,35 +189,69 @@ public sealed class ConditionEvaluator
                 return string.Equals(hu.Host, pu.Host, StringComparison.OrdinalIgnoreCase);
             }
 
-            // Phase 17 — web-parity ad-aware conditions. All three
-            // read ctx.CurrentAdHref (set by foreach_ad on each lap).
+            // Phase 17 — web-parity ad-aware conditions. Each one now
+            // reads BOTH ctx.CurrentAdHref AND ctx.CurrentAdDisplayUrl
+            // (set by foreach_ad on each lap) — the gate fires if
+            // EITHER host is in the relevant list. See AdHostMatches
+            // for the rationale.
             case "ad_is_target":
             {
-                var host = ExtractHost(ctx.CurrentAdHref);
-                return !string.IsNullOrEmpty(host)
-                    && DomainMatches(host, ctx.TargetDomains);
+                return AdHostMatches(ctx, ctx.TargetDomains);
             }
             case "ad_is_external":
             {
                 // External = not a profile-owned domain (includes
-                // targets and unrelated competitors).
-                var host = ExtractHost(ctx.CurrentAdHref);
-                if (string.IsNullOrEmpty(host)) return false;
-                return !DomainMatches(host, ctx.MyDomains);
+                // targets and unrelated competitors). We still need
+                // EITHER host populated to make a determination — if
+                // both are empty, treat as "no ad in scope" → false.
+                var clickHost = ExtractHost(ctx.CurrentAdHref);
+                var dispHost  = ExtractHost(ctx.CurrentAdDisplayUrl);
+                if (string.IsNullOrEmpty(clickHost) && string.IsNullOrEmpty(dispHost))
+                    return false;
+                // External = NEITHER host matches MyDomains. If even
+                // one host is in MyDomains we treat the ad as ours —
+                // this is the affiliate-tracker fix.
+                var hostInMine = AdHostMatches(ctx, ctx.MyDomains);
+                return !hostInMine;
             }
             case "ad_is_competitor":
             {
                 // Competitor = neither mine nor a paid target. The
-                // "interesting strangers" bucket.
-                var host = ExtractHost(ctx.CurrentAdHref);
-                if (string.IsNullOrEmpty(host)) return false;
-                return !DomainMatches(host, ctx.MyDomains)
-                    && !DomainMatches(host, ctx.TargetDomains);
+                // "interesting strangers" bucket. Same dual-host
+                // logic — an ad whose display URL names a target
+                // counts as a target even if the click host is
+                // generic (e.g. an ad-network domain).
+                var clickHost = ExtractHost(ctx.CurrentAdHref);
+                var dispHost  = ExtractHost(ctx.CurrentAdDisplayUrl);
+                if (string.IsNullOrEmpty(clickHost) && string.IsNullOrEmpty(dispHost))
+                    return false;
+                return !AdHostMatches(ctx, ctx.MyDomains)
+                    && !AdHostMatches(ctx, ctx.TargetDomains);
             }
 
             default:
                 return false; // unknown kind → treat as false; safer than crashing
         }
+    }
+
+    /// <summary>
+    /// "Either host matches the set" — used by ad_is_mine /
+    /// ad_is_target / ad_is_external to do the dual-host (click +
+    /// display) check in one place. Exists because direct comparison
+    /// of <c>ctx.CurrentAdHref</c> alone misses affiliate trackers
+    /// (a partner site that 302-redirects to the real advertiser):
+    /// the click host names the partner, the display host names the
+    /// advertiser, and only one of them tends to be in MyDomains.
+    /// </summary>
+    private static bool AdHostMatches(RunContext ctx, HashSet<string> set)
+    {
+        var clickHost = ExtractHost(ctx.CurrentAdHref);
+        if (!string.IsNullOrEmpty(clickHost) && DomainMatches(clickHost, set))
+            return true;
+        var dispHost = ExtractHost(ctx.CurrentAdDisplayUrl);
+        if (!string.IsNullOrEmpty(dispHost) && DomainMatches(dispHost, set))
+            return true;
+        return false;
     }
 
     // ─── Domain helpers (mirrors ScriptRunner) ─────────────────────

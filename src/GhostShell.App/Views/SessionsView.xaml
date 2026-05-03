@@ -29,6 +29,11 @@
                       CommandParameter="{Binding RelativeSource={RelativeSource AncestorType=ContextMenu},
                                                   Path=PlacementTarget.DataContext}"/>
             <Separator/>
+            <MenuItem Header="📦  Save as cookie pack"
+                      Command="{Binding SaveSnapshotAsPackCommand}"
+                      CommandParameter="{Binding RelativeSource={RelativeSource AncestorType=ContextMenu},
+                                                  Path=PlacementTarget.DataContext}"/>
+            <Separator/>
             <MenuItem Header="Delete"
                       Command="{Binding DeleteSnapshotCommand}"
                       CommandParameter="{Binding RelativeSource={RelativeSource AncestorType=ContextMenu},
@@ -568,6 +573,7 @@
                                     <ColumnDefinition Width="*"/>
                                     <ColumnDefinition Width="220"/>
                                     <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="Auto"/>
                                 </Grid.ColumnDefinitions>
                                 <StackPanel Grid.Column="0" VerticalAlignment="Center">
                                     <TextBlock Foreground="{StaticResource Text}"
@@ -584,6 +590,11 @@
                                          VerticalAlignment="Center"
                                          Margin="14,0"/>
                                 <Button Grid.Column="2"
+                                        Content="📦  Save as pack"
+                                        Command="{Binding SaveFilteredCookiesAsPackCommand}"
+                                        VerticalAlignment="Center"
+                                        Margin="0,0,6,0"/>
+                                <Button Grid.Column="3"
                                         Content="⤓  Export JSON"
                                         Command="{Binding ExportCookiesJsonCommand}"
                                         VerticalAlignment="Center"/>

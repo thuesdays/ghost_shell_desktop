@@ -421,9 +421,17 @@ public partial class ScriptVisualEditorDialog : Window
     private void OnNestedEdit(object sender, RoutedEventArgs e)
     {
         if (sender is not Button { Tag: NestedStepRow n }) return;
-        var dlg = new ScriptStepParamsTypedDialog(n.Type, n.ParamsJson) { Owner = this };
+        // Pass the row's condition along for if/while_loop so the
+        // dialog renders the typed condition editor pre-filled.
+        // For other types the third arg is null and the dialog hides
+        // its condition panel.
+        var nKey = n.Type.ToLowerInvariant();
+        var condIn = nKey is "if" or "while_loop" ? n.ConditionJson : null;
+        var dlg = new ScriptStepParamsTypedDialog(n.Type, n.ParamsJson, condIn) { Owner = this };
         if (dlg.ShowDialog() != true || dlg.Result is null) return;
         n.ParamsJson = dlg.Result;
+        if (dlg.ConditionResult is not null && (nKey is "if" or "while_loop"))
+            n.ConditionJson = dlg.ConditionResult;
         // No call to Items.Refresh — INotifyPropertyChanged on
         // NestedStepRow.Summary fires automatically.
     }
@@ -556,9 +564,15 @@ public partial class ScriptVisualEditorDialog : Window
         parent.IsExpanded = true;
         if (RequiresParams(pickedType))
         {
-            var dlg = new ScriptStepParamsTypedDialog(nrow.Type, nrow.ParamsJson) { Owner = this };
+            var pKey = pickedType.ToLowerInvariant();
+            var condIn = pKey is "if" or "while_loop" ? nrow.ConditionJson : null;
+            var dlg = new ScriptStepParamsTypedDialog(nrow.Type, nrow.ParamsJson, condIn) { Owner = this };
             if (dlg.ShowDialog() == true && dlg.Result is not null)
+            {
                 nrow.ParamsJson = dlg.Result;
+                if (dlg.ConditionResult is not null && (pKey is "if" or "while_loop"))
+                    nrow.ConditionJson = dlg.ConditionResult;
+            }
         }
     }
 
@@ -568,13 +582,20 @@ public partial class ScriptVisualEditorDialog : Window
         // raw JSON for everything else. The dialog supports flipping
         // between the two views in-line, so power users still get
         // the JSON path without leaving the visual editor.
-        var dlg = new ScriptStepParamsTypedDialog(row.TypeLabel, row.ParamsJson)
+        //
+        // For control-flow steps we also pass the row's condition
+        // so the dialog can render the typed condition editor.
+        var rKey = row.Type.ToLowerInvariant();
+        var condIn = rKey is "if" or "while_loop" ? row.ConditionJson : null;
+        var dlg = new ScriptStepParamsTypedDialog(row.TypeLabel, row.ParamsJson, condIn)
         {
             Owner = this,
         };
         if (dlg.ShowDialog() != true || dlg.Result is null) return;
         row.ParamsJson    = dlg.Result;
         row.ParamSummary  = SummariseParams(row.ParamsJson);
+        if (dlg.ConditionResult is not null && (rKey is "if" or "while_loop"))
+            row.ConditionJson = dlg.ConditionResult;
         StepList.Items.Refresh();
     }
 
@@ -612,10 +633,115 @@ public partial class ScriptVisualEditorDialog : Window
 
     // ─── Load / save ─────────────────────────────────────────────
 
+    /// <summary>
+    /// Phase 66 — recursively rewrite every JSON object key in
+    /// <paramref name="json"/> to snake_case_lower, leaving primitive
+    /// values, array structure, and nested objects intact. Used at
+    /// editor-load time to heal scripts saved by an early build of
+    /// the recorder which serialised in PascalCase. The canonical
+    /// editor format is snake_case_lower for multi-word keys
+    /// (abort_on_error, skip_on_my_domain) and lowercase for single
+    /// words (type, params, enabled). Calling this on already-
+    /// canonical JSON is a safe no-op aside from re-emit cost.
+    /// </summary>
+    private static string NormaliseJsonKeysToSnakeCase(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return json;
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            using var ms = new System.IO.MemoryStream();
+            using (var w = new System.Text.Json.Utf8JsonWriter(ms))
+            {
+                WriteWithSnakeKeys(doc.RootElement, w);
+            }
+            return System.Text.Encoding.UTF8.GetString(ms.ToArray());
+        }
+        catch
+        {
+            // If JSON is malformed, hand back unchanged — the existing
+            // try/catch in LoadSteps surfaces a clean error to the user.
+            return json;
+        }
+    }
+
+    private static void WriteWithSnakeKeys(
+        System.Text.Json.JsonElement el, System.Text.Json.Utf8JsonWriter w)
+    {
+        switch (el.ValueKind)
+        {
+            case System.Text.Json.JsonValueKind.Object:
+                w.WriteStartObject();
+                foreach (var p in el.EnumerateObject())
+                {
+                    w.WritePropertyName(ToSnakeCaseLower(p.Name));
+                    WriteWithSnakeKeys(p.Value, w);
+                }
+                w.WriteEndObject();
+                break;
+            case System.Text.Json.JsonValueKind.Array:
+                w.WriteStartArray();
+                foreach (var item in el.EnumerateArray())
+                    WriteWithSnakeKeys(item, w);
+                w.WriteEndArray();
+                break;
+            default:
+                el.WriteTo(w);
+                break;
+        }
+    }
+
+    private static string ToSnakeCaseLower(string name)
+    {
+        if (string.IsNullOrEmpty(name)) return name;
+        // Fast path: already lowercase / snake_case.
+        bool hasUpper = false;
+        for (int i = 0; i < name.Length; i++)
+            if (char.IsUpper(name[i])) { hasUpper = true; break; }
+        if (!hasUpper) return name;
+
+        var sb = new System.Text.StringBuilder(name.Length + 4);
+        for (int i = 0; i < name.Length; i++)
+        {
+            char c = name[i];
+            if (char.IsUpper(c))
+            {
+                // Insert '_' between transitions: lowercase→uppercase
+                // (foo|Bar → foo_bar) and acronym tail (HTMLParser →
+                // html_parser). Skip if at start or already after '_'.
+                if (i > 0)
+                {
+                    char prev = name[i - 1];
+                    if (prev != '_' && (char.IsLower(prev) || char.IsDigit(prev)))
+                        sb.Append('_');
+                    else if (prev != '_' && char.IsUpper(prev) && i + 1 < name.Length
+                             && char.IsLower(name[i + 1]))
+                        sb.Append('_');
+                }
+                sb.Append(char.ToLowerInvariant(c));
+            }
+            else
+            {
+                sb.Append(c);
+            }
+        }
+        return sb.ToString();
+    }
+
     private void LoadSteps(string stepsJson)
     {
         try
         {
+            // Phase 66 — auto-heal scripts saved with non-canonical
+            // key casing. The recorder briefly used PascalCase /
+            // CamelCase before settling on snake_case_lower; existing
+            // recordings in the user's DB have keys like "Type",
+            // "Params", "AbortOnError" which the strict TryGetProperty
+            // calls below ignore (resulting in "(no params)" cards).
+            // Normalising every JSON object's keys to snake_case_lower
+            // before the parse means a single read path works for
+            // all historical formats.
+            stepsJson = NormaliseJsonKeysToSnakeCase(stepsJson);
             using var doc = JsonDocument.Parse(stepsJson);
             if (doc.RootElement.ValueKind != JsonValueKind.Array) return;
             foreach (var s in doc.RootElement.EnumerateArray())
@@ -656,6 +782,18 @@ public partial class ScriptVisualEditorDialog : Window
                     row.SkipOnBlocked = true;
                 if (s.TryGetProperty("only_on_blocked", out var ob) && ob.ValueKind == JsonValueKind.True)
                     row.OnlyOnBlocked = true;
+
+                // Hydrate the typed condition object so the new
+                // condition editor in the params dialog can show
+                // the kind + per-kind fields. Falls back to the
+                // safe default {"kind":"true"} when missing or
+                // malformed so an `if` step always has SOMETHING
+                // to evaluate.
+                if (s.TryGetProperty("condition", out var cEl)
+                    && cEl.ValueKind == JsonValueKind.Object)
+                {
+                    row.ConditionJson = cEl.GetRawText();
+                }
 
                 // Phase 14: extract nested branches for if/foreach so
                 // the visual editor renders an indented summary
@@ -738,6 +876,43 @@ public partial class ScriptVisualEditorDialog : Window
             var typeKey = r.Type.ToLowerInvariant();
             var isIf      = typeKey == "if";
             var isLoop    = typeKey is "foreach" or "foreach_ad" or "while_loop";
+            var isWhile   = typeKey == "while_loop";
+
+            // Emit the typed condition for control-flow steps. The
+            // condition editor in the typed-form dialog is the source
+            // of truth here; the OriginalRawJson preservation path
+            // below explicitly skips `condition` so we don't write it
+            // twice.
+            if (isIf || isWhile)
+            {
+                w.WritePropertyName("condition");
+                try
+                {
+                    using var cd = JsonDocument.Parse(
+                        string.IsNullOrWhiteSpace(r.ConditionJson)
+                            ? "{\"kind\":\"true\"}"
+                            : r.ConditionJson);
+                    if (cd.RootElement.ValueKind == JsonValueKind.Object)
+                        cd.RootElement.WriteTo(w);
+                    else
+                    {
+                        // Garbage in ConditionJson → emit a safe
+                        // default rather than a non-object literal
+                        // (the runtime would treat it as "always
+                        // true" anyway, but a bad shape may break
+                        // strict consumers).
+                        w.WriteStartObject();
+                        w.WriteString("kind", "true");
+                        w.WriteEndObject();
+                    }
+                }
+                catch
+                {
+                    w.WriteStartObject();
+                    w.WriteString("kind", "true");
+                    w.WriteEndObject();
+                }
+            }
 
             // Re-build nested branches from NestedRows.
             if (isIf)
@@ -778,6 +953,7 @@ public partial class ScriptVisualEditorDialog : Window
                         // Phase 19 flags get written explicitly above.
                         if (n is "type" or "params" or "enabled"
                             or "then" or "else" or "body"
+                            or "condition" // owned by ConditionJson now — emitted explicitly above
                             or "probability" or "abort_on_error"
                             or "skip_on_my_domain" or "skip_on_target"
                             or "only_on_my_domain" or "only_on_target"
@@ -794,8 +970,9 @@ public partial class ScriptVisualEditorDialog : Window
     }
 
     /// <summary>Emit one nested step's JSON object inside an array
-    /// writer. Mirrors the top-level minimal shape but no nested
-    /// branches (we don't yet support if-inside-if visually).</summary>
+    /// writer. Now recursively handles nested branches — if a nested
+    /// row is itself a control-flow step (if/foreach/while), its own
+    /// NestedRows are emitted as then/else/body arrays.</summary>
     private static void SerialiseNested(Utf8JsonWriter w, NestedStepRow n)
     {
         w.WriteStartObject();
@@ -805,6 +982,78 @@ public partial class ScriptVisualEditorDialog : Window
             string.IsNullOrWhiteSpace(n.ParamsJson) ? "{}" : n.ParamsJson))
             pdoc.RootElement.WriteTo(w);
         if (!n.Enabled) w.WriteBoolean("enabled", false);
+
+        // Emit condition for nested if / while_loop. Pre-fix: this
+        // path didn't write `condition` at all, so any user-authored
+        // condition on a nested if-step (like the
+        // `if(ad_is_external)` inside foreach_ad in GoodMedika) was
+        // silently dropped on save and the runtime fell back to the
+        // ConditionEvaluator's default-true behaviour, making the
+        // whole gate a no-op.
+        var nKey = n.Type.ToLowerInvariant();
+        if (nKey is "if" or "while_loop")
+        {
+            w.WritePropertyName("condition");
+            try
+            {
+                using var cd = JsonDocument.Parse(
+                    string.IsNullOrWhiteSpace(n.ConditionJson)
+                        ? "{\"kind\":\"true\"}"
+                        : n.ConditionJson);
+                if (cd.RootElement.ValueKind == JsonValueKind.Object)
+                    cd.RootElement.WriteTo(w);
+                else
+                {
+                    w.WriteStartObject();
+                    w.WriteString("kind", "true");
+                    w.WriteEndObject();
+                }
+            }
+            catch
+            {
+                w.WriteStartObject();
+                w.WriteString("kind", "true");
+                w.WriteEndObject();
+            }
+        }
+
+        // Recursively write nested rows for control-flow steps.
+        if (n.NestedRows.Count > 0)
+        {
+            if (string.Equals(n.Type, "if", StringComparison.OrdinalIgnoreCase))
+            {
+                var thenRows = n.NestedRows.Where(r => r.Group == "then").ToList();
+                var elseRows = n.NestedRows.Where(r => r.Group == "else").ToList();
+                if (thenRows.Count > 0)
+                {
+                    w.WriteStartArray("then");
+                    foreach (var r in thenRows)
+                        SerialiseNested(w, r);
+                    w.WriteEndArray();
+                }
+                if (elseRows.Count > 0)
+                {
+                    w.WriteStartArray("else");
+                    foreach (var r in elseRows)
+                        SerialiseNested(w, r);
+                    w.WriteEndArray();
+                }
+            }
+            else if (string.Equals(n.Type, "foreach", StringComparison.OrdinalIgnoreCase)
+                  || string.Equals(n.Type, "foreach_ad", StringComparison.OrdinalIgnoreCase)
+                  || string.Equals(n.Type, "while_loop", StringComparison.OrdinalIgnoreCase))
+            {
+                var bodyRows = n.NestedRows.Where(r => r.Group == "body").ToList();
+                if (bodyRows.Count > 0)
+                {
+                    w.WriteStartArray("body");
+                    foreach (var r in bodyRows)
+                        SerialiseNested(w, r);
+                    w.WriteEndArray();
+                }
+            }
+        }
+
         w.WriteEndObject();
     }
 
@@ -817,7 +1066,7 @@ public partial class ScriptVisualEditorDialog : Window
             var pJson   = s.TryGetProperty("params", out var p)  ? p.GetRawText() : "{}";
             var enabled = !s.TryGetProperty("enabled", out var en) || en.GetBoolean();
             var (catBrush, _) = StepRow.CategoryBrushesFor(type);
-            yield return new NestedStepRow
+            var row = new NestedStepRow
             {
                 Group         = group,
                 Type          = type,
@@ -828,6 +1077,37 @@ public partial class ScriptVisualEditorDialog : Window
                 ShowGroup     = first,
                 CategoryBrush = catBrush,
             };
+            // Hydrate condition for nested if / while_loop. Without
+            // this, every nested if loaded from disk got the default
+            // {"kind":"true"} and the original condition was silently
+            // discarded on save (regression introduced before the
+            // typed condition editor existed — the SerialiseNested
+            // path didn't even emit `condition` at all).
+            if (s.TryGetProperty("condition", out var cEl)
+                && cEl.ValueKind == JsonValueKind.Object)
+            {
+                row.ConditionJson = cEl.GetRawText();
+            }
+
+            // Recursively populate nested rows for control-flow steps.
+            // Each nested row may itself be a loop or if-statement with
+            // its own body/then/else branches, visible in the editor tree.
+            if (string.Equals(type, "if", StringComparison.OrdinalIgnoreCase))
+            {
+                if (s.TryGetProperty("then", out var th) && th.ValueKind == JsonValueKind.Array)
+                    foreach (var n in NestedFromArray(th, "then")) row.NestedRows.Add(n);
+                if (s.TryGetProperty("else", out var el) && el.ValueKind == JsonValueKind.Array)
+                    foreach (var n in NestedFromArray(el, "else")) row.NestedRows.Add(n);
+            }
+            else if (string.Equals(type, "foreach", StringComparison.OrdinalIgnoreCase)
+                  || string.Equals(type, "foreach_ad", StringComparison.OrdinalIgnoreCase)
+                  || string.Equals(type, "while_loop", StringComparison.OrdinalIgnoreCase))
+            {
+                if (s.TryGetProperty("body", out var b) && b.ValueKind == JsonValueKind.Array)
+                    foreach (var n in NestedFromArray(b, "body")) row.NestedRows.Add(n);
+            }
+
+            yield return row;
             first = false;
         }
     }
@@ -1075,10 +1355,24 @@ public partial class ScriptVisualEditorDialog : Window
         /// <summary>
         /// The step's original full JSON object as loaded from the
         /// script. Round-trip preserves fields the visual editor
-        /// doesn't manage (then / else / body / condition). Empty
-        /// for newly-added steps.
+        /// doesn't manage (then / else / body). Empty for newly-
+        /// added steps.
+        ///
+        /// Note: <c>condition</c> is now owned by <see cref="ConditionJson"/>
+        /// and emitted from there directly. The "preserve unmanaged
+        /// fields" path in <see cref="SerialiseStep"/> explicitly
+        /// drops the original <c>condition</c> so we don't double-write.
         /// </summary>
         public string OriginalRawJson { get; set; } = "";
+
+        /// <summary>
+        /// JSON object for control-flow conditions
+        /// (e.g. <c>{"kind":"ad_is_external"}</c>). Used by `if` and
+        /// `while_loop`; ignored otherwise. Default kind is
+        /// <c>true</c> so a freshly-created `if` always fires its
+        /// THEN branch until the user picks a real condition.
+        /// </summary>
+        public string ConditionJson { get; set; } = "{\"kind\":\"true\"}";
 
         /// <summary>Editable nested rows (Then/Else for if; Body for
         /// foreach / foreach_ad / while_loop). Phase 18: switched
@@ -1386,12 +1680,28 @@ public partial class ScriptVisualEditorDialog : Window
             set { if (_paramsJson != value) { _paramsJson = value; OnChanged(nameof(ParamsJson)); OnChanged(nameof(Summary)); } }
         }
 
+        /// <summary>Condition object for nested `if` / `while_loop`
+        /// rows. Default <c>{"kind":"true"}</c>. Ignored for other
+        /// types but kept on the row so the round-trip is lossless
+        /// when the user toggles a step's type back and forth in the
+        /// editor without re-creating it.</summary>
+        public string ConditionJson { get; set; } = "{\"kind\":\"true\"}";
+
         public string Summary => SummariseParams(_paramsJson);
 
         /// <summary>Per-category brush for the mini-card border —
         /// drives the same colour-coded look as top-level cards.</summary>
         public System.Windows.Media.Brush CategoryBrush { get; set; }
             = System.Windows.Media.Brushes.Gray;
+
+        /// <summary>Nested rows representing body/then/else branches.
+        /// Makes NestedStepRow itself recursive — a control-flow step
+        /// (foreach, if, while) can have its own nested steps, which
+        /// can themselves be control-flow and have children, etc.</summary>
+        public ObservableCollection<NestedStepRow> NestedRows { get; set; } = new();
+
+        /// <summary>True if this row has any nested children to display.</summary>
+        public bool HasNested => NestedRows.Count > 0;
 
         public event PropertyChangedEventHandler? PropertyChanged;
         private void OnChanged(string p) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(p));

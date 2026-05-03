@@ -108,10 +108,41 @@ public static class Humanizer
         IBrowserSession session, string selector,
         int hoverMinMs = 200, int hoverMaxMs = 600, CancellationToken ct = default)
     {
+        // Phase 66 — wait-for-selector before clicking. Pages (especially
+        // Google SERPs and SPA results) often haven't finished rendering
+        // by the time a recorded script reaches the click step. The old
+        // path threw "selector not found" the moment the first
+        // querySelector returned null, even though the element would
+        // appear 500ms later. Now we poll up to 5s before giving up,
+        // which dramatically improves replay success rate on dynamic
+        // pages without slowing down the happy path (the loop exits the
+        // moment the element is ready).
+        const int waitTimeoutMs = 5000;
+        const int pollIntervalMs = 200;
+        var deadline = DateTime.UtcNow.AddMilliseconds(waitTimeoutMs);
+        var foundJs = $$"""
+            return !!document.querySelector({{JsonSerializer.Serialize(selector)}});
+        """;
+        var elementReady = false;
+        while (DateTime.UtcNow < deadline)
+        {
+            ct.ThrowIfCancellationRequested();
+            var present = await session.ExecuteScriptAsync(foundJs, null, ct);
+            if (present is true) { elementReady = true; break; }
+            await Task.Delay(pollIntervalMs, ct);
+        }
+        if (!elementReady)
+            throw new InvalidOperationException(
+                $"selector not found after {waitTimeoutMs}ms: {selector}");
+
         var hoverJs = $$"""
-            (function() {
+            return (function() {
               var el = document.querySelector({{JsonSerializer.Serialize(selector)}});
               if (!el) return false;
+              // Scroll the element into view so the click hits a real
+              // viewport coordinate (off-screen elements have rect
+              // values outside the visible area).
+              try { el.scrollIntoView({block: 'center', inline: 'center', behavior: 'instant'}); } catch (e) {}
               var rect = el.getBoundingClientRect();
               var cx = rect.left + rect.width / 2;
               var cy = rect.top + rect.height / 2;
@@ -119,7 +150,7 @@ public static class Humanizer
                 {bubbles: true, cancelable: true, clientX: cx, clientY: cy});
               el.dispatchEvent(ev);
               return true;
-            })()
+            })();
         """;
         var ok = await session.ExecuteScriptAsync(hoverJs, null, ct);
         if (ok is not true)

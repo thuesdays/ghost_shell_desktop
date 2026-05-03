@@ -16,8 +16,15 @@
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              mc:Ignorable="d"
              Background="Transparent">
-    <ScrollViewer VerticalScrollBarVisibility="Auto">
-        <StackPanel Margin="24,20" MaxWidth="1320" HorizontalAlignment="Stretch">
+    <ScrollViewer VerticalScrollBarVisibility="Auto"
+                  HorizontalScrollBarVisibility="Disabled">
+        <!-- Phase 54 — TRUE full-width layout. Phase 53 set Margin="0,20"
+             but kept MaxWidth=1320 which capped content on wider monitors,
+             leaving a dark gap on the right (visible at 1920+ resolutions).
+             Removed MaxWidth entirely; HorizontalAlignment="Stretch" makes
+             the StackPanel fill the ScrollViewer's full client area.
+             Vertical Margin=20 stays for breathing room from title bar. -->
+        <StackPanel Margin="0,20" HorizontalAlignment="Stretch">
 
             <!-- ─── Page header ─── -->
             <StackPanel Margin="0,0,0,16">
@@ -213,43 +220,123 @@
                                 Command="{Binding GoLogsCommand}"
                                 Padding="10,4"/>
                     </Grid>
-                    <Border DockPanel.Dock="Bottom" BorderBrush="{StaticResource Border}" BorderThickness="0,1,0,0">
+                    <!-- ─── Compact run rows ─────────────────────────
+                         Each run is a single-line card with a coloured
+                         left-edge accent stripe (status colour). Hover
+                         lifts the bg slightly for a clickable feel.
+                         Padding tightened from 14,10 → 10,5 — twice as
+                         many runs visible without scrolling. -->
+                    <Border DockPanel.Dock="Bottom"
+                            BorderBrush="{StaticResource Border}"
+                            BorderThickness="0,1,0,0"
+                            Padding="10,8,10,8">
                         <ItemsControl ItemsSource="{Binding RecentRuns}">
                             <ItemsControl.ItemTemplate>
                                 <DataTemplate>
-                                    <Border Padding="14,10"
-                                            BorderBrush="{StaticResource Border}"
-                                            BorderThickness="0,0,0,1">
+                                    <Border Margin="0,0,0,3"
+                                            CornerRadius="3"
+                                            Background="{StaticResource BgRaised}"
+                                            BorderBrush="{Binding StatusBrushKey, Converter={StaticResource ResourceKeyToBrush}}"
+                                            BorderThickness="3,0,0,0"
+                                            Padding="10,5,10,5">
+                                        <Border.Style>
+                                            <Style TargetType="Border">
+                                                <Setter Property="Background" Value="{StaticResource BgRaised}"/>
+                                                <Style.Triggers>
+                                                    <Trigger Property="IsMouseOver" Value="True">
+                                                        <Setter Property="Background" Value="{StaticResource BgHover}"/>
+                                                    </Trigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </Border.Style>
                                         <Grid>
+                                            <!-- Fixed widths on the right two
+                                                 columns so status / duration /
+                                                 relative-time text lines up
+                                                 vertically across rows.
+                                                 Auto-width was the old design
+                                                 but produced a ragged jagged
+                                                 right edge because each row's
+                                                 text length differs ("OK · 18
+                                                 sec" vs "exit 130 · 11 hr 6
+                                                 min 39 sec"). Pixel-fixed
+                                                 columns + TextAlignment=Right
+                                                 inside each gives a clean
+                                                 newspaper-column feel. -->
                                             <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="Auto"/>
-                                                <ColumnDefinition Width="*"/>
-                                                <ColumnDefinition Width="Auto"/>
-                                                <ColumnDefinition Width="Auto"/>
+                                                <ColumnDefinition Width="Auto"/>  <!-- status icon -->
+                                                <ColumnDefinition Width="*"/>     <!-- Run #N · profile (fills) -->
+                                                <ColumnDefinition Width="190"/>   <!-- status · duration (fixed) -->
+                                                <ColumnDefinition Width="140"/>   <!-- relative time (fixed) -->
                                             </Grid.ColumnDefinitions>
+
+                                            <!-- Status icon — coloured by
+                                                 status (✓ green / ✗ red /
+                                                 ⏵ accent). Sized down from
+                                                 14px to 12px to match the
+                                                 tighter row height. -->
                                             <TextBlock Grid.Column="0"
                                                        Text="{Binding StatusIcon}"
-                                                       FontSize="14" FontWeight="Bold"
+                                                       FontSize="12" FontWeight="Bold"
                                                        Foreground="{Binding StatusBrushKey, Converter={StaticResource ResourceKeyToBrush}}"
                                                        VerticalAlignment="Center"
-                                                       Width="22"/>
-                                            <StackPanel Grid.Column="1">
-                                                <TextBlock>
-                                                    <Run Text="Run #" Foreground="{StaticResource TextMuted}"/>
-                                                    <Run Text="{Binding Id, Mode=OneWay}" FontWeight="SemiBold"/>
-                                                    <Run Text=" · " Foreground="{StaticResource TextMuted}"/>
-                                                    <Run Text="{Binding ProfileName, Mode=OneWay}"/>
-                                                </TextBlock>
-                                                <TextBlock Style="{StaticResource MutedText}" FontSize="10" Margin="0,2,0,0">
-                                                    <Run Text="{Binding Status, Mode=OneWay}"/>
-                                                    <Run Text=" · "/>
-                                                    <Run Text="{Binding DurationLabel, Mode=OneWay}"/>
-                                                </TextBlock>
-                                            </StackPanel>
-                                            <TextBlock Grid.Column="2" Text="{Binding Relative}"
-                                                       Style="{StaticResource MutedText}" FontSize="10"
+                                                       Margin="2,0,10,0"/>
+
+                                            <!-- Run #N · profile_X — single
+                                                 inline line, no second row.
+                                                 Stays readable at the
+                                                 reduced 5px vertical padding. -->
+                                            <TextBlock Grid.Column="1"
                                                        VerticalAlignment="Center"
-                                                       Margin="8,0,0,0"/>
+                                                       FontSize="12"
+                                                       TextTrimming="CharacterEllipsis">
+                                                <Run Text="Run #" Foreground="{StaticResource TextMuted}"/>
+                                                <Run Text="{Binding Id, Mode=OneWay}"
+                                                     FontWeight="SemiBold"
+                                                     Foreground="{StaticResource Text}"/>
+                                                <Run Text="  ·  " Foreground="{StaticResource TextDim}"/>
+                                                <Run Text="{Binding ProfileName, Mode=OneWay}"
+                                                     Foreground="{StaticResource Text}"/>
+                                            </TextBlock>
+
+                                            <!-- Status label · duration —
+                                                 monospace + right-aligned so
+                                                 ALL rows' last char (last
+                                                 sec/min/hr digit) lines up
+                                                 vertically against the col
+                                                 boundary. Long durations
+                                                 ("11 hr 6 min 39 sec") get
+                                                 the same right-edge as short
+                                                 ones ("18 sec"). -->
+                                            <TextBlock Grid.Column="2"
+                                                       VerticalAlignment="Center"
+                                                       HorizontalAlignment="Right"
+                                                       TextAlignment="Right"
+                                                       FontFamily="{StaticResource FontMono}"
+                                                       FontSize="10.5"
+                                                       Margin="10,0,16,0">
+                                                <Run Text="{Binding Status, Mode=OneWay}"
+                                                     Foreground="{Binding StatusBrushKey, Converter={StaticResource ResourceKeyToBrush}}"/>
+                                                <Run Text=" · " Foreground="{StaticResource TextDim}"/>
+                                                <Run Text="{Binding DurationLabel, Mode=OneWay}"
+                                                     Foreground="{StaticResource TextMuted}"/>
+                                            </TextBlock>
+
+                                            <!-- Relative time — right-edge of
+                                                 its fixed-width column. Same
+                                                 right-align trick keeps the
+                                                 last "ago" character at the
+                                                 row's outer edge regardless
+                                                 of whether the time string
+                                                 is "18 sec ago" or "11 hr 6
+                                                 min 39 sec ago". -->
+                                            <TextBlock Grid.Column="3"
+                                                       Text="{Binding Relative}"
+                                                       VerticalAlignment="Center"
+                                                       HorizontalAlignment="Right"
+                                                       TextAlignment="Right"
+                                                       Foreground="{StaticResource TextDim}"
+                                                       FontSize="10.5"/>
                                         </Grid>
                                     </Border>
                                 </DataTemplate>

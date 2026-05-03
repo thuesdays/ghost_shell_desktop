@@ -1,0 +1,94 @@
+{
+  "name": "GoodMedika",
+  "description": "Brand SERP rotation. Pre-warm commercial intent, search the brand, click every external ad, cool down. Goodmedika own-domain ads are auto-skipped via skip_on_my_domain. To click only target competitors, set only_on_target=true on click_ad.",
+  "tags": [],
+  "steps": [
+    {
+      "type": "foreach",
+      "enabled": true,
+      "params": {
+        "var": "item",
+        "items": "goodmedika\nгудмедика\nгудмедіка",
+        "shuffle": true
+      },
+      "body": [
+        {
+          "type": "commercial_inflate",
+          "enabled": true,
+          "probability": 0.3,
+          "params": {
+            "brand": "{{item}}",
+            "n": 2,
+            "locale": "uk",
+            "dwell_min": 4,
+            "dwell_max": 10,
+            "click_organic": true
+          }
+        },
+        {
+          "type": "search_query",
+          "enabled": true,
+          "params": {
+            "query": "{{item}}",
+            "locale": "uk",
+            "max_attempts": 4,
+            "retry_min_sec": 13,
+            "retry_max_sec": 15,
+            "fail_on_empty": false,
+            "timeout_ms": 12000
+          }
+        },
+        {
+          "type": "foreach_ad",
+          "enabled": true,
+          "params": {
+            "shuffle": true
+          },
+          "body": [
+            {
+              "type": "if",
+              "enabled": true,
+              "condition": { "kind": "ad_is_external" },
+              "then": [
+                {
+                  "type": "click_ad",
+                  "enabled": true,
+                  "skip_on_my_domain": true,
+                  "skip_on_target": false,
+                  "only_on_target": false,
+                  "skip_on_blocked": true,
+                  "params": {
+                    "stamp_id": -1,
+                    "dwell_min": 6,
+                    "dwell_max": 18,
+                    "scroll_after_click": true,
+                    "close_after": true,
+                    "deep_dive": false
+                  }
+                },
+                {
+                  "type": "pause",
+                  "enabled": true,
+                  "probability": 0.6,
+                  "params": {
+                    "min_sec": 2,
+                    "max_sec": 5
+                  }
+                }
+              ],
+              "else": []
+            }
+          ]
+        },
+        {
+          "type": "pause",
+          "enabled": true,
+          "params": {
+            "min_sec": 5,
+            "max_sec": 12
+          }
+        }
+      ]
+    }
+  ]
+}

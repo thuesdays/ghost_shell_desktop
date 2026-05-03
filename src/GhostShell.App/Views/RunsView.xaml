@@ -202,6 +202,9 @@
                         <Style TargetType="DataGridRow"
                                BasedOn="{StaticResource {x:Type DataGridRow}}">
                             <Setter Property="ContextMenu" Value="{StaticResource RunRowMenu}"/>
+                            <!-- Phase 53 — tighten row height to compact the table.
+                                 5px vertical padding + smaller font size = denser layout. -->
+                            <Setter Property="Height" Value="32"/>
                         </Style>
                     </DataGrid.RowStyle>
                     <DataGrid.Columns>
@@ -241,10 +244,9 @@
                         <!-- Per-row action strip — primary affordance
                              is "View logs", which navigates to the
                              Logs page with a profile/run filter pre-
-                             applied. Mark-failed is exposed only when
-                             the run is still live (matches the legacy
-                             web's conditional render). -->
-                        <DataGridTemplateColumn Header="" Width="120" IsReadOnly="True">
+                             applied. Mark-failed is visible when
+                             running, delete is visible when finished. -->
+                        <DataGridTemplateColumn Header="" Width="150" IsReadOnly="True">
                             <DataGridTemplateColumn.CellTemplate>
                                 <DataTemplate>
                                     <StackPanel Orientation="Horizontal"
@@ -280,6 +282,22 @@
                                                        FontSize="14"
                                                        Foreground="{StaticResource ErrBrush}"
                                                        Text="&#xE7BA;"/>
+                                        </Button>
+
+                                        <!-- Delete — visible only when
+                                             the run has finished. Phase 53 —
+                                             trash/delete icon (Segoe Fluent
+                                             E74D). Marked danger red. -->
+                                        <Button Style="{StaticResource RowActionDanger}"
+                                                ToolTip="Delete this run from history"
+                                                Visibility="{Binding IsRunning, Converter={StaticResource InverseBoolToVis}}"
+                                                Command="{Binding DataContext.DeleteRunCommand,
+                                                          Source={x:Reference PageRoot}}"
+                                                CommandParameter="{Binding}">
+                                            <TextBlock Style="{StaticResource RowActionIcon}"
+                                                       FontSize="14"
+                                                       Foreground="{StaticResource ErrBrush}"
+                                                       Text="&#xE74D;"/>
                                         </Button>
                                     </StackPanel>
                                 </DataTemplate>

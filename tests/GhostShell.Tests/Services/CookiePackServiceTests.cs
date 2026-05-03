@@ -241,6 +241,14 @@ public class CookiePackServiceTests : IDisposable
         public Task<string> CaptureScreenshotAsync(string path, CancellationToken ct = default) =>
             Task.FromResult(path);
 
+        // Phase 68 — multi-window stubs.
+        public Task<IReadOnlyList<string>> GetWindowHandlesAsync(CancellationToken ct = default)
+            => Task.FromResult<IReadOnlyList<string>>(new[] { "main" });
+        public Task<string> GetCurrentWindowHandleAsync(CancellationToken ct = default)
+            => Task.FromResult("main");
+        public Task SwitchToWindowAsync(string handle, CancellationToken ct = default)
+            => Task.CompletedTask;
+
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 }

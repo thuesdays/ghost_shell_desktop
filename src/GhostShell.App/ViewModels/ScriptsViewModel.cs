@@ -4,6 +4,7 @@
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Text.Json;
+using System.Windows;        // Phase 66 — Application.Current for Dispatcher marshal in RecordAsync
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using GhostShell.App.Dialogs;
@@ -206,6 +207,73 @@ public sealed partial class ScriptsViewModel : BaseViewModel
         {
             _log.LogError(ex, "Script create failed");
             await _dialogs.ConfirmAsync("Create failed", ex.Message, "OK", ConfirmSeverity.Error);
+        }
+    }
+
+    /// <summary>
+    /// Phase 63 — Record a new script by interacting with a live
+    /// browser session. Opens <see cref="GhostShell.App.Dialogs.ScriptRecorderDialog"/>
+    /// which handles profile launch + recorder lifecycle + script
+    /// creation. On success the new script lands in the list.
+    /// </summary>
+    [RelayCommand]
+    private async Task RecordAsync()
+    {
+        try
+        {
+            var recorded = await _dialogs.ShowScriptRecorderAsync();
+            if (recorded is null)
+            {
+                _log.LogDebug("Recording cancelled or failed");
+                return;
+            }
+            _log.LogInformation(
+                "Recorded script saved (id={Id}, name='{Name}') — refreshing list",
+                recorded.Id, recorded.Name);
+
+            // Phase 66 — belt-and-braces refresh after save. Earlier
+            // builds called only `await ReloadAsync()` here and the
+            // user reported the new script not appearing until they
+            // navigated away and back. Two layers now:
+            //   1. Direct in-place insert of the new ScriptCardVm so
+            //      the user sees the row IMMEDIATELY without waiting
+            //      for any DB round-trip.
+            //   2. Full ReloadAsync afterwards (marshalled to the UI
+            //      thread) to pick up assignment counts and the
+            //      definitive sort order.
+            try
+            {
+                var profiles = await _profiles.ListAsync();
+                var assignedCount = profiles.Count(p =>
+                    p.AssignedScriptId == recorded.Id);
+                var card = ScriptCardVm.From(recorded, assignedCount);
+                Application.Current?.Dispatcher.Invoke(() =>
+                {
+                    // Skip if already present (defensive — shouldn't happen
+                    // because CreateAsync just minted a new id).
+                    if (_allCards.All(c => c.Id != card.Id))
+                    {
+                        _allCards.Insert(0, card);
+                        ApplyFilter();
+                    }
+                });
+            }
+            catch (Exception fastEx)
+            {
+                _log.LogWarning(fastEx, "Recorder fast-path insert failed; full reload will follow");
+            }
+
+            // Full reload to reconcile any state we missed.
+            await Application.Current.Dispatcher.InvokeAsync(async () =>
+            {
+                await ReloadAsync();
+            });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "Recorder dialog crashed");
+            await _dialogs.ConfirmAsync(
+                "Recording failed", ex.Message, "OK", ConfirmSeverity.Error);
         }
     }
 

@@ -79,6 +79,38 @@ public interface IDialogService
         string title, string message,
         string confirmLabel = "Confirm",
         ConfirmSeverity severity = ConfirmSeverity.Neutral);
+
+    /// <summary>
+    /// Phase 63 — Browser Action Recorder modal. Opens a profile in a
+    /// visible Chromium window, captures user gestures (click, type,
+    /// scroll, navigate) into ScriptStep[], and saves the result as a
+    /// new <see cref="GhostShell.Core.Models.Script"/>. Returns the
+    /// created Script (with its assigned id), or null if the user
+    /// cancelled the dialog before saving.
+    /// </summary>
+    Task<GhostShell.Core.Models.Script?> ShowScriptRecorderAsync();
+
+    /// <summary>
+    /// Phase 64 — Bulk start parameters dialog. Asks for stagger
+    /// seconds + concurrency cap before kicking off N profile launches.
+    /// Returns the chosen options or null if cancelled.
+    /// </summary>
+    Task<BulkStartOptions?> ShowBulkStartOptionsAsync(int profileCount);
+}
+
+/// <summary>
+/// Phase 64 — User choices from the Bulk Start dialog. Defaults are
+/// safe-conservative: 30s stagger, 4 parallel launches max.
+/// </summary>
+public sealed class BulkStartOptions
+{
+    /// <summary>Seconds between successive profile launches. Zero =
+    /// kick off all in parallel (subject to <see cref="MaxConcurrent"/>).</summary>
+    public int StaggerSeconds { get; init; } = 30;
+
+    /// <summary>Hard cap on concurrent active profiles. Higher = more
+    /// throughput but more RAM/CPU; lower = safer on low-end machines.</summary>
+    public int MaxConcurrent { get; init; } = 4;
 }
 
 /// <summary>

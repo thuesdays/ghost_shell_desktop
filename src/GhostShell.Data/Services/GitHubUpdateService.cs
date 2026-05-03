@@ -22,6 +22,13 @@ namespace GhostShell.Data.Services;
 internal sealed class GitHubUpdateService : IUpdateService
 {
     private const string ReleasesApi = "https://api.github.com/repos/thuesdays/ghost_shell_desktop/releases/latest";
+    // Phase 38 fix — fallback used when /releases/latest 404s. The
+    // /latest endpoint excludes drafts AND pre-releases by default,
+    // so a release tagged as a pre-release (or one published from
+    // the GitHub UI but flagged "Set as a pre-release") is invisible
+    // to /latest. The list endpoint returns ALL releases including
+    // pre-releases; we pick the newest non-draft as a graceful fallback.
+    private const string ReleasesListApi = "https://api.github.com/repos/thuesdays/ghost_shell_desktop/releases?per_page=10";
     private const long MaxJsonBodyBytes = 1_048_576; // 1 MB
     private const long MaxZipFileBytes = 536_870_912; // 500 MB
     private const int CheckCacheTtlSeconds = 60;
@@ -90,6 +97,25 @@ internal sealed class GitHubUpdateService : IUpdateService
             {
                 redirectValidatingClient.DefaultRequestHeaders.TryAddWithoutValidation(
                     "User-Agent", "GhostShell-Updater/1.0");
+
+                // Phase 38 — Personal Access Token support for private
+                // repos. GitHub's REST API returns 404 (not 401) for any
+                // anonymous request to a private repo, as a privacy
+                // measure. Setting GITHUB_TOKEN in the environment
+                // (or a future Settings → Updates field) lets us auth
+                // with `Authorization: Bearer <token>`. The token only
+                // needs `Contents:read` (fine-grained) or `repo` scope
+                // (classic). When unset, we fall through to anonymous —
+                // which works for public repos.
+                var pat = Environment.GetEnvironmentVariable("GHOSTSHELL_GITHUB_TOKEN")
+                       ?? Environment.GetEnvironmentVariable("GITHUB_TOKEN");
+                if (!string.IsNullOrWhiteSpace(pat))
+                {
+                    redirectValidatingClient.DefaultRequestHeaders.TryAddWithoutValidation(
+                        "Authorization", "Bearer " + pat.Trim());
+                    redirectValidatingClient.DefaultRequestHeaders.TryAddWithoutValidation(
+                        "X-GitHub-Api-Version", "2022-11-28");
+                }
                 redirectValidatingClient.Timeout = TimeSpan.FromSeconds(15);
 
                 using (var response = await redirectValidatingClient.GetAsync(ReleasesApi, ct))
@@ -107,25 +133,95 @@ internal sealed class GitHubUpdateService : IUpdateService
                         }
                     }
 
-                    if (!response.IsSuccessStatusCode)
+                    // Source of the release JSON: either /releases/latest
+                    // (happy path) or /releases?per_page=10 (fallback when
+                    // /latest 404s — e.g. all releases are pre-releases or
+                    // drafts). Resolved into one local string so the parse
+                    // path below doesn't branch.
+                    string? json = null;
+
+                    if (response.IsSuccessStatusCode)
+                    {
+                        // [FIX: body-size-cap] Cap JSON response at 1 MB
+                        var contentLength = response.Content.Headers.ContentLength ?? 0;
+                        if (contentLength > MaxJsonBodyBytes)
+                        {
+                            _log.LogWarning("GitHub API response too large: {Size} bytes (max: {Max})",
+                                contentLength, MaxJsonBodyBytes);
+                            return null;
+                        }
+                        json = await response.Content.ReadAsStringAsync(ct);
+                        if (json.Length * 2 > MaxJsonBodyBytes) // UTF-16 estimate
+                        {
+                            _log.LogWarning("GitHub API response JSON exceeded max size during download");
+                            return null;
+                        }
+                    }
+                    else if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+                    {
+                        // /releases/latest 404s when the repo has no
+                        // releases yet, or every release is a draft, or
+                        // every release is flagged as a pre-release
+                        // (GitHub excludes pre-releases from /latest).
+                        // For the latter cases we have a workable fallback:
+                        // hit /releases?per_page=10 and pick the newest
+                        // non-draft. The list is newest-first by default.
+                        _log.LogDebug("/releases/latest returned 404 — falling back to /releases list");
+                        using var listResp = await redirectValidatingClient.GetAsync(ReleasesListApi, ct);
+                        if (!listResp.IsSuccessStatusCode)
+                        {
+                            // Distinguish "no releases" from "repo is private + no auth".
+                            // Both manifest as 404 to anonymous callers; if no token
+                            // is set, lean toward the private-repo explanation since
+                            // it's actionable. Set GHOSTSHELL_GITHUB_TOKEN env var
+                            // (Personal Access Token with Contents:read scope) to
+                            // let the updater auth into private repos.
+                            var hasToken = !string.IsNullOrWhiteSpace(
+                                Environment.GetEnvironmentVariable("GHOSTSHELL_GITHUB_TOKEN")
+                             ?? Environment.GetEnvironmentVariable("GITHUB_TOKEN"));
+                            if (hasToken)
+                            {
+                                _log.LogInformation(
+                                    "GitHub releases endpoint returned 404 even with a token — repo has no releases yet, or the token lacks Contents:read scope");
+                            }
+                            else
+                            {
+                                _log.LogInformation(
+                                    "GitHub releases endpoint returned 404 — either the repo has no releases yet OR the repo is private (set GHOSTSHELL_GITHUB_TOKEN env var with a Personal Access Token to auth)");
+                            }
+                            return null;
+                        }
+                        var listJson = await listResp.Content.ReadAsStringAsync(ct);
+                        using var listDoc = JsonDocument.Parse(listJson);
+                        if (listDoc.RootElement.ValueKind != JsonValueKind.Array || listDoc.RootElement.GetArrayLength() == 0)
+                        {
+                            _log.LogInformation("GitHub /releases returned empty array — no releases to surface");
+                            return null;
+                        }
+                        JsonElement? picked = null;
+                        foreach (var rel in listDoc.RootElement.EnumerateArray())
+                        {
+                            bool isDraft = rel.TryGetProperty("draft", out var dr) && dr.ValueKind == JsonValueKind.True;
+                            if (!isDraft) { picked = rel; break; }
+                        }
+                        if (picked is null)
+                        {
+                            _log.LogInformation("All GitHub releases are drafts — nothing to surface yet");
+                            return null;
+                        }
+                        json = picked.Value.GetRawText();
+                    }
+                    else
                     {
                         _log.LogWarning("GitHub API returned {StatusCode}", response.StatusCode);
                         return null;
                     }
 
-                    // [FIX: body-size-cap] Cap JSON response at 1 MB
-                    var contentLength = response.Content.Headers.ContentLength ?? 0;
-                    if (contentLength > MaxJsonBodyBytes)
+                    if (json is null)
                     {
-                        _log.LogWarning("GitHub API response too large: {Size} bytes (max: {Max})",
-                            contentLength, MaxJsonBodyBytes);
-                        return null;
-                    }
-
-                    var json = await response.Content.ReadAsStringAsync(ct);
-                    if (json.Length * 2 > MaxJsonBodyBytes) // UTF-16 estimate
-                    {
-                        _log.LogWarning("GitHub API response JSON exceeded max size during download");
+                        // Defence-in-depth — every branch above either set
+                        // json or returned. If we got here, log + bail.
+                        _log.LogWarning("GitHub release JSON not available after fetch (unexpected control flow)");
                         return null;
                     }
 

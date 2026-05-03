@@ -10,11 +10,11 @@ This is a **clean rewrite**. The legacy Flask + browser dashboard
 behavior, schema, and UX patterns — we read from it, we don't depend
 on it.
 
-## Status — Phase 3 (real browser pipeline)
+## Status — Phase 69 (vault aliases + bulk credential import)
 
 - [x] Solution + 4 projects scaffolded
 - [x] Core domain models (Profile, Run, Proxy, DeviceTemplate, ProxyHealthEvent…)
-- [x] SQLite persistence + migrations V1-V4
+- [x] SQLite persistence + migrations V1-V25
 - [x] WPF window, dense theme, custom chrome, app icon
 - [x] Profiles + Proxy + Runs pages with full CRUD
 - [x] Profile editor: name, device template (~25 presets), language, proxy, enrich
@@ -35,7 +35,24 @@ on it.
 - [x] Overview redesign + external fingerprint testers (Phases 31-33)
 - [x] Advertisement section: Domains + Competitors + Ad density (Phase 34)
 - [x] **Inno Setup installer + dual-build pipeline** (Phase 35)
+- [x] Tray icon + background mode + GitHub auto-update (Phases 36-38)
+- [x] Real proxy tester + run queue + bulk profile ops (Phases 61-64)
+- [x] **Browser action recorder** — capture clicks/typing into ScriptStep[] (Phase 63)
+- [x] Wallet import templates (OKX / MetaMask / Phantom) (Phase 67)
+- [x] **Extension popup recorder** — multi-window drain via Selenium handles (Phase 68)
+- [x] **Profile-scoped vault aliases** — `{{vault.SEED}}`, `{{vault.PASSWORD}}`, `{{vault.TOTP}}` resolve through profile-bound credentials, no numeric IDs (Phase 69)
+- [x] **Bulk vault import** — paste CSV / load file / fetch Google Sheet, map columns to fields, auto-bind rows to profiles by name (Phase 69)
 - [ ] Auto-update — Velopack (deferred)
+
+### v0.0.2.2 — splash window stays visible after minimising to tray (this release)
+
+The previous patch (`v0.0.2.1`) only addressed one half of the bug. Some users still saw the splash hanging on screen when the main window was minimised to tray. This release rewrites the splash close path to be paranoid:
+
+- **`App.OnStartup`** — replaced the `Loaded` + fade-animation close path with a `ContentRendered` + synchronous-`Close()` path. `ContentRendered` fires after the first paint of the main window (more reliable than `Loaded` during slow boots) and the subscription is moved to BEFORE `Show()` so we never miss it. A dispatcher-timer fallback (5s) force-closes the splash even if `ContentRendered` never arrives. The handler is single-fire (guarded by a `splashClosed` flag) and unsubscribes itself + nulls the timer to drop every reference to the splash Window — nothing can resurrect it.
+- **`MainWindow.OnClosing`** — removed the `ShowInTaskbar = false` toggle. `Hide()` already takes the window out of the taskbar (WPF: `Visibility = Hidden` removes from taskbar regardless of the flag). Toggling `ShowInTaskbar` on a visible window forces WPF to tear down and recreate the native HWND, which re-fires `Window.Loaded` and was the upstream trigger for the splash visual to flash back into view.
+- **`TrayIconHost.ShowAndActivateMainWindow` / `HideMainWindow`** — same simplification: no `ShowInTaskbar` manipulation on either side. `Show()` / `Hide()` alone handle taskbar membership cleanly.
+
+End result: minimise to tray, restore from tray, repeat — no splash ever reappears.
 
 ## Logs
 

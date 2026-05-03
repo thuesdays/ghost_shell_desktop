@@ -42,7 +42,7 @@ public sealed class MigrationRunner
 
     // Phase 37 audit fix #4: All known migration versions including tolerant ones (11, 13-23).
     // Used to detect downgrade scenario where DB schema is newer than binary's knowledge.
-    private static readonly int[] KnownVersions = new[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23 };
+    private static readonly int[] KnownVersions = new[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25 };
 
     public void Run()
     {
@@ -157,6 +157,31 @@ public sealed class MigrationRunner
         if (!applied.Contains(23))
         {
             ApplyTolerantStatements(conn, 23, Migrations_V23.Statements);
+        }
+
+        // V24 — adds tests_json column to selfcheck_results so we can
+        // store per-probe outcomes (~25 named tests covering navigator,
+        // screen, timezone, webgl, canvas, audio, plugins, automation).
+        // Tolerant: ALTER TABLE … ADD COLUMN throws "duplicate column"
+        // on re-run, which the helper swallows.
+        if (!applied.Contains(24))
+        {
+            ApplyTolerantStatements(conn, 24, Migrations_V24.Statements);
+        }
+
+        // V25 — backfill app_settings.updated_at column. V1 created the
+        // table with only (key, value); V20 re-declared it with the
+        // modern shape including updated_at via CREATE TABLE IF NOT
+        // EXISTS — which is a no-op when the table already exists.
+        // So pre-V20 databases never got the column, every SettingsService
+        // SetStringAsync UPSERT failed silently with "no column named
+        // updated_at", and every Settings checkbox/text change failed
+        // to persist across restarts. Tolerant: ALTER TABLE on a fresh
+        // DB created via V20 will throw "duplicate column" which the
+        // helper swallows.
+        if (!applied.Contains(25))
+        {
+            ApplyTolerantStatements(conn, 25, Migrations_V25.Statements);
         }
     }
 

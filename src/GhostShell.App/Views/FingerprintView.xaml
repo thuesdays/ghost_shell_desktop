@@ -230,6 +230,14 @@
                         </StackPanel>
                     </Grid>
 
+                    <!-- Phase 52 — device templates panel converted to 3-column card grid
+                         for compact scanning. Each card is a compact Border with left-edge
+                         accent stripe (blue=laptop, teal=desktop, violet=mobile). Top row:
+                         template ID (monospace, right-aligned) + form-factor chip. Middle:
+                         specs (single-line, muted). Bottom: weight percent (dim, monospace).
+                         UniformGrid distributes columns evenly; cards stay clickable via
+                         InputBindings on the Border. MaxHeight + ScrollViewer keeps the
+                         whole panel bounded on tall template libraries. -->
                     <ItemsControl ItemsSource="{Binding Templates}"
                                   Margin="0,4,0,12"
                                   MaxHeight="280">
@@ -240,47 +248,148 @@
                                 </ScrollViewer>
                             </ControlTemplate>
                         </ItemsControl.Template>
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <UniformGrid Columns="3"/>
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
                         <ItemsControl.ItemTemplate>
                             <DataTemplate>
-                                <Button Background="Transparent"
-                                        BorderThickness="0"
-                                        Padding="0"
-                                        Margin="0,2"
-                                        HorizontalAlignment="Stretch"
-                                        HorizontalContentAlignment="Stretch"
-                                        Command="{Binding DataContext.SelectTemplateCommand,
-                                                  Source={x:Reference PageRoot}}"
-                                        CommandParameter="{Binding}">
-                                    <Border Padding="8,6"
-                                            CornerRadius="4"
-                                            Background="{StaticResource BgDeep}">
-                                        <Grid>
+                                <!-- Phase 52 — card template for device template. Border with
+                                     left-edge accent stripe (BorderThickness 3,0,0,0) colored per
+                                     FormFactor: laptop→blue, desktop→teal, mobile→violet.
+                                     Clickable via MouseBinding instead of Button so the card
+                                     appearance stays a simple bordered box. Wire the existing
+                                     SelectTemplateCommand via InputBindings. -->
+                                <Border Padding="10,7"
+                                        Margin="3"
+                                        CornerRadius="3"
+                                        Background="{StaticResource BgRaised}"
+                                        BorderThickness="3,0,0,0"
+                                        Cursor="Hand">
+                                    <!-- DataTriggers on Border.Style to color the left stripe
+                                         per FormFactor. Default is TextDim; overridden by matches. -->
+                                    <Border.Style>
+                                        <Style TargetType="Border">
+                                            <Setter Property="BorderBrush" Value="{StaticResource TextDim}"/>
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding FormFactor}" Value="laptop">
+                                                    <Setter Property="BorderBrush" Value="{StaticResource HueBlue}"/>
+                                                </DataTrigger>
+                                                <DataTrigger Binding="{Binding FormFactor}" Value="desktop">
+                                                    <Setter Property="BorderBrush" Value="{StaticResource HueTeal}"/>
+                                                </DataTrigger>
+                                                <DataTrigger Binding="{Binding FormFactor}" Value="mobile">
+                                                    <Setter Property="BorderBrush" Value="{StaticResource HueViolet}"/>
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Border.Style>
+                                    <Border.InputBindings>
+                                        <MouseBinding MouseAction="LeftClick"
+                                                      Command="{Binding DataContext.SelectTemplateCommand,
+                                                                RelativeSource={RelativeSource AncestorType=ItemsControl}}"
+                                                      CommandParameter="{Binding}"/>
+                                    </Border.InputBindings>
+                                    <StackPanel>
+                                        <!-- Top row: template ID (monospace, right-aligned) and
+                                             form-factor chip (small rounded border). -->
+                                        <Grid Margin="0,0,0,4">
                                             <Grid.ColumnDefinitions>
                                                 <ColumnDefinition Width="*"/>
                                                 <ColumnDefinition Width="Auto"/>
                                             </Grid.ColumnDefinitions>
-                                            <StackPanel Grid.Column="0">
-                                                <TextBlock Text="{Binding Label}"
-                                                           Foreground="{StaticResource Text}"
-                                                           FontSize="12"
-                                                           TextTrimming="CharacterEllipsis"/>
-                                                <TextBlock Text="{Binding FormFactor}"
-                                                           Style="{StaticResource DimText}"
-                                                           FontSize="9.5"/>
-                                            </StackPanel>
+                                            <TextBlock Grid.Column="0"
+                                                       Text="{Binding Id}"
+                                                       FontFamily="{StaticResource FontMono}"
+                                                       FontSize="10"
+                                                       FontWeight="SemiBold"
+                                                       Foreground="{StaticResource Text}"
+                                                       TextTrimming="CharacterEllipsis"/>
+                                            <!-- Form-factor chip: small rounded border with
+                                                 text showing "laptop"/"desktop"/"phone". Color-coded
+                                                 to match the stripe. -->
                                             <Border Grid.Column="1"
-                                                    Padding="6,1"
-                                                    Margin="6,0,0,0"
-                                                    CornerRadius="3"
-                                                    Background="{StaticResource BgRaised}">
-                                                <TextBlock Text="{Binding WeightPct}"
-                                                           Foreground="{StaticResource TextMuted}"
-                                                           FontFamily="{StaticResource FontMono}"
-                                                           FontSize="10"/>
+                                                    Padding="5,2"
+                                                    Margin="4,0,0,0"
+                                                    CornerRadius="2"
+                                                    Background="{StaticResource BgDeep}">
+                                                <TextBlock Text="{Binding FormFactor}"
+                                                           FontSize="8"
+                                                           FontWeight="SemiBold"
+                                                           Foreground="{StaticResource TextMuted}">
+                                                    <TextBlock.Style>
+                                                        <Style TargetType="TextBlock">
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding FormFactor}" Value="laptop">
+                                                                    <Setter Property="Foreground" Value="{StaticResource HueBlue}"/>
+                                                                </DataTrigger>
+                                                                <DataTrigger Binding="{Binding FormFactor}" Value="desktop">
+                                                                    <Setter Property="Foreground" Value="{StaticResource HueTeal}"/>
+                                                                </DataTrigger>
+                                                                <DataTrigger Binding="{Binding FormFactor}" Value="mobile">
+                                                                    <Setter Property="Foreground" Value="{StaticResource HueViolet}"/>
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </TextBlock.Style>
+                                                </TextBlock>
                                             </Border>
                                         </Grid>
-                                    </Border>
-                                </Button>
+                                        <!-- Middle row: specs (single-line, ellipsis-trimmed,
+                                             muted text). Content comes from Label binding. -->
+                                        <TextBlock Text="{Binding Label}"
+                                                   FontSize="10"
+                                                   Foreground="{StaticResource TextMuted}"
+                                                   TextTrimming="CharacterEllipsis"
+                                                   Margin="0,0,0,4"/>
+                                        <!-- Bottom-right: weight percent badge with dynamic
+                                             colors based on WeightTier. WPF DataTrigger only
+                                             does EXACT-equality match (no >=, <), so we bind to
+                                             a pre-computed tier string ("top"/"med"/"low")
+                                             instead of trying numeric ranges directly.
+                                             Phase 54 fix: previous Value="5" / Value="4" only
+                                             matched the literal floats 5.0 and 4.0 — almost
+                                             never true → no card was ever amber/teal. -->
+                                        <Border CornerRadius="2"
+                                                Padding="6,2"
+                                                HorizontalAlignment="Right"
+                                                BorderThickness="0">
+                                            <Border.Style>
+                                                <Style TargetType="Border">
+                                                    <Setter Property="Background" Value="{StaticResource BgDeep}"/>
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding WeightTier}" Value="top">
+                                                            <Setter Property="Background" Value="{StaticResource HueAmber}"/>
+                                                        </DataTrigger>
+                                                        <DataTrigger Binding="{Binding WeightTier}" Value="med">
+                                                            <Setter Property="Background" Value="{StaticResource HueTeal}"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </Border.Style>
+                                            <TextBlock Text="{Binding WeightPct}"
+                                                       FontFamily="{StaticResource FontMono}"
+                                                       FontSize="11"
+                                                       FontWeight="SemiBold"
+                                                       TextAlignment="Right">
+                                                <TextBlock.Style>
+                                                    <Style TargetType="TextBlock">
+                                                        <Setter Property="Foreground" Value="{StaticResource TextDim}"/>
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding WeightTier}" Value="top">
+                                                                <Setter Property="Foreground" Value="White"/>
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding WeightTier}" Value="med">
+                                                                <Setter Property="Foreground" Value="White"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </TextBlock.Style>
+                                            </TextBlock>
+                                        </Border>
+                                    </StackPanel>
+                                </Border>
                             </DataTemplate>
                         </ItemsControl.ItemTemplate>
                     </ItemsControl>
@@ -350,48 +459,155 @@
             </Border>
 
             <!-- ─── RUNTIME SELF-CHECK ─────────────────────────────
-                 Network-layer probes that run on profile launch (exit
-                 IP, geo, WebRTC leak, timezone). Empty state for v1
-                 — populated when probe data starts arriving from the
-                 background runtime hooks. -->
-            <Border Style="{StaticResource Card}" Padding="16" Margin="0,0,0,14">
-                <StackPanel>
-                    <Grid>
+                 Comprehensive per-probe test results covering ~25 probes:
+                 navigator, screen, timezone, WebGL, canvas, audio,
+                 plugins, network (exit IP, WebRTC), and automation.
+                 Each test renders as a card with expected vs actual
+                 values and pass/warn/fail/skip status. -->
+            <Border Style="{StaticResource Card}" Padding="0" Margin="0,0,0,14">
+                <DockPanel LastChildFill="True">
+                    <Grid DockPanel.Dock="Top" Margin="14,12,14,8">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
-                        <StackPanel Grid.Column="0" Orientation="Horizontal">
-                            <TextBlock Text="🛰  RUNTIME SELF-CHECK"
-                                       Foreground="{StaticResource Text}"
-                                       FontSize="13" FontWeight="Bold"
-                                       VerticalAlignment="Center"/>
+                        <StackPanel Grid.Column="0">
+                            <TextBlock Foreground="{StaticResource Text}"
+                                       FontSize="14" FontWeight="SemiBold">
+                                <Run Text="🛰  RUNTIME SELF-CHECK · "/>
+                                <Run Text="{Binding SelfCheckScoreSummary, Mode=OneWay}"
+                                     Foreground="{StaticResource TextDim}"/>
+                            </TextBlock>
                             <TextBlock Style="{StaticResource MutedText}"
-                                       FontSize="12"
-                                       VerticalAlignment="Center"
-                                       Margin="10,0,0,0"
-                                       Text="— network probes per run: exit IP, geo, WebRTC, timezone"/>
+                                       FontSize="11" Margin="0,2,0,0">
+                                <Run Text="~25 per-probe tests: navigator, screen, timezone, WebGL, canvas, audio, network"/>
+                            </TextBlock>
                         </StackPanel>
                     </Grid>
-                    <Border Background="{StaticResource Border}"
-                            Height="1" Margin="0,8,0,0"/>
-                    <TextBlock Style="{StaticResource MutedText}"
-                               Margin="0,12,0,0"
-                               TextWrapping="Wrap"
-                               FontSize="11"
-                               Text="Checks that run against the network layer on every Nth run (configurable in Proxy → self-check cadence). These verify that the proxy actually routes traffic through the expected country and doesn't leak WebRTC. For fingerprint coherence checks (UA, fonts, GPU, timezone plausibility) and a live stealth probe, see the section above."/>
+
+                    <!-- Per-probe test cards — compact grid layout.
+                         Each card is fixed-width (~210px) and wraps so
+                         the page reflows for narrow / wide windows.
+                         Card top-border accent uses the test's status
+                         colour for at-a-glance scanning of which checks
+                         passed / failed. Hover shows the full
+                         expected → actual diff in the tooltip — keeps
+                         the card itself uncluttered. -->
+                    <ItemsControl ItemsSource="{Binding SelfCheckTests}"
+                                  Margin="14,4,14,8">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <WrapPanel Orientation="Horizontal"/>
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <!-- Phase 35 — self-check cards are now clickable.
+                                     MouseLeftButtonUp opens the detail dialog via
+                                     ShowSelfCheckDetailCommand. The cursor changes
+                                     to Hand on hover to signal interactivity. -->
+                                <!-- Tooltip on the OUTER border so the
+                                     whole card is hover-target. The tip
+                                     spells out expected → actual + the
+                                     detail (failure reason) so the
+                                     compact card body can stay clean. -->
+                                <!-- No border — the status-coloured
+                                     background tint + matching badge
+                                     text already convey the result.
+                                     A border would double-encode and
+                                     visually clutter the grid. -->
+                                <Border Width="210" Margin="3"
+                                        Background="{Binding StatusBgBrush}"
+                                        BorderThickness="0"
+                                        CornerRadius="4"
+                                        Padding="9,7,9,8"
+                                        ToolTip="{Binding TooltipText}"
+                                        Cursor="Hand">
+                                    <!-- Phase 35 — wire click event to ShowSelfCheckDetailCommand.
+                                         Pass the card VM as parameter so the handler can access
+                                         all properties (expected, actual, status, etc.). -->
+                                    <Border.InputBindings>
+                                        <MouseBinding MouseAction="LeftClick"
+                                                      Command="{Binding DataContext.ShowSelfCheckDetailCommand,
+                                                                RelativeSource={RelativeSource AncestorType=ItemsControl}}"
+                                                      CommandParameter="{Binding}"/>
+                                    </Border.InputBindings>
+                                    <StackPanel>
+                                        <!-- Top row: status dot + category
+                                             icon + label. Label trims with
+                                             ellipsis if it's too long for
+                                             the 210px card width. -->
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="Auto"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                                <ColumnDefinition Width="*"/>
+                                            </Grid.ColumnDefinitions>
+                                            <Ellipse Grid.Column="0"
+                                                     Width="8" Height="8"
+                                                     VerticalAlignment="Center"
+                                                     Margin="0,0,6,0"
+                                                     Fill="{Binding StatusColour}"/>
+                                            <TextBlock Grid.Column="1"
+                                                       Text="{Binding CategoryIcon}"
+                                                       FontSize="11"
+                                                       Margin="0,0,5,0"
+                                                       VerticalAlignment="Center"
+                                                       Opacity="0.7"/>
+                                            <TextBlock Grid.Column="2"
+                                                       Text="{Binding Label}"
+                                                       Foreground="{StaticResource Text}"
+                                                       FontSize="11.5"
+                                                       FontWeight="SemiBold"
+                                                       VerticalAlignment="Center"
+                                                       TextTrimming="CharacterEllipsis"/>
+                                        </Grid>
+                                        <!-- Bottom row: short status badge
+                                             ("PASS" / "FAIL X" / "skip" /
+                                             "warn"). Coloured to match
+                                             the top border so the card
+                                             reads as one unit even when
+                                             scanning fast. -->
+                                        <TextBlock Text="{Binding StatusBadge}"
+                                                   Foreground="{Binding StatusColour}"
+                                                   FontFamily="{StaticResource FontMono}"
+                                                   FontSize="9.5"
+                                                   FontWeight="Bold"
+                                                   Margin="14,3,0,0"
+                                                   TextTrimming="CharacterEllipsis"/>
+                                    </StackPanel>
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+
+                    <!-- Empty state — only visible when there are no
+                         test cards. Bound to a converter-free count
+                         comparison via DataTrigger; otherwise this
+                         border would always show under the cards. -->
                     <Border Background="{StaticResource BgDeep}"
                             CornerRadius="6"
                             Padding="20"
-                            Margin="0,14,0,0">
+                            Margin="14,0,14,12"
+                            DockPanel.Dock="Bottom">
+                        <Border.Style>
+                            <Style TargetType="Border">
+                                <Setter Property="Visibility" Value="Collapsed"/>
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding SelfCheckTests.Count}" Value="0">
+                                        <Setter Property="Visibility" Value="Visible"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Border.Style>
                         <TextBlock Foreground="{StaticResource TextMuted}"
                                    FontSize="12"
                                    HorizontalAlignment="Center"
                                    TextAlignment="Center"
                                    TextWrapping="Wrap"
-                                   Text="No selfcheck data yet. Launch the profile once to score it."/>
+                                   Text="No self-check data yet. Launch the profile once to populate per-probe test results."/>
                     </Border>
-                </StackPanel>
+                </DockPanel>
             </Border>
 
             <!-- ─── EXTERNAL FINGERPRINT TESTERS ──────────────────── -->

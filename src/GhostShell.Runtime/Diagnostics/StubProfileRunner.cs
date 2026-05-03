@@ -35,7 +35,19 @@ public sealed class StubProfileRunner : IProfileRunner
     public event EventHandler? ActiveChanged;
 
     public Task<long> StartAsync(Profile profile, CancellationToken ct = default)
+        => StartAsync(profile, ct, runAssignedScript: true, restoreSession: true);
+
+    public Task<long> StartAsync(
+        Profile profile, CancellationToken ct = default,
+        bool runAssignedScript = true,
+        bool restoreSession = true)
     {
+        // The stub doesn't actually launch chrome, run scripts, or
+        // restore sessions — both flags have no effect here. They
+        // exist only to satisfy IProfileRunner's expanded contract
+        // (Phase 49 added restoreSession for fast probe launches).
+        _ = runAssignedScript;
+        _ = restoreSession;
         if (_active.ContainsKey(profile.Name))
             throw new InvalidOperationException($"Profile '{profile.Name}' is already running.");
 

@@ -245,6 +245,14 @@ public class SessionWatchdogTests
         public Task<string> CaptureScreenshotAsync(string path, CancellationToken ct = default) =>
             Task.FromResult(path);
 
+        // Phase 68 — multi-window stubs.
+        public Task<IReadOnlyList<string>> GetWindowHandlesAsync(CancellationToken ct = default)
+            => Task.FromResult<IReadOnlyList<string>>(new[] { "main" });
+        public Task<string> GetCurrentWindowHandleAsync(CancellationToken ct = default)
+            => Task.FromResult("main");
+        public Task SwitchToWindowAsync(string handle, CancellationToken ct = default)
+            => Task.CompletedTask;
+
         public ValueTask DisposeAsync()
         {
             IsAlive = false;
@@ -287,5 +295,10 @@ public class SessionWatchdogTests
         public Task<Run?>                 GetAsync(long id, CancellationToken ct = default) => Task.FromResult<Run?>(null);
         public Task<RunStats>             GetStatsAsync(CancellationToken ct = default) =>
             Task.FromResult(new RunStats());
+        // Phase 54 — DeleteAsync added to IRunService for the Runs-page
+        // delete-row icon. The watchdog tests don't exercise delete, so
+        // this stub returns false (no row removed) and never throws.
+        public Task<bool>                 DeleteAsync(long runId, CancellationToken ct = default) =>
+            Task.FromResult(false);
     }
 }

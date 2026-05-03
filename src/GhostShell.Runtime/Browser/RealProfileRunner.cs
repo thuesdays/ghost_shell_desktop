@@ -78,6 +78,16 @@ public sealed class RealProfileRunner : IProfileRunner, IAsyncDisposable
 
     private readonly ISelfCheckService? _selfCheck;
 
+    /// <summary>
+    /// Phase 59 — optional profile service used to bump <c>run_count</c>
+    /// + <c>last_run_at</c> on every successful run start. Optional so
+    /// the unit tests that wire RealProfileRunner with a minimal DI
+    /// surface don't have to provide a profile service stub. When null,
+    /// the counter increment is skipped silently and only the row in
+    /// the runs table is created (legacy behaviour).
+    /// </summary>
+    private readonly IProfileService? _profiles;
+
     public RealProfileRunner(
         IBrowserLauncher launcher,
         IRunService runs,
@@ -86,7 +96,8 @@ public sealed class RealProfileRunner : IProfileRunner, IAsyncDisposable
         IScriptService? scripts = null,
         IScriptRunner?  scriptRunner = null,
         IVaultService?  vault = null,
-        ISelfCheckService? selfCheck = null)
+        ISelfCheckService? selfCheck = null,
+        IProfileService? profiles = null)
     {
         _launcher         = launcher;
         _runs             = runs;
@@ -95,6 +106,7 @@ public sealed class RealProfileRunner : IProfileRunner, IAsyncDisposable
         _scriptRunner     = scriptRunner;
         _vault            = vault;
         _selfCheck        = selfCheck;
+        _profiles         = profiles;
         _loggerFactory    = loggerFactory;
         _log              = loggerFactory.CreateLogger<RealProfileRunner>();
     }
@@ -115,7 +127,13 @@ public sealed class RealProfileRunner : IProfileRunner, IAsyncDisposable
 
     public event EventHandler? ActiveChanged;
 
-    public async Task<long> StartAsync(Profile profile, CancellationToken ct = default)
+    public Task<long> StartAsync(Profile profile, CancellationToken ct = default)
+        => StartAsync(profile, ct, runAssignedScript: true, restoreSession: true);
+
+    public async Task<long> StartAsync(
+        Profile profile, CancellationToken ct = default,
+        bool runAssignedScript = true,
+        bool restoreSession = true)
     {
         if (_disposed) throw new ObjectDisposedException(nameof(RealProfileRunner));
         if (_sessions.ContainsKey(profile.Name))
@@ -136,6 +154,26 @@ public sealed class RealProfileRunner : IProfileRunner, IAsyncDisposable
         // matters: insert first, then launch, then commit the runId
         // to the in-memory dictionary.
         var runId = await _runs.StartAsync(profile.Name, ct);
+
+        // Phase 59 — bump the per-profile run_count + last_run_at
+        // counter so the Profiles page card's "RUNS" tile shows the
+        // accumulated total (the legacy desktop never wired this and
+        // the counter sat at 0 forever, even after dozens of starts).
+        // Best-effort: a counter-bump failure shouldn't sink the run
+        // — we already have the runs row.
+        if (_profiles is not null)
+        {
+            try
+            {
+                await _profiles.RecordRunStartedAsync(profile.Name, DateTime.UtcNow, ct);
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex,
+                    "Couldn't bump run_count for '{Name}' (run #{Run})",
+                    profile.Name, runId);
+            }
+        }
 
         IBrowserSession session;
         try
@@ -176,7 +214,11 @@ public sealed class RealProfileRunner : IProfileRunner, IAsyncDisposable
                 StopInternalAsync(name, "external_close", exitCode: 130, innerCt),
             log:             _loggerFactory.CreateLogger<SessionWatchdog>());
 
-        _sessions[profile.Name] = new ActiveSession(session, runId, watchdog);
+        // Mark browser-only when EITHER no script kick OR no session
+        // restore was requested — both signals indicate "this is a
+        // fingerprint probe, don't do heavy state I/O around it".
+        var isBrowserOnly = !runAssignedScript || !restoreSession;
+        _sessions[profile.Name] = new ActiveSession(session, runId, watchdog, isBrowserOnly);
         watchdog.Start();
         ActiveChanged?.Invoke(this, EventArgs.Empty);
 
@@ -205,20 +247,32 @@ public sealed class RealProfileRunner : IProfileRunner, IAsyncDisposable
         // forget; failures only affect the panel, not the run itself.
         if (_selfCheck is not null)
         {
+            // Capture the CancellationToken VALUE (struct) before the
+            // Task.Run closure starts, NOT the CancellationTokenSource
+            // by reference. Reason: between StartAsync returning and
+            // the 3-second Task.Delay completing, the run can be
+            // Stop()-ed, which disposes scriptCts (it's removed from
+            // _scriptCts and Disposed in StopInternalAsync). Reading
+            // `scriptCts.Token` after disposal throws ObjectDisposedException.
+            // A captured CancellationToken keeps working — IsCancellationRequested
+            // returns true if it was cancelled, but the token itself doesn't
+            // throw on access after the source is gone.
+            var selfCheckToken = scriptCts.Token;
             _ = Task.Run(async () =>
             {
                 try
                 {
-                    await Task.Delay(TimeSpan.FromSeconds(3), scriptCts.Token);
+                    await Task.Delay(TimeSpan.FromSeconds(3), selfCheckToken);
                     await _selfCheck.RunAsync(
                         session, profile.Name, runId,
                         expectedTimezone: null,
-                        ct: scriptCts.Token);
+                        ct: selfCheckToken);
                     _log.LogInformation(
                         "Self-check completed for '{Name}' (run #{Run})",
                         profile.Name, runId);
                 }
                 catch (OperationCanceledException) { /* user stopped */ }
+                catch (ObjectDisposedException) { /* run was disposed before probes ran */ }
                 catch (Exception ex)
                 {
                     _log.LogWarning(ex,
@@ -237,13 +291,50 @@ public sealed class RealProfileRunner : IProfileRunner, IAsyncDisposable
         // want cookies in place BEFORE the script starts driving.
         _ = Task.Run(async () =>
         {
-            try { await _sessionLifecycle.RestoreLatestAsync(session); }
-            catch (Exception ex)
+            // Skip the snapshot auto-restore for browser-only launches
+            // (Fingerprint probes). Restoring 200+ cookies and 20-odd
+            // storage-origin navigations adds 30+ seconds — wasted
+            // because canvas / audio / WebGL fingerprint signals are
+            // independent of cookie state. The snapshot stays in DB
+            // for the next REAL run that flips restoreSession=true.
+            if (restoreSession)
             {
-                _log.LogWarning(ex,
-                    "Auto-restore (background) crashed for '{Name}'", profile.Name);
+                try { await _sessionLifecycle.RestoreLatestAsync(session); }
+                catch (Exception ex)
+                {
+                    _log.LogWarning(ex,
+                        "Auto-restore (background) crashed for '{Name}'", profile.Name);
+                }
             }
-            await KickAssignedScriptAsync(profile, session, scriptCts);
+            else
+            {
+                _log.LogInformation(
+                    "Skipping snapshot auto-restore for '{Name}' (restoreSession=false)",
+                    profile.Name);
+            }
+            // Skip the assigned-script kick for browser-only launches
+            // (Fingerprint page's "Probe in profile"). The cookie
+            // restore above still runs because external testers care
+            // about a realistic session state. Without this gate, the
+            // user's automation script (GoodMedika / search-and-click /
+            // whatever they have assigned) would race against the
+            // tester navigations, swap tabs out from under them, and
+            // counts of "ads clicked" would balloon during what should
+            // be a passive fingerprint probe.
+            if (runAssignedScript)
+            {
+                await KickAssignedScriptAsync(profile, session, scriptCts);
+            }
+            else
+            {
+                // Still need to clean up the registered CTS so Stop
+                // can find a path to cancel the (browser-only) run.
+                _scriptCts.TryRemove(profile.Name, out _);
+                scriptCts.Dispose();
+                _log.LogInformation(
+                    "Browser-only launch for '{P}' (assigned script kick suppressed)",
+                    profile.Name);
+            }
         });
 
         return runId;
@@ -326,8 +417,10 @@ public sealed class RealProfileRunner : IProfileRunner, IAsyncDisposable
                 // references no items, the bag is empty — placeholders
                 // fall through to the literal text.
                 IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>>? vault = null;
+                IReadOnlyDictionary<string, string>? vaultAliases = null;
                 if (_vault is not null && _vault.IsUnlocked)
                 {
+                    // Numeric-id refs ({{vault.42.password}}) — Phase 24.
                     var refs = GhostShell.Runtime.Scripts.ScriptRunner.CollectVaultRefs(
                         script.StepsJson, script.NodesJson);
                     if (refs.Count > 0)
@@ -339,19 +432,104 @@ public sealed class RealProfileRunner : IProfileRunner, IAsyncDisposable
                                 "Vault resolve failed; vault placeholders will fall through to literal text");
                         }
                     }
+                    // Phase 69 — alias refs ({{vault.SEED}}, {{vault.PRIVKEY}}, …)
+                    // resolved per-profile so a single shared script can run
+                    // unchanged across 100 profiles, each pulling its own
+                    // bound credentials.
+                    var aliases = GhostShell.Runtime.Scripts.ScriptRunner.CollectVaultAliases(
+                        script.StepsJson, script.NodesJson);
+                    if (aliases.Count > 0)
+                    {
+                        try
+                        {
+                            vaultAliases = await _vault.ResolveAliasesAsync(
+                                profile.Name, aliases, cts.Token);
+                            _log.LogInformation(
+                                "Vault aliases resolved for '{P}': {N}/{Total} matched ({Hits})",
+                                profile.Name, vaultAliases.Count, aliases.Count,
+                                string.Join(",", vaultAliases.Keys));
+                        }
+                        catch (Exception aex)
+                        {
+                            _log.LogWarning(aex,
+                                "Vault alias resolve failed; alias placeholders will fall through");
+                        }
+                    }
                 }
                 await _scriptRunner.ExecuteAsync(
                     script, session, profile.Name, cts.Token,
-                    myDomains, tgDomains, vault);
+                    myDomains, tgDomains, vault, vaultAliases);
+
+                // Phase 60c — script finished cleanly. Auto-close the
+                // browser session so we don't leave an orphan window
+                // burning proxy bandwidth and rotating fingerprints
+                // against nothing. The probe-in-profile path already does
+                // this (FingerprintViewModel.ProbeInProfileAsync has its
+                // own auto-close); the regular "kick assigned script"
+                // path was missing it — the browser stayed open after
+                // the script ran to completion until the user manually
+                // closed the window or pressed Stop. Set a marker on
+                // ActiveSession so the StopAsync caller can attribute
+                // the stop reason in the runs row + skip warmup tracking
+                // (this isn't a user-initiated stop). Best-effort: a
+                // close failure shouldn't crash the script outcome —
+                // we already finished, the watchdog will catch the
+                // dying session and clean up.
+                _log.LogInformation(
+                    "Script '{Name}' for '{P}' finished cleanly; auto-closing browser",
+                    script.Name, profile.Name);
+                try
+                {
+                    await StopInternalAsync(
+                        profile.Name, "script_completed",
+                        exitCode: 0, ct: CancellationToken.None);
+                }
+                catch (Exception closeEx)
+                {
+                    _log.LogWarning(closeEx,
+                        "Auto-close after script for '{P}' failed (browser may already be gone)",
+                        profile.Name);
+                }
             }
         }
         catch (OperationCanceledException)
         {
             _log.LogInformation("Script for '{P}' cancelled (profile stopping)", profile.Name);
         }
+        catch (GhostShell.Runtime.Scripts.ScriptRunner.ScriptAbortException abortEx)
+        {
+            // Phase 61c — explicit abort path. Distinguished from generic
+            // Exception so the log shows the user-actionable abort reason
+            // (browser session died, proxy timeout, abort_on_error step)
+            // instead of a stack-trace dump. Common causes: free proxy
+            // can't reach Google, the user closed the browser window,
+            // or a step threw with abort_on_error=true configured.
+            _log.LogWarning(
+                "Script '{Name}' for '{P}' ABORTED: {Reason}",
+                script?.Name ?? "—", profile.Name, abortEx.Message);
+            try
+            {
+                await StopInternalAsync(
+                    profile.Name, "script_aborted",
+                    exitCode: 2, ct: CancellationToken.None);
+            }
+            catch { /* swallow — teardown best-effort */ }
+        }
         catch (Exception ex)
         {
             _log.LogError(ex, "Script for '{P}' crashed", profile.Name);
+            // Phase 60c — also auto-close on crash so a broken script
+            // doesn't leave a runaway browser. The runs row's exit_code
+            // will be set to the crash exit code by the cancellation /
+            // exception path; we just need to make sure the browser
+            // process tears down. Best-effort.
+            try
+            {
+                await StopInternalAsync(
+                    profile.Name, "script_crashed",
+                    exitCode: 1, ct: CancellationToken.None);
+            }
+            catch { /* swallow — already in error path */ }
         }
         finally
         {
@@ -454,7 +632,15 @@ public sealed class RealProfileRunner : IProfileRunner, IAsyncDisposable
         // will throw; on a clean stop we still have a working driver
         // and want to persist the cookies the user just earned.
         // Skipping is the safe default for any non-zero exit.
-        if (exitCode == 0)
+        //
+        // ALSO skip for browser-only launches (Fingerprint probes).
+        // CaptureCleanRunAsync navigates to every cookie domain to
+        // read its localStorage — for a 50-origin profile that's
+        // 50 page loads = ~45 seconds of "chaotic page navigation"
+        // after probe completes. The probe never modified state so
+        // there's nothing to save; the previous snapshot is still
+        // current and gets used by the next REAL run.
+        if (exitCode == 0 && !active.IsBrowserOnly)
         {
             try
             {
@@ -465,6 +651,12 @@ public sealed class RealProfileRunner : IProfileRunner, IAsyncDisposable
                 _log.LogWarning(ex,
                     "Auto-snapshot threw for '{Name}' — teardown continues", profileName);
             }
+        }
+        else if (active.IsBrowserOnly)
+        {
+            _log.LogInformation(
+                "Skipping auto-snapshot for '{Name}' (browser-only launch — probe didn't modify state)",
+                profileName);
         }
 
         // Tear the session down (driver.Quit + chromedriver dispose
@@ -526,8 +718,19 @@ public sealed class RealProfileRunner : IProfileRunner, IAsyncDisposable
     /// Bundles a session + its watchdog + DB run id so Stop / dispose
     /// paths can finalise the right run row without a second lookup.
     /// </summary>
+    /// <summary>
+    /// <paramref name="IsBrowserOnly"/>: true when StartAsync was
+    /// called with runAssignedScript=false OR restoreSession=false
+    /// (i.e. the Fingerprint page's "Probe in profile" command).
+    /// On clean-stop we SKIP the auto-snapshot save — restoring +
+    /// re-saving 200 cookies + 50 storage origins around a probe
+    /// adds 90 SECONDS of "chaotic page navigations" to a flow
+    /// that should take ~10 seconds total. The probe never modified
+    /// session state so there's nothing to persist anyway.
+    /// </summary>
     private sealed record ActiveSession(
         IBrowserSession Session,
         long RunId,
-        SessionWatchdog Watchdog);
+        SessionWatchdog Watchdog,
+        bool IsBrowserOnly = false);
 }

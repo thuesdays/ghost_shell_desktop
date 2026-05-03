@@ -71,5 +71,6 @@ public interface IScriptRunner
         CancellationToken ct = default,
         IEnumerable<string>? myDomains = null,
         IEnumerable<string>? targetDomains = null,
-        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>>? vault = null);
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>>? vault = null,
+        IReadOnlyDictionary<string, string>? vaultAliases = null);
 }

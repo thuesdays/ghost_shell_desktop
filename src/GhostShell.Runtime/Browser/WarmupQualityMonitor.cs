@@ -67,8 +67,31 @@ public sealed class WarmupQualityMonitor : BackgroundService
         _log = log;
     }
 
+    /// <summary>
+    /// Master kill-switch for the autonomous monitor. Default OFF —
+    /// users were complaining that probes (which insert run rows but
+    /// don't touch captchas) appeared to "trigger" warmups: in fact
+    /// the monitor was firing on stale captcha data from earlier
+    /// real runs, but the timing made it LOOK like the probe caused
+    /// it. With opt-in enable, no surprise launches happen unless
+    /// the user explicitly turns this on. Set via app setting
+    /// AUTOWARMUP_QUALITY_MONITOR=1 (env var) when needed.
+    /// </summary>
+    private static bool IsEnabled() =>
+        string.Equals(
+            Environment.GetEnvironmentVariable("AUTOWARMUP_QUALITY_MONITOR"),
+            "1", StringComparison.Ordinal);
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        if (!IsEnabled())
+        {
+            _log.LogInformation(
+                "WarmupQualityMonitor disabled (AUTOWARMUP_QUALITY_MONITOR != '1'). " +
+                "Set the env var to '1' to enable the captcha-rate-driven autonomous warmup.");
+            return;
+        }
+
         // Wait one tick before evaluating so the rest of the host
         // (scheduler, watchdog, etc.) has settled. A cold startup
         // shouldn't fire warmups because of pre-load runs that

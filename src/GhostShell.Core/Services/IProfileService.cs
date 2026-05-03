@@ -19,6 +19,18 @@ public interface IProfileService
     Task           DeleteAsync(string name, CancellationToken ct = default);
 
     /// <summary>
+    /// Phase 59 — atomic increment of <c>run_count</c> + bump of
+    /// <c>last_run_at</c> for the named profile. Called by the profile
+    /// runner whenever a new run starts so the Profiles card's RUNS
+    /// counter reflects reality. Uses a single UPDATE statement so two
+    /// concurrent starts of the same profile never race the counter
+    /// (the runner already serialises starts per-profile, but the SQL
+    /// guarantee is cheaper than relying on that invariant). Returns
+    /// silently if the profile doesn't exist.
+    /// </summary>
+    Task RecordRunStartedAsync(string name, DateTime startedAt, CancellationToken ct = default);
+
+    /// <summary>
     /// Generate <paramref name="count"/> profiles with a shared prefix
     /// and a 3-digit numeric suffix, round-robining the proxy pool
     /// across the new rows. Skips existing names — caller gets a split

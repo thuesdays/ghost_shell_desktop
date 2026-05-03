@@ -190,20 +190,27 @@ public sealed partial class CookiePacksViewModel : BaseViewModel
     }
 
     [RelayCommand]
-    private async Task DeleteAsync(CookiePack? pack)
+    private async Task DeleteCookiePackAsync(CookiePack? pack)
     {
         if (pack is null) return;
+        // ConfirmAsync(title, message, confirmLabel, severity) — 4-arg
+        // signature; "Cancel" label is implicit. Pass severity by name
+        // since confirmLabel is positional.
         var ok = await _dialogs.ConfirmAsync(
             $"Delete pack '{pack.Label}'?",
             $"This permanently removes pack #{pack.Id} (slug: {pack.Slug}, " +
-            $"{pack.CookiesCount} cookies). There's no undo.",
-            "Delete", ConfirmSeverity.Danger);
+            $"{pack.CookiesCount} cookies, {pack.StorageCount} storage origins). There's no undo.",
+            confirmLabel: "Delete",
+            severity:     ConfirmSeverity.Warning);
         if (!ok) return;
 
         try
         {
             await _packs.DeleteAsync(pack.Id);
-            await ReloadAsync();
+            Items.Remove(pack);
+            Total = Items.Count;
+            IsEmpty = Items.Count == 0;
+            _log.LogInformation("Pack #{Id} ('{Label}') deleted", pack.Id, pack.Label);
         }
         catch (Exception ex)
         {

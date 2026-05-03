@@ -121,6 +121,37 @@ internal sealed class ProfileService : IProfileService
         _log.LogInformation("Updated profile '{Name}'", p.Name);
     }
 
+    /// <summary>
+    /// Phase 59 — atomic counter bump on run start. Single UPDATE so
+    /// concurrent runs of the same profile (which the runner technically
+    /// forbids, but the SQL guarantee is free) can't lose increments.
+    /// We don't touch updated_at here because run-start isn't a
+    /// "user edited the profile" event and we don't want it to leak
+    /// into the "Recently modified" sort on the Profiles page.
+    /// </summary>
+    public async Task RecordRunStartedAsync(
+        string name, DateTime startedAt, CancellationToken ct = default)
+    {
+        const string sql = """
+            UPDATE profiles
+               SET run_count   = run_count + 1,
+                   last_run_at = @StartedAt
+             WHERE name        = @Name;
+        """;
+        var rows = await _db.Get().ExecuteAsync(
+            sql, new { Name = name, StartedAt = startedAt });
+        if (rows == 0)
+        {
+            _log.LogWarning(
+                "RecordRunStartedAsync: no profile row updated for name='{Name}'", name);
+        }
+        else
+        {
+            _log.LogDebug(
+                "RecordRunStartedAsync: incremented run_count for '{Name}'", name);
+        }
+    }
+
     public async Task DeleteAsync(string name, CancellationToken ct = default)
     {
         // Phase 24 audit fix — application-level cascade. None of the

@@ -4,6 +4,7 @@
 using System.Windows;
 using GhostShell.Core.Models;
 using GhostShell.Core.Services;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
 namespace GhostShell.App.Dialogs;
@@ -24,6 +25,7 @@ internal sealed class DialogService : IDialogService
     private readonly IProfileService _profiles;
     private readonly IProfileGroupService _groups;
     private readonly IScheduleService _schedules;
+    private readonly IServiceProvider _sp;            // Phase 63 — for recorder VM
     private readonly ILogger<DialogService> _log;
 
     public DialogService(
@@ -31,13 +33,48 @@ internal sealed class DialogService : IDialogService
         IProfileService profiles,
         IProfileGroupService groups,
         IScheduleService schedules,
+        IServiceProvider sp,
         ILogger<DialogService> log)
     {
         _proxies   = proxies;
         _profiles  = profiles;
         _groups    = groups;
         _schedules = schedules;
+        _sp        = sp;
         _log       = log;
+    }
+
+    public async Task<Script?> ShowScriptRecorderAsync()
+    {
+        // Build the dialog VM via DI — ScriptRecorderViewModel resolves
+        // IScriptRecorder + IProfileService + IProfileRunner + IScriptService
+        // from the container. Generic overload throws cleanly if the type
+        // can't be constructed (instead of an unsafe cast post-NRE).
+        var vm = ActivatorUtilities.CreateInstance<ScriptRecorderViewModel>(_sp);
+        await vm.LoadProfileNamesAsync();
+        var app = Application.Current;
+        if (app is null) return null;
+        return await app.Dispatcher.InvokeAsync(() =>
+        {
+            var dlg = new ScriptRecorderDialog(vm);
+            if (app.MainWindow is not null) dlg.Owner = app.MainWindow;
+            var ok = dlg.ShowDialog() == true;
+            _log.LogDebug("ScriptRecorder closed: ok={Ok}, created={CreatedId}",
+                ok, dlg.CreatedScript?.Id ?? 0);
+            return ok ? dlg.CreatedScript : null;
+        });
+    }
+
+    public async Task<BulkStartOptions?> ShowBulkStartOptionsAsync(int profileCount)
+    {
+        var app = Application.Current;
+        if (app is null) return null;
+        return await app.Dispatcher.InvokeAsync(() =>
+        {
+            var dlg = new BulkStartDialog(profileCount);
+            if (app.MainWindow is not null) dlg.Owner = app.MainWindow;
+            return dlg.ShowDialog() == true ? dlg.Result : null;
+        });
     }
 
     public async Task<Profile?> ShowProfileEditorAsync(Profile? existing = null)

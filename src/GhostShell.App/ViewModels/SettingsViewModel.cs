@@ -89,8 +89,34 @@ public sealed partial class SettingsViewModel : BaseViewModel
         // navigating away + back.
         _initialised = false;
         var loaded = false;
+        _log.LogInformation("Settings.OnNavigatedToAsync: load BEGIN (vm hash={H})", GetHashCode());
         try
         {
+            // Phase 60d — read raw DB values FIRST so the diagnostic log
+            // shows what's actually in the DB (no defaults baked in).
+            // Without this we can't tell whether "false" came from the DB
+            // or from the `?? false` fallback.
+            var rawYoutube = await _settings.GetBoolAsync(SettingsKeys.BlockYoutubeVideo);
+            var rawImages  = await _settings.GetBoolAsync(SettingsKeys.BlockGoogleImages);
+            var rawMaps    = await _settings.GetBoolAsync(SettingsKeys.BlockGoogleMapsTiles);
+            var rawFonts   = await _settings.GetBoolAsync(SettingsKeys.BlockFonts);
+            var rawAna     = await _settings.GetBoolAsync(SettingsKeys.BlockAnalytics);
+            var rawSocial  = await _settings.GetBoolAsync(SettingsKeys.BlockSocialWidgets);
+            var rawVideo   = await _settings.GetBoolAsync(SettingsKeys.BlockVideoEverywhere);
+            var rawCustom  = await _settings.GetStringAsync(SettingsKeys.BlockCustomPatterns);
+            _log.LogInformation(
+                "Settings.OnNavigatedToAsync: DB values block_youtube={Y} block_images={I} " +
+                "block_maps={M} block_fonts={F} block_analytics={A} block_social={S} " +
+                "block_video={V} custom_patterns_len={CL}",
+                rawYoutube?.ToString() ?? "NULL",
+                rawImages?.ToString() ?? "NULL",
+                rawMaps?.ToString() ?? "NULL",
+                rawFonts?.ToString() ?? "NULL",
+                rawAna?.ToString() ?? "NULL",
+                rawSocial?.ToString() ?? "NULL",
+                rawVideo?.ToString() ?? "NULL",
+                rawCustom?.Length ?? 0);
+
             ChromiumBinaryPath = await _settings.GetChromiumBinaryPathAsync() ?? "";
             UaSpoofMin         = await _settings.GetUaSpoofMinAsync();
             UaSpoofMax         = await _settings.GetUaSpoofMaxAsync();
@@ -104,24 +130,35 @@ public sealed partial class SettingsViewModel : BaseViewModel
             AutoEnrichMaxDays  = await _settings.GetAutoEnrichMaxDaysAsync();
             AutoEnrichMaxUrls  = await _settings.GetAutoEnrichMaxUrlsAsync();
             AutoEnrichSrcPath  = await _settings.GetAutoEnrichSourcePathAsync() ?? "";
-            // Phase 30 — performance / resource blocking.
-            BlockYoutube       = await _settings.GetBoolAsync(SettingsKeys.BlockYoutubeVideo)    ?? false;
-            BlockGoogleImages  = await _settings.GetBoolAsync(SettingsKeys.BlockGoogleImages)    ?? false;
-            BlockMapsTiles     = await _settings.GetBoolAsync(SettingsKeys.BlockGoogleMapsTiles) ?? false;
-            BlockFonts         = await _settings.GetBoolAsync(SettingsKeys.BlockFonts)           ?? false;
-            BlockAnalytics     = await _settings.GetBoolAsync(SettingsKeys.BlockAnalytics)       ?? false;
-            BlockSocialWidgets = await _settings.GetBoolAsync(SettingsKeys.BlockSocialWidgets)   ?? false;
-            BlockVideoEverywhere = await _settings.GetBoolAsync(SettingsKeys.BlockVideoEverywhere) ?? false;
-            BlockCustomPatterns  = await _settings.GetStringAsync(SettingsKeys.BlockCustomPatterns) ?? "";
+            // Phase 30 — performance / resource blocking. Use the raw values
+            // pre-fetched above (avoids a second round-trip per key).
+            BlockYoutube         = rawYoutube ?? false;
+            BlockGoogleImages    = rawImages  ?? false;
+            BlockMapsTiles       = rawMaps    ?? false;
+            BlockFonts           = rawFonts   ?? false;
+            BlockAnalytics       = rawAna     ?? false;
+            BlockSocialWidgets   = rawSocial  ?? false;
+            BlockVideoEverywhere = rawVideo   ?? false;
+            BlockCustomPatterns  = rawCustom  ?? "";
             UpdatePoolPreview();
             UpdateBlockingPreview();
             loaded = true;
+            _log.LogInformation(
+                "Settings.OnNavigatedToAsync: load OK — BlockYoutube={Y} BlockMaps={M} " +
+                "BlockFonts={F} BlockAnalytics={A} BlockSocial={S} BlockVideo={V}",
+                BlockYoutube, BlockMapsTiles, BlockFonts,
+                BlockAnalytics, BlockSocialWidgets, BlockVideoEverywhere);
         }
         catch (Exception ex)
         {
             _log.LogError(ex, "Settings load failed — leaving fields disabled until next visit");
         }
-        finally { _initialised = loaded; }
+        finally
+        {
+            _initialised = loaded;
+            _log.LogInformation(
+                "Settings.OnNavigatedToAsync: END _initialised={Init}", _initialised);
+        }
     }
 
     // ─── Build info (read-only) ──────────────────────────────────────
@@ -227,8 +264,13 @@ public sealed partial class SettingsViewModel : BaseViewModel
     {
         UpdateBlockingPreview();
         if (!_initialised) return;
-        try { await _settings.SetBoolAsync(key, v); }
-        catch (Exception ex) { _log.LogWarning(ex, "Persist {Key} failed", key); }
+        try
+        {
+            _log.LogInformation("Persisting {Key} = {Value}", key, v);
+            await _settings.SetBoolAsync(key, v);
+            _log.LogInformation("Successfully persisted {Key} = {Value}", key, v);
+        }
+        catch (Exception ex) { _log.LogError(ex, "Persist {Key} = {Value} FAILED", key, v); }
     }
 
     private void UpdateBlockingPreview()
@@ -263,8 +305,13 @@ public sealed partial class SettingsViewModel : BaseViewModel
     private async Task PersistAsync(Func<Task> setter)
     {
         if (!_initialised) return;
-        try { await setter(); }
-        catch (Exception ex) { _log.LogWarning(ex, "Persist setting failed"); }
+        try
+        {
+            _log.LogInformation("Persisting setting change");
+            await setter();
+            _log.LogInformation("Successfully persisted setting change");
+        }
+        catch (Exception ex) { _log.LogError(ex, "Persist setting FAILED"); }
     }
 
     // ─── Export / Import / Reset ────────────────────────────────────

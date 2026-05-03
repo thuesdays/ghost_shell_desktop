@@ -120,10 +120,18 @@ public partial class MainWindow : Window
             return;
         }
 
-        // User clicked X or Alt+F4 — hide instead
+        // User clicked X or Alt+F4 — hide instead.
+        //
+        // Phase 69b — drop the ShowInTaskbar=false call entirely. Hide()
+        // already removes the window from the taskbar (WPF semantics:
+        // Visibility=Hidden hides from taskbar regardless of the
+        // ShowInTaskbar flag). Toggling ShowInTaskbar forces WPF to
+        // tear down and recreate the native HWND, which re-fires
+        // Window.Loaded — the original cause of the splash flicker on
+        // tray-minimize. Skipping the toggle removes the entire HWND-
+        // recreation path.
         e.Cancel = true;
         Hide();
-        ShowInTaskbar = false;
 
         // Show balloon tip first time only
         if (!_firstMinimizeBalloonShown)

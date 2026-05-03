@@ -178,4 +178,17 @@ internal sealed class RunService : IRunService
                 COALESCE(SUM(CASE WHEN finished_at IS NULL AND exit_code IS NULL THEN 1 ELSE 0 END), 0)     AS Running
             FROM runs;
             """), ct);
+
+    public async Task<bool> DeleteAsync(long runId, CancellationToken ct = default)
+    {
+        // Phase 53 — delete a single finished run. Guard prevents
+        // deletion of still-running rows. Returns true if deleted,
+        // false if the row was still running or didn't exist.
+        var affected = await _db.QueueAsync(c => c.ExecuteAsync("""
+            DELETE FROM runs
+             WHERE id = @Id
+               AND finished_at IS NOT NULL;
+            """, new { Id = runId }), ct);
+        return affected > 0;
+    }
 }

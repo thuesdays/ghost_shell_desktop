@@ -531,6 +531,17 @@ public sealed class DeviceTemplateBuilder
         // Sec-CH-UA hints. Order matters — Chrome always emits
         // "Not_A Brand" first, then "Chromium", then the visible
         // "Google Chrome" entry.
+        //
+        // Phase 60b — added `full_version_list`. Without this key the
+        // C++ patch (ghost_shell_ua_override.cc:97 — `uam->FindList(
+        // "full_version_list")`) leaves GhostShellUA::brand_full_version_list_
+        // empty, the patched GetUserAgentMetadata() then falls through
+        // to the upstream stub, and navigator.userAgentData.getHighEntropy
+        // Values(['fullVersionList']) returns brands with versions that
+        // get normalised to MAJOR.0.0.0 (Chrome's UA-Reduction shape).
+        // Bot detectors flag "all 0.0.0.0" as a strong synthetic-browser
+        // signal — real users have a genuine 4-part patch version like
+        // 147.0.7780.88. Now we send the full version on every brand.
         return new Dictionary<string, object?>
         {
             ["brands"] = new object[]
@@ -538,6 +549,18 @@ public sealed class DeviceTemplateBuilder
                 new Dictionary<string, object?> { ["brand"] = "Not_A Brand", ["version"] = "8" },
                 new Dictionary<string, object?> { ["brand"] = "Chromium",     ["version"] = ChromeMajor },
                 new Dictionary<string, object?> { ["brand"] = "Google Chrome",["version"] = ChromeMajor },
+            },
+            // Phase 60b — Sec-CH-UA-Full-Version-List entries. Brand list
+            // matches `brands` 1:1; versions are full four-component.
+            // The "Not_A Brand" sibling stays on its static placeholder
+            // "8.0.0.0" — that's what real Chrome ships. ChromeFull is
+            // picked per profile from ChromeVersions.PickWeighted (e.g.
+            // "147.0.7780.88").
+            ["full_version_list"] = new object[]
+            {
+                new Dictionary<string, object?> { ["brand"] = "Not_A Brand", ["version"] = "8.0.0.0" },
+                new Dictionary<string, object?> { ["brand"] = "Chromium",     ["version"] = ChromeFull },
+                new Dictionary<string, object?> { ["brand"] = "Google Chrome",["version"] = ChromeFull },
             },
             ["full_version"]      = ChromeFull,
             ["platform"]          = Template.FormFactor == FormFactor.Mobile ? "Android" : "Windows",

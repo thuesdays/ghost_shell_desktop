@@ -37,5 +37,32 @@ public sealed class ProxyTestResult
     public IpType IpType { get; init; } = IpType.Unknown;
     public int? LatencyMs { get; init; }
 
+    /// <summary>
+    /// Phase 61 — the scheme the prober actually got a working response
+    /// through. May differ from the user's URL — e.g. URL says
+    /// `http://1.2.3.4:1080` but the endpoint only spoke SOCKS5. UI can
+    /// offer to auto-correct the URL based on this.
+    /// </summary>
+    public string? DetectedScheme { get; init; }
+
+    /// <summary>
+    /// Phase 61 — per-scheme probe outcomes for the diagnostic dialog.
+    /// Lets the user see "tried http: refused; tried socks5: ok in 312ms"
+    /// instead of a single binary verdict.
+    /// </summary>
+    public IReadOnlyList<ProxyProbeAttempt> Attempts { get; init; }
+        = Array.Empty<ProxyProbeAttempt>();
+
     public DateTime At { get; init; } = DateTime.UtcNow;
 }
+
+/// <summary>
+/// One protocol-attempt against a proxy. <see cref="Ok"/> means we got
+/// a complete response back; failures store the .NET / system error
+/// message verbatim (ERR_PROXY_CONNECTION_FAILED, timeout, refused, …).
+/// </summary>
+public sealed record ProxyProbeAttempt(
+    string Scheme,        // "http", "socks5", "socks4"
+    bool   Ok,
+    int?   LatencyMs,
+    string? Error);
