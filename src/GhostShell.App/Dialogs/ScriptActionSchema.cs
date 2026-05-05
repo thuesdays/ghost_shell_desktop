@@ -221,6 +221,10 @@ public static class ScriptActionSchema
             new ParamField("dwell_min",     "Per-query dwell min (sec)",        ParamFieldKind.Int,    "4"),
             new ParamField("dwell_max",     "Per-query dwell max (sec)",        ParamFieldKind.Int,    "10"),
             new ParamField("click_organic", "Click first organic result",       ParamFieldKind.Bool,   "false"),
+            // Phase 70 — `probability` is now a universal per-step flag
+            // (lives on ScriptStep.Probability, edited via the Step Flags
+            // dialog's slider). Don't expose it as a per-action field
+            // here — that would create two controls for the same setting.
         },
         ["refresh"] = new[]
         {

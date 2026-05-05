@@ -41,12 +41,23 @@ internal sealed class GitHubUpdateService : IUpdateService
     private readonly SemaphoreSlim _checkMutex = new(1, 1);
     private readonly SemaphoreSlim _applyMutex = new(1, 1);
 
+    /// <summary>Phase 71 — true while ApplyAsync is in progress. The
+    /// scheduler observes this flag and stops firing new ticks while
+    /// an update is preparing, so running scripts drain naturally
+    /// instead of being killed mid-execution.</summary>
+    private bool _isUpdatePending;
+    private readonly object _updatePendingLock = new();
+
     public event EventHandler<UpdateInfo>? UpdateFound;
     /// <summary>Raised after the PowerShell helper is launched to
     /// signal the App layer it's safe to call
     /// <c>Application.Current.Shutdown(0)</c>. Lives behind an event
     /// so the Data project doesn't have to reference WPF.</summary>
     public event EventHandler? ShutdownRequested;
+
+    /// <summary>Phase 71 — raised when IsUpdatePending flips so UI and
+    /// scheduler can react immediately without polling.</summary>
+    public event EventHandler? UpdatePendingChanged;
 
     public UpdateInfo? LatestKnown => _latestKnown;
     public bool UpdateAvailable
@@ -55,9 +66,38 @@ internal sealed class GitHubUpdateService : IUpdateService
         set => _updateAvailable = value;
     }
 
-    public GitHubUpdateService(IHttpClientFactory httpFactory, ILogger<GitHubUpdateService> log)
+    public bool IsUpdatePending => _isUpdatePending;
+
+    /// <summary>Phase 71 — thread-safe setter for IsUpdatePending that
+    /// raises UpdatePendingChanged only if the value actually flips.</summary>
+    private void SetPending(bool v)
+    {
+        lock (_updatePendingLock)
+        {
+            if (_isUpdatePending == v) return; // No change
+            _isUpdatePending = v;
+        }
+        // Fire the event outside the lock to avoid deadlock if subscribers
+        // take locks themselves.
+        try
+        {
+            UpdatePendingChanged?.Invoke(this, EventArgs.Empty);
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "UpdatePendingChanged handler threw");
+        }
+    }
+
+    private readonly IRunService _runService;
+
+    public GitHubUpdateService(
+        IHttpClientFactory httpFactory,
+        IRunService runService,
+        ILogger<GitHubUpdateService> log)
     {
         _httpFactory = httpFactory;
+        _runService = runService;
         _log = log;
     }
 
@@ -352,6 +392,10 @@ internal sealed class GitHubUpdateService : IUpdateService
             throw new InvalidOperationException("Update already in progress.");
         }
 
+        // Phase 71 — flag that update is preparing so the scheduler stops
+        // firing new ticks and lets active runs drain naturally.
+        SetPending(true);
+
         // [FIX: parent-pid-race] Capture parent PID and session token at entry
         var parentPid = Environment.ProcessId;
         var sessionToken = Guid.NewGuid().ToString();
@@ -525,6 +569,31 @@ internal sealed class GitHubUpdateService : IUpdateService
                     "Release zip is malformed or incomplete (missing or empty GhostShell.exe).");
             }
 
+            // Phase 71 — drain active runs. We've flagged IsUpdatePending=true,
+            // so the scheduler stopped firing new ticks. Wait for whatever's in
+            // flight to finish naturally, polling the runner. Cap at 5 minutes —
+            // past that we force-stop so a hung session doesn't block the update
+            // indefinitely. progress.Report() jumps from 90 to 95 during drain.
+            progress?.Report(91);
+            var drainStart = DateTime.UtcNow;
+            var drainTimeout = TimeSpan.FromMinutes(5);
+            while (true)
+            {
+                var active = await _runService.ListAsync(limit: 100, status: RunStatusFilter.Running, ct: ct);
+                if (active.Count == 0) break;
+                var elapsed = DateTime.UtcNow - drainStart;
+                if (elapsed > drainTimeout)
+                {
+                    _log.LogWarning("Update drain timeout: {N} active run(s) still alive after {S}s, forcing stop",
+                        active.Count, (int)elapsed.TotalSeconds);
+                    break;
+                }
+                _log.LogInformation("Update apply: waiting for {N} active run(s) to finish ({S}s elapsed)",
+                    active.Count, (int)elapsed.TotalSeconds);
+                await Task.Delay(TimeSpan.FromSeconds(3), ct);
+            }
+            progress?.Report(95);
+
             // Write PowerShell helper with hardened error handling
             // [FIX: powershell-hardening] Enhanced apply.ps1 with error handling, logging, and timeout adjustments
             // PowerShell helper. Phase 69c rewrite -- robust against the
@@ -690,6 +759,9 @@ catch {{
         catch (Exception ex)
         {
             _log.LogError(ex, "Update apply failed");
+            // Phase 71 — reset the pending flag on failure so the scheduler
+            // can resume if the user tries again.
+            SetPending(false);
             // [FIX: staging-dir-cleanup-on-failure] Final cleanup on catch.
             // stagingDir is declared at method scope so it's reachable here
             // even if we threw before any of the inside-try-block work.

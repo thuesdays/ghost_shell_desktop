@@ -205,28 +205,56 @@ public sealed class ChromeImporter : IChromeImporter
             var historySrc = Path.Combine(profilePath, "History");
             var localStateSrc = Path.Combine(src.UserDataPath, "Local State");
 
-            // ─── DB acquisition strategy ─────────────────────────────
-            // 1. Try the FileShare.ReadWrite copy. Works for SQLite-
-            //    backed Chrome files on most installs.
-            // 2. If the copy fails (some AV, mapped-memory locks, or
-            //    Chrome's per-file backup-mode flag), fall back to
-            //    reading the SOURCE file directly via SqliteConnection
-            //    in ReadOnly + Shared-cache + immutable-mode. This
-            //    bypasses the file-system layer entirely — SQLite
-            //    opens the file via its own VFS which uses LockFileEx
-            //    semantics and tolerates concurrent reader.
+            // ─── DB acquisition strategy (Phase 70 rewrite) ──────────
+            // Three-tier fallback:
+            //   1. File.Copy with FileShare.ReadWrite | FileShare.Delete.
+            //      Works for SQLite files Chrome opened with normal
+            //      sharing (the common case).
+            //   2. STREAM copy: open source via FileStream with the same
+            //      share flags + read into a fresh temp file ourselves.
+            //      This succeeds in cases where File.Copy's internal
+            //      Win32 implementation enforces stricter share semantics
+            //      than a hand-rolled FileStream (memory-mapped regions,
+            //      AV file-system filters that block kernel-mode copy).
+            //   3. SQLite-direct with immutable=1 URI flag. Tells SQLite
+            //      "trust me, this file won't change underneath you" so
+            //      it bypasses ALL locking + journal-file probing. We
+            //      get a slightly stale view (anything still in the WAL
+            //      isn't visible) but we read SOMETHING instead of
+            //      erroring out.
+            // Each tier is tried in order until one yields a path we can
+            // open via SqliteConnection. The boolean alongside each path
+            // tells the reader whether to use the immutable-URI mode.
             string? cookiesPath = null, historyPath = null;
+            bool cookiesIsLocked = false, historyIsLocked = false;
             if (cookiesSrc is not null && opts.ImportCookies)
             {
                 cookiesPath = TryCopyWithSidecars(cookiesSrc, Path.Combine(tempDir, "Cookies"), warnings);
                 if (cookiesPath is null)
                 {
-                    // Fallback — read from the source path. We log a
-                    // warning so the user knows we degraded; SQLite's
-                    // ReadOnly + immutable handles this fine.
+                    // Tier 2: stream-copy via FileStream. Same semantics
+                    // as File.Copy but goes through the user-mode stream
+                    // API which sometimes works where File.Copy doesn't.
+                    cookiesPath = TryStreamCopy(cookiesSrc, Path.Combine(tempDir, "Cookies"), warnings);
+                    if (cookiesPath is not null)
+                    {
+                        warnings.RemoveAll(w => w.StartsWith("Could not copy 'Cookies':"));
+                        _log.LogInformation("Chrome import: stream-copy succeeded for Cookies (File.Copy was blocked)");
+                    }
+                }
+                if (cookiesPath is null)
+                {
+                    // Tier 3: SQLite-direct on the source with immutable=1.
+                    // The lock-bypass trick — works whenever the file is
+                    // physically readable + the FS isn't blocking ALL
+                    // open() calls. Last resort but tolerates Chrome's
+                    // exclusive write lock cleanly.
                     cookiesPath = cookiesSrc;
+                    cookiesIsLocked = true;
                     warnings.RemoveAll(w => w.StartsWith("Could not copy 'Cookies':"));
-                    _log.LogInformation("Chrome import: copy failed, reading source DB directly");
+                    _log.LogInformation(
+                        "Chrome import: copy failed (both File.Copy and stream-copy); " +
+                        "reading source DB directly via SQLite immutable=1");
                 }
             }
             if (File.Exists(historySrc) && opts.HistoryDays > 0)
@@ -234,7 +262,14 @@ public sealed class ChromeImporter : IChromeImporter
                 historyPath = TryCopyWithSidecars(historySrc, Path.Combine(tempDir, "History"), warnings);
                 if (historyPath is null)
                 {
+                    historyPath = TryStreamCopy(historySrc, Path.Combine(tempDir, "History"), warnings);
+                    if (historyPath is not null)
+                        warnings.RemoveAll(w => w.StartsWith("Could not copy 'History':"));
+                }
+                if (historyPath is null)
+                {
                     historyPath = historySrc;
+                    historyIsLocked = true;
                     warnings.RemoveAll(w => w.StartsWith("Could not copy 'History':"));
                 }
             }
@@ -262,7 +297,7 @@ public sealed class ChromeImporter : IChromeImporter
                 if (cookiesCopy is not null)
                 {
                     ct.ThrowIfCancellationRequested();
-                    ReadCookies(cookiesCopy, aesKey, opts, cookies,
+                    ReadCookies(cookiesCopy, cookiesIsLocked, aesKey, opts, cookies,
                         out skippedSensitive, out undecryptable, warnings);
                     _log.LogInformation(
                         "Chrome import: read {N} cookie(s); {Skipped} sensitive, {Bad} undecryptable",
@@ -283,7 +318,7 @@ public sealed class ChromeImporter : IChromeImporter
                 try
                 {
                     ct.ThrowIfCancellationRequested();
-                    ReadHistory(historyCopy, opts, historyEntries, out historySkippedSensitive);
+                    ReadHistory(historyCopy, historyIsLocked, opts, historyEntries, out historySkippedSensitive);
                     _log.LogInformation(
                         "Chrome import: read {N} history entr(ies); {Skipped} sensitive",
                         historyEntries.Count, historySkippedSensitive);
@@ -471,13 +506,25 @@ public sealed class ChromeImporter : IChromeImporter
     // ─── Cookie reader ─────────────────────────────────────────────
 
     private void ReadCookies(
-        string dbPath, byte[]? aesKey, ChromeImportOptions opts,
+        string dbPath, bool sourceIsLocked, byte[]? aesKey, ChromeImportOptions opts,
         List<CookieEntry> output, out int skippedSensitive, out int undecryptable,
         List<string> warnings)
     {
         skippedSensitive = 0;
         undecryptable    = 0;
-        var connStr = BuildSqliteConnString(dbPath);
+
+        // Phase 70 — track WHY cookies failed to decrypt. The most common
+        // case as of late-2024 is Chrome v127+ App-Bound encryption: the
+        // browser stamps cookies with a "v20" prefix instead of v10/v11
+        // and encrypts them with a key that's only readable from inside
+        // an authenticated chrome.exe process (via Chrome's Elevation
+        // Service COM API). DPAPI alone can't unwrap them. Counting
+        // prefixes lets us surface a clear "Chrome's App-Bound encryption
+        // is enabled — disable with --disable-features=LockProfileCookieDatabase
+        // or use a profile from Edge/Brave instead" message.
+        var prefixCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+
+        var connStr = BuildSqliteConnString(dbPath, sourceIsLocked);
         using var conn = new SqliteConnection(connStr);
         conn.Open();
 
@@ -516,12 +563,24 @@ public sealed class ChromeImporter : IChromeImporter
             }
             else if (encBytes is { Length: > 3 } && aesKey is not null)
             {
+                // Sniff the prefix BEFORE trying to decrypt so we can
+                // count v20 vs v10 vs unknown for the diagnostic warning
+                // surfaced at the end of the import.
+                var sniff = Encoding.ASCII.GetString(encBytes, 0, Math.Min(3, encBytes.Length));
                 if (TryDecrypt(encBytes, aesKey, out var decoded))
                     value = decoded;
-                else { undecryptable++; continue; }
+                else
+                {
+                    prefixCounts.TryGetValue(sniff, out var cur);
+                    prefixCounts[sniff] = cur + 1;
+                    undecryptable++;
+                    continue;
+                }
             }
             else
             {
+                prefixCounts.TryGetValue("(empty)", out var cur);
+                prefixCounts["(empty)"] = cur + 1;
                 undecryptable++;
                 continue;
             }
@@ -537,6 +596,40 @@ public sealed class ChromeImporter : IChromeImporter
                 SameSite       = sameSiteN switch { 0 => "None", 1 => "Lax", 2 => "Strict", _ => null },
                 ExpiresUnixSec = ChromeTimeToUnix(expiresUtc),
             });
+        }
+
+        // Phase 70 — surface a prefix histogram if there were undecryptable
+        // cookies. Chrome v127+ ships with App-Bound encryption (prefix
+        // "v20") that DPAPI alone cannot unwrap — the user needs to know
+        // this is the cause + know what to do about it.
+        if (undecryptable > 0 && prefixCounts.Count > 0)
+        {
+            var summary = string.Join(", ",
+                prefixCounts.OrderByDescending(kv => kv.Value)
+                            .Select(kv => $"{kv.Key}×{kv.Value}"));
+            _log.LogInformation(
+                "Chrome import: {N} cookies couldn't be decrypted -- prefix breakdown: {Prefixes}",
+                undecryptable, summary);
+
+            if (prefixCounts.TryGetValue("v20", out var v20Count) && v20Count > 0)
+            {
+                warnings.Add(
+                    $"{v20Count} cookies use Chrome v127+ App-Bound encryption (prefix 'v20') " +
+                    "which can only be decrypted from inside an authenticated chrome.exe process. " +
+                    "Workaround: launch Chrome with --disable-features=LockProfileCookieDatabase " +
+                    "(close all Chrome windows first, then start it from a shortcut with that flag), " +
+                    "or use a different browser profile (Edge / Brave / older Chrome) for the source.");
+            }
+            var unknownPrefixes = prefixCounts
+                .Where(kv => kv.Key is not ("v10" or "v11" or "v20" or "(empty)"))
+                .ToList();
+            if (unknownPrefixes.Count > 0)
+            {
+                var list = string.Join(", ", unknownPrefixes.Select(kv => $"'{kv.Key}'×{kv.Value}"));
+                warnings.Add(
+                    $"Some cookies use unrecognised encryption prefixes ({list}). " +
+                    "These are likely from a future Chrome version with a new encryption scheme.");
+            }
         }
     }
 
@@ -625,12 +718,12 @@ public sealed class ChromeImporter : IChromeImporter
     // ─── History reader ────────────────────────────────────────────
 
     private static void ReadHistory(
-        string dbPath, ChromeImportOptions opts,
+        string dbPath, bool sourceIsLocked, ChromeImportOptions opts,
         List<string> output, out int skippedSensitive)
     {
         skippedSensitive = 0;
 
-        var connStr = BuildSqliteConnString(dbPath);
+        var connStr = BuildSqliteConnString(dbPath, sourceIsLocked);
         using var conn = new SqliteConnection(connStr);
         conn.Open();
 
@@ -704,24 +797,137 @@ public sealed class ChromeImporter : IChromeImporter
     }
 
     /// <summary>
-    /// Build a connection string suitable for reading Chrome's SQLite
-    /// DBs whether they're a fresh copy (live in our temp dir) OR the
-    /// original locked file (fallback when the FileShare copy gets
-    /// rejected). Three knobs:
-    ///   • <c>Mode=ReadOnly</c>      — never tries to acquire a write lock
-    ///   • <c>Cache=Private</c>      — avoid SQLite's process-wide cache
-    ///                                  taking a SHARED lock on the file,
-    ///                                  which can race with Chrome's own
-    ///                                  internal locking
-    ///   • <c>Pooling=False</c>      — drop the connection on Close()
-    ///                                  rather than parking it; we want
-    ///                                  the file handle gone immediately
-    /// We add the <c>?immutable=1</c> URI flag in the Data-Source path
-    /// only when reading the original (locked) file — for our copies
-    /// we omit it because the WAL sidecar might still need playback.
+    /// Build a SQLite connection string for reading Chrome's DB. Two modes:
+    ///
+    ///   • <paramref name="sourceIsLocked"/> = false (we have a temp copy):
+    ///     plain <c>Mode=ReadOnly;Cache=Private;Pooling=False</c>. Lets
+    ///     SQLite use the WAL/SHM sidecars normally (we copied them too).
+    ///
+    ///   • <paramref name="sourceIsLocked"/> = true (reading source while
+    ///     Chrome holds it): wraps the path in a <c>file:</c> URI and
+    ///     adds <c>?immutable=1</c>. The immutable flag tells SQLite
+    ///     "this database file will not change while you have it open"
+    ///     — SQLite then skips ALL locking calls (no LockFileEx, no
+    ///     SHARED-lock attempt) and skips the journal/WAL probe entirely.
+    ///     This is the *only* SQLite mode that can open a Chrome DB the
+    ///     running browser holds an exclusive write lock on. The trade-
+    ///     off is that anything still buffered in the live WAL is
+    ///     invisible — we'll see whatever was last checkpointed into
+    ///     the main file, so the user gets a slightly-stale snapshot
+    ///     (typically minutes old at worst) instead of an error.
+    ///
+    /// Tweaks shared by both modes:
+    ///   • Mode=ReadOnly      — never tries to acquire a write lock
+    ///   • Cache=Private      — avoid SQLite's process-wide cache taking
+    ///                          a SHARED lock that races with Chrome's
+    ///                          own internal locking
+    ///   • Pooling=False      — drop the file handle on Close() instead
+    ///                          of parking the connection in the pool
+    ///   • Foreign Keys=False — Chrome doesn't use FKs; skip the probe
     /// </summary>
-    private static string BuildSqliteConnString(string path)
+    private static string BuildSqliteConnString(string path, bool sourceIsLocked)
     {
-        return $"Data Source={path};Mode=ReadOnly;Cache=Private;Pooling=False;";
+        if (sourceIsLocked)
+        {
+            // Microsoft.Data.Sqlite parses URI-form Data Source values when
+            // they start with "file:". Forward-slashes are required by SQLite's
+            // URI grammar. The leading triple-slash for absolute Windows paths
+            // ("file:///C:/...") is the canonical form — without it SQLite may
+            // try to interpret the drive letter as a host segment.
+            //
+            // Phase 70 fix — Chrome's profile path always lives under
+            // "AppData\Local\Google\Chrome\User Data\..." which contains a
+            // SPACE in "User Data". SQLite's URI parser rejects raw spaces
+            // (RFC 3986 reserves ASCII-32 for path separation), so we MUST
+            // percent-encode them. Same goes for any other URI-reserved
+            // chars that might land in a Windows path (#, ?, %, etc).
+            // Ascending fallback chain in URI: immutable=1 (trust file is
+            // immutable, skip locks + journal probe) AND nolock=1 (extra
+            // belt-and-braces — disable VFS-level locking entirely). Both
+            // together survive Chrome holding an exclusive write lock.
+            var slashed = path.Replace('\\', '/');
+            var encoded = EncodeUriPath(slashed);
+            var uri = "file:///" + encoded.TrimStart('/');
+            return $"Data Source={uri}?immutable=1&nolock=1;Mode=ReadOnly;Cache=Private;Pooling=False;Foreign Keys=False;";
+        }
+        return $"Data Source={path};Mode=ReadOnly;Cache=Private;Pooling=False;Foreign Keys=False;";
+    }
+
+    /// <summary>
+    /// Percent-encode characters that SQLite's URI parser rejects in a
+    /// path component. We can't use <see cref="Uri.EscapeDataString"/>
+    /// because that also escapes forward slashes (which we need as path
+    /// separators) and colon (drive letter). We manually percent-encode
+    /// only the characters known to confuse SQLite's URI grammar:
+    ///   • space (0x20) → %20
+    ///   • # → %23 (URI fragment separator)
+    ///   • ? → %3F (URI query separator — would terminate the path early)
+    ///   • % → %25 (must be escaped first to avoid double-encoding)
+    /// Other reserved chars (& = + $ , ; ' ( )) are valid in path segments
+    /// per RFC 3986 and SQLite handles them.
+    /// </summary>
+    private static string EncodeUriPath(string slashedPath)
+    {
+        // Percent-encode the existing % FIRST so subsequent passes don't
+        // double-encode our own %20s. (Standard URI-encoding gotcha.)
+        var sb = new StringBuilder(slashedPath.Length + 32);
+        foreach (var c in slashedPath)
+        {
+            switch (c)
+            {
+                case ' ': sb.Append("%20"); break;
+                case '#': sb.Append("%23"); break;
+                case '?': sb.Append("%3F"); break;
+                case '%': sb.Append("%25"); break;
+                default:  sb.Append(c);     break;
+            }
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Stream-copy fallback for files where <see cref="File.Copy"/> fails
+    /// (typically AV file-system filters or memory-mapped regions). Uses
+    /// the same generous share flags as <see cref="TryCopy"/> but goes
+    /// through a hand-rolled <see cref="FileStream"/> pipeline instead of
+    /// the Win32 CopyFileEx that <see cref="File.Copy"/> dispatches to.
+    /// In practice this succeeds in cases where File.Copy doesn't because
+    /// CopyFileEx enforces stricter mandatory-locking semantics than a
+    /// plain handle open with FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE.
+    /// </summary>
+    private static string? TryStreamCopy(string source, string dest, List<string> warnings)
+    {
+        try
+        {
+            // FileShare.ReadWrite | FileShare.Delete is the most permissive
+            // combination — equivalent to passing FILE_SHARE_READ |
+            // FILE_SHARE_WRITE | FILE_SHARE_DELETE to CreateFile. Chrome's
+            // own DB handles ARE opened with these share flags so we can
+            // co-read alongside its writes.
+            using var src = new FileStream(
+                source, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete,
+                bufferSize: 64 * 1024, useAsync: false);
+            using var dst = new FileStream(
+                dest, FileMode.Create, FileAccess.Write, FileShare.None,
+                bufferSize: 64 * 1024, useAsync: false);
+
+            // Read in chunks. We accept a slightly inconsistent snapshot
+            // if Chrome is mid-write — SQLite's WAL design tolerates that
+            // and we'll either see the pre-write or post-write state on
+            // the row level.
+            var buffer = new byte[64 * 1024];
+            int read;
+            while ((read = src.Read(buffer, 0, buffer.Length)) > 0)
+            {
+                dst.Write(buffer, 0, read);
+            }
+            return dest;
+        }
+        catch (Exception ex)
+        {
+            warnings.Add($"Stream-copy of '{Path.GetFileName(source)}' also failed: {ex.Message}");
+            return null;
+        }
     }
 }

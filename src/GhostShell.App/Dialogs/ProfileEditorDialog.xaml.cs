@@ -44,6 +44,8 @@ public partial class ProfileEditorDialog : Window
             TargetDomainsField.Text = existing.TargetDomainsCsv ?? "";
             IsReadyField.IsChecked = existing.IsReady;
             EnrichField.IsChecked  = existing.EnrichOnFirstRun;
+            // Phase 71 — auto-rotate IP on launch when proxy supports it.
+            AutoRotateIpField.IsChecked = existing.AutoRotateIp;
             TemplateCombo.SelectedValue = existing.TemplateId ?? AutoTemplateId;
             LanguageCombo.SelectedValue = existing.Language    ?? "uk-UA";
             if (!string.IsNullOrEmpty(existing.ProxySlug))
@@ -194,6 +196,8 @@ public partial class ProfileEditorDialog : Window
             // runtime sees no policy at all (filters pass through).
             MyDomainsCsv     = NullIfBlank(MyDomainsField.Text),
             TargetDomainsCsv = NullIfBlank(TargetDomainsField.Text),
+            // Phase 71 — auto-rotate IP on launch when proxy supports it.
+            AutoRotateIp     = AutoRotateIpField.IsChecked == true,
             CreatedAt        = _existing?.CreatedAt ?? default,
             UpdatedAt        = default,
             LastRunAt        = _existing?.LastRunAt,

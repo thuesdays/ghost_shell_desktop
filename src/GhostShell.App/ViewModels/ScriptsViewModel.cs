@@ -264,10 +264,22 @@ public sealed partial class ScriptsViewModel : BaseViewModel
             }
 
             // Full reload to reconcile any state we missed.
-            await Application.Current.Dispatcher.InvokeAsync(async () =>
+            // Phase 70 — null-guard Application.Current; it CAN be null
+            // during process teardown if the recorder dialog finishes
+            // right as the app is shutting down. Fallback to direct
+            // reload when no dispatcher is available.
+            var dispatcher = Application.Current?.Dispatcher;
+            if (dispatcher is not null)
+            {
+                await dispatcher.InvokeAsync(async () =>
+                {
+                    await ReloadAsync();
+                });
+            }
+            else
             {
                 await ReloadAsync();
-            });
+            }
         }
         catch (Exception ex)
         {

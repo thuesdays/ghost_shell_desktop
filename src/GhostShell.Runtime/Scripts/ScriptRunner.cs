@@ -291,6 +291,26 @@ public sealed class ScriptRunner : IScriptRunner
                 continue;
             }
 
+            // Phase 70 — universal "probability" param. Any step can carry
+            // a `probability` value (0..100). The default is 100 (always
+            // run) so existing scripts behave exactly the same. Set to
+            // e.g. 70 → run on roughly 7 of 10 invocations; 0 → never run.
+            // Lets the user dial in stochastic flow for ANY action -- a
+            // single click_ad that fires 60% of the time, a foreach_ad
+            // body that varies per iteration, a save_var that snapshots
+            // every other run -- without writing if-conditions.
+            if (TryProbabilitySkip(step, out var probSkip))
+            {
+                entry["skipped"] = probSkip;
+                log.Add(entry);
+                if (string.Equals(step.Type, "click_ad", StringComparison.OrdinalIgnoreCase))
+                {
+                    await RecordActionEventAsync(
+                        step, ctx, runId, profileName, "skipped", probSkip, 0, null, ct);
+                }
+                continue;
+            }
+
             // Direct-handled control-flow words don't go through the
             // catch-all dispatcher; they short-circuit here so the
             // tuple-bubble path is obvious.
@@ -335,19 +355,37 @@ public sealed class ScriptRunner : IScriptRunner
             }
             catch (Exception ex)
             {
+                // Phase 70 — explicit ScriptAbortException MUST propagate.
+                // Previously the catch handler treated it as a generic
+                // step failure: when an INNER ExecuteStepsAsync (e.g. a
+                // foreach body) threw ScriptAbortException due to a dead
+                // session, this OUTER handler caught it, marked the
+                // foreach step as failed, and continued — letting
+                // ExecuteAsync return "partial" status without re-throw.
+                // RealProfileRunner then logged "finished cleanly" for
+                // a run that actually crashed. Strict re-throw keeps the
+                // abort travelling up to the run-coordinator.
+                if (ex is ScriptAbortException)
+                {
+                    entry["err"] = ex.Message;
+                    entry["dur_ms"] = (int)(DateTime.UtcNow - t0).TotalMilliseconds;
+                    log.Add(entry);
+                    throw;
+                }
                 counters.Failed++;
                 entry["err"] = ex.Message;
                 stepError = ex.Message;
                 stepOutcome = "error";
-                _log.LogWarning(ex, "Script step #{I} ({Type}) failed", i, step.Type);
-                // Phase 23 hot-fix — bail immediately on a dead browser
-                // session. Selenium throws "invalid session id" or
-                // "session deleted" once the user closes the window or
-                // the watchdog tears it down. Continuing to dispatch
-                // more steps just spams identical exceptions in the log
-                // and confuses the user about the actual failure point.
+                // Phase 70 — quiet logging for the "dead session" path.
+                // The full stack trace was confusing users into thinking
+                // it's a real bug; the only useful fact is which step
+                // ran when the window died. Genuine step failures still
+                // dump the trace so they're debuggable.
                 if (IsDeadSession(ex))
                 {
+                    _log.LogInformation(
+                        "Script step #{I} ({Type}) couldn't complete — browser session closed ({Msg})",
+                        i, step.Type, ex.Message?.Split('\n').FirstOrDefault());
                     _log.LogWarning(
                         "Browser session is dead — aborting remaining {Left} step(s)",
                         steps.Count - i - 1);
@@ -355,6 +393,7 @@ public sealed class ScriptRunner : IScriptRunner
                     log.Add(entry);
                     throw new ScriptAbortException("browser session closed mid-run");
                 }
+                _log.LogWarning(ex, "Script step #{I} ({Type}) failed", i, step.Type);
                 if (step.AbortOnError)
                 {
                     entry["dur_ms"] = (int)(DateTime.UtcNow - t0).TotalMilliseconds;
@@ -441,6 +480,15 @@ public sealed class ScriptRunner : IScriptRunner
                 current = StepNextNode(graph, current, branchHint: null);
                 continue;
             }
+            // Phase 70 — universal probability gate (graph mode mirror
+            // of the list-mode TryProbabilitySkip path).
+            if (TryProbabilitySkip(step, out var probSkipG))
+            {
+                entry2["skipped"] = probSkipG;
+                log.Add(entry2);
+                current = StepNextNode(graph, current, branchHint: null);
+                continue;
+            }
 
             // ── Direct-handled control words ──
             if (string.Equals(step.Type, "break",    StringComparison.OrdinalIgnoreCase) ||
@@ -508,6 +556,17 @@ public sealed class ScriptRunner : IScriptRunner
             }
             catch (Exception ex)
             {
+                // Phase 70 — same fix as the list-mode handler: strict
+                // propagate any ScriptAbortException so a session-died
+                // signal from a deeper level reaches the run coordinator
+                // instead of being absorbed as a step failure.
+                if (ex is ScriptAbortException)
+                {
+                    entry2["err"] = ex.Message;
+                    entry2["dur_ms"] = (int)(DateTime.UtcNow - t0).TotalMilliseconds;
+                    log.Add(entry2);
+                    throw;
+                }
                 counters.Failed++;
                 entry2["err"] = ex.Message;
                 // current is guaranteed non-null inside the while-body
@@ -1043,14 +1102,23 @@ public sealed class ScriptRunner : IScriptRunner
                     }
 
                     // Parse ads now so foreach_ad inside the same
-                    // script body gets a populated list. Phase 34
-                    // analytics still fires (parse_ads handler does
-                    // the competitor-record write).
+                    // script body gets a populated list.
                     ctx.Ads.Clear();
                     ctx.Ads.AddRange(await AdParser.ParseAsync(s, ct));
                     if (ctx.Ads.Count > 0)
                     {
                         _log.LogInformation("search_query: '{Q}' returned {N} ad(s)", query, ctx.Ads.Count);
+                        // Phase 70 fix — record competitor observations.
+                        // The previous comment claimed "parse_ads handler
+                        // does the competitor-record write" but that was
+                        // false: search_query parses ads INLINE (via
+                        // AdParser.ParseAsync) and never re-enters the
+                        // parse_ads case-block, so the competitor table
+                        // stayed empty for every search_query run. Stash
+                        // the query in ctx.Vars so the recording path
+                        // can populate the "query" column on each row.
+                        ctx.Vars["current_query"] = query;
+                        await RecordCompetitorsAsync(ctx.Ads, ctx, runId, profileName, ct);
                         break;
                     }
                     if (attempt < maxAttempts)
@@ -2027,6 +2095,61 @@ public sealed class ScriptRunner : IScriptRunner
     /// only_on_* gates are inert (no current ad to test) and the
     /// skip_on_* gates pass through.
     /// </summary>
+    /// <summary>
+    /// Phase 70 — universal stochastic gate. Reads the existing
+    /// <see cref="ScriptStep.Probability"/> field (double 0..1).
+    /// Returns true (skip) when the field is &lt; 1.0 AND a fresh roll
+    /// lands above it. Default 1.0 → never skips, existing scripts
+    /// behave exactly as before.
+    ///
+    /// Examples (translate the visual editor's 0-100 percent display to
+    /// the internal 0-1 representation):
+    ///   1.00 (100%) → always run (default)
+    ///   0.70 (70%)  → run on ~7 of 10 invocations
+    ///   0.00 (0%)   → never run
+    ///
+    /// Lives at the dispatch top — gate fires BEFORE the step's setup,
+    /// so a probability=0 click_ad never even parses its target. Same
+    /// gate is applied in graph mode at the per-node entry (line ~720)
+    /// using the same field.
+    /// </summary>
+    private bool TryProbabilitySkip(ScriptStep step, out string reason)
+    {
+        reason = "";
+        if (step.Probability >= 1.0) return false;
+        if (step.Probability <= 0.0)
+        {
+            reason = "probability=0";
+            // Phase 70 diagnostics — log every gate verdict so the
+            // user can see exactly why a step ran or skipped. Useful
+            // when a slider position seems to "not work" — usually
+            // either a serialisation bug or a misunderstanding about
+            // how often the step is supposed to fire over a small
+            // sample size.
+            _log.LogInformation(
+                "Probability gate: SKIP step '{Type}' — probability=0 (always skip)",
+                step.Type);
+            return true;
+        }
+        var roll = Random.Shared.NextDouble();
+        if (roll > step.Probability)
+        {
+            reason = $"probability={step.Probability:F2} (rolled {roll:F2})";
+            _log.LogInformation(
+                "Probability gate: SKIP step '{Type}' — rolled {Roll:F2} > threshold {Prob:F2} ({ProbPct}%)",
+                step.Type, roll, step.Probability, (int)Math.Round(step.Probability * 100));
+            return true;
+        }
+        // Pass — record the verdict at info level so the user can
+        // verify the gate is actually consulting the value they set
+        // (vs. defaulting to 1.0 = always run because of a load-path
+        // bug, e.g. nested-probability not surviving the round-trip).
+        _log.LogInformation(
+            "Probability gate: RUN step '{Type}' — rolled {Roll:F2} <= threshold {Prob:F2} ({ProbPct}%)",
+            step.Type, roll, step.Probability, (int)Math.Round(step.Probability * 100));
+        return false;
+    }
+
     private static bool TryDomainFilterSkip(
         ScriptStep step, RunContext ctx, out string reason)
     {
@@ -2352,9 +2475,19 @@ public sealed class ScriptRunner : IScriptRunner
     /// `parse_ads` step) silently never populated the Competitors page,
     /// even when the script clicked dozens of competitor ads.
     ///
-    /// Skips domains in the user's BlockDomains set, fires the DB
-    /// write fire-and-forget so a slow Sqlite tick doesn't stall the
-    /// script. Errors are logged but never re-thrown.
+    /// Phase 70 — proper competitor classification. We check BOTH the
+    /// click host and the display host against MyDomains + TargetDomains
+    /// + BlockDomains and only record ads where NEITHER matches anything
+    /// in My/Target/Block. The previous filter was BlockDomains-only,
+    /// which polluted the Competitors page with the user's OWN ads
+    /// (matching MyDomains) and their paid TARGET ads (matching
+    /// TargetDomains). Those aren't competitors — they're own/paid traffic.
+    /// Ad host check uses the existing AnyHostMatches (click OR display)
+    /// to handle affiliate-tracker URLs the same way as ad_is_mine /
+    /// ad_is_target conditions do.
+    ///
+    /// Errors are logged but never re-thrown — failed analytics
+    /// shouldn't crash the script.
     /// </summary>
     private async Task RecordCompetitorsAsync(
         IEnumerable<AdRecord> ads, RunContext ctx,
@@ -2364,18 +2497,54 @@ public sealed class ScriptRunner : IScriptRunner
         {
             var batch = new List<CompetitorRecord>();
             var capturedAt = DateTime.UtcNow;
+            var skippedMine    = 0;
+            var skippedTarget  = 0;
+            var skippedBlocked = 0;
             foreach (var ad in ads)
             {
-                var host = ExtractHost(ad.Href);
-                if (string.IsNullOrEmpty(host)) continue;
-                if (DomainMatches(host, ctx.BlockDomains)) continue;
+                // Coalesce nullable strings to "" for ExtractHost which
+                // takes a non-null parameter. AdRecord.Href is required
+                // but technically AdRecord.DisplayUrl is nullable
+                // (some ad shapes don't surface a display URL).
+                var clickHost = ExtractHost(ad.Href ?? "");
+                var dispHost  = ExtractHost(ad.DisplayUrl ?? "");
+                if (string.IsNullOrEmpty(clickHost) && string.IsNullOrEmpty(dispHost))
+                    continue;
+
+                // Use the same dual-host (click + display) match logic
+                // as the ad_is_mine / ad_is_target / ad_is_competitor
+                // conditions. Set CurrentAdHref/CurrentAdDisplayUrl
+                // briefly so AnyHostMatches sees this ad — restore to
+                // the prior values after each iteration so we don't
+                // pollute the wider script context.
+                var savedHref = ctx.CurrentAdHref;
+                var savedDisp = ctx.CurrentAdDisplayUrl;
+                ctx.CurrentAdHref       = ad.Href ?? "";
+                ctx.CurrentAdDisplayUrl = ad.DisplayUrl ?? "";
+                try
+                {
+                    if (AnyHostMatches(ctx, ctx.MyDomains))     { skippedMine++;    continue; }
+                    if (AnyHostMatches(ctx, ctx.TargetDomains)) { skippedTarget++;  continue; }
+                    if (AnyHostMatches(ctx, ctx.BlockDomains))  { skippedBlocked++; continue; }
+                }
+                finally
+                {
+                    ctx.CurrentAdHref       = savedHref;
+                    ctx.CurrentAdDisplayUrl = savedDisp;
+                }
+
+                // Survived all three filters → real competitor. Use the
+                // click host as the primary domain, fall back to display
+                // host if the click goes through an affiliate tracker
+                // with no recognisable host.
+                var primaryHost = !string.IsNullOrEmpty(clickHost) ? clickHost : dispHost;
                 batch.Add(new CompetitorRecord
                 {
                     RunId = runId,
                     ProfileName = profileName,
                     CapturedAt = capturedAt,
                     Query = ctx.Vars.TryGetValue("current_query", out var q) ? q : "",
-                    Domain = host,
+                    Domain = primaryHost,
                     AdTitle = ad.Title,
                     DisplayUrl = ad.DisplayUrl,
                     ClickUrl = ad.Href,
@@ -2385,8 +2554,25 @@ public sealed class ScriptRunner : IScriptRunner
             {
                 await _competitors.RecordBatchAsync(batch, ct);
                 _log.LogInformation(
-                    "Recorded {N} competitor observations for run #{R}",
-                    batch.Count, runId);
+                    "Recorded {N} competitor observation(s) for run #{R} " +
+                    "(skipped {M} mine, {T} target, {B} blocked)",
+                    batch.Count, runId, skippedMine, skippedTarget, skippedBlocked);
+            }
+            else
+            {
+                // Visibility log — when EVERY observed ad got filtered
+                // out (often happens if every ad host is in My/Target),
+                // surface why so the user can verify their domain lists
+                // aren't over-greedy.
+                var totalScanned = skippedMine + skippedTarget + skippedBlocked;
+                if (totalScanned > 0)
+                {
+                    _log.LogInformation(
+                        "Recorded 0 competitor observations for run #{R}: " +
+                        "all {N} ads were classified as own/target/blocked " +
+                        "(mine={M}, target={T}, blocked={B})",
+                        runId, totalScanned, skippedMine, skippedTarget, skippedBlocked);
+                }
             }
         }
         catch (Exception ex)

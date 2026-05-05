@@ -31,6 +31,23 @@ public interface IUpdateService
     /// waits on the parent PID, so a clean WPF shutdown is what
     /// unblocks the file swap.</summary>
     event EventHandler? ShutdownRequested;
+
+    /// <summary>
+    /// Phase 71 — true while ApplyAsync is in progress (download +
+    /// extract + waiting for active runs to drain). The scheduler
+    /// observes this flag and STOPS firing new ticks while an update
+    /// is preparing. Without this, a tick that fired during the drain
+    /// wait would launch a fresh run that either delays the update
+    /// indefinitely or gets killed mid-execution when the timeout
+    /// expires. Cleared back to false on apply failure; successful
+    /// apply never clears (process exits before that's observable).
+    /// </summary>
+    bool IsUpdatePending { get; }
+
+    /// <summary>Raised when <see cref="IsUpdatePending"/> flips so
+    /// the UI can surface "Update preparing — scheduler paused" and
+    /// the RunnerHost can react immediately instead of polling.</summary>
+    event EventHandler? UpdatePendingChanged;
 }
 
 public sealed record UpdateInfo

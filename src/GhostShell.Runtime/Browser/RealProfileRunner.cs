@@ -88,6 +88,15 @@ public sealed class RealProfileRunner : IProfileRunner, IAsyncDisposable
     /// </summary>
     private readonly IProfileService? _profiles;
 
+    /// <summary>
+    /// Phase 71 — optional proxy service used for auto-rotate-IP feature.
+    /// When a profile has AutoRotateIp=true AND the assigned proxy has
+    /// IsRotating=true + a non-empty RotationApiUrl, the runner fetches
+    /// the proxy record to extract the rotation URL and hit it before launch.
+    /// Optional so tests can omit it; rotation is skipped silently if null.
+    /// </summary>
+    private readonly IProxyService? _proxies;
+
     public RealProfileRunner(
         IBrowserLauncher launcher,
         IRunService runs,
@@ -97,7 +106,8 @@ public sealed class RealProfileRunner : IProfileRunner, IAsyncDisposable
         IScriptRunner?  scriptRunner = null,
         IVaultService?  vault = null,
         ISelfCheckService? selfCheck = null,
-        IProfileService? profiles = null)
+        IProfileService? profiles = null,
+        IProxyService? proxies = null)
     {
         _launcher         = launcher;
         _runs             = runs;
@@ -107,6 +117,7 @@ public sealed class RealProfileRunner : IProfileRunner, IAsyncDisposable
         _vault            = vault;
         _selfCheck        = selfCheck;
         _profiles         = profiles;
+        _proxies          = proxies;
         _loggerFactory    = loggerFactory;
         _log              = loggerFactory.CreateLogger<RealProfileRunner>();
     }
@@ -172,6 +183,50 @@ public sealed class RealProfileRunner : IProfileRunner, IAsyncDisposable
                 _log.LogWarning(ex,
                     "Couldn't bump run_count for '{Name}' (run #{Run})",
                     profile.Name, runId);
+            }
+        }
+
+        // Phase 71 — Auto-rotate IP when enabled on the profile AND the
+        // assigned proxy has rotation configured. Best-effort: a rotation
+        // failure logs a warning and proceeds with the existing IP rather
+        // than aborting the launch.
+        if (profile.AutoRotateIp && !string.IsNullOrWhiteSpace(profile.ProxySlug)
+            && _proxies is not null)
+        {
+            try
+            {
+                var proxy = await _proxies.GetAsync(profile.ProxySlug, ct);
+                if (proxy is not null
+                    && proxy.IsRotating
+                    && !string.IsNullOrWhiteSpace(proxy.RotationApiUrl))
+                {
+                    _log.LogInformation(
+                        "Auto-rotate IP for '{P}' via {Url}",
+                        profile.Name, proxy.RotationApiUrl);
+                    try
+                    {
+                        // Hit the rotation URL via simple HTTP GET. The URL
+                        // is proxy-provider-specific and returns immediately.
+                        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+                        var response = await http.GetAsync(proxy.RotationApiUrl, ct);
+                        response.EnsureSuccessStatusCode();
+
+                        // Brief settle so the upstream proxy registers the new
+                        // exit IP before we launch the browser.
+                        await Task.Delay(TimeSpan.FromSeconds(2), ct);
+                    }
+                    catch (Exception rotateEx)
+                    {
+                        _log.LogWarning(rotateEx,
+                            "Auto-rotate IP failed for '{P}' (will launch with current IP)",
+                            profile.Name);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex,
+                    "Couldn't load proxy for auto-rotate on '{Name}'", profile.Name);
             }
         }
 
@@ -456,28 +511,42 @@ public sealed class RealProfileRunner : IProfileRunner, IAsyncDisposable
                         }
                     }
                 }
-                await _scriptRunner.ExecuteAsync(
+                var scriptResult = await _scriptRunner.ExecuteAsync(
                     script, session, profile.Name, cts.Token,
                     myDomains, tgDomains, vault, vaultAliases);
 
-                // Phase 60c — script finished cleanly. Auto-close the
-                // browser session so we don't leave an orphan window
-                // burning proxy bandwidth and rotating fingerprints
-                // against nothing. The probe-in-profile path already does
-                // this (FingerprintViewModel.ProbeInProfileAsync has its
-                // own auto-close); the regular "kick assigned script"
-                // path was missing it — the browser stayed open after
-                // the script ran to completion until the user manually
-                // closed the window or pressed Stop. Set a marker on
-                // ActiveSession so the StopAsync caller can attribute
-                // the stop reason in the runs row + skip warmup tracking
-                // (this isn't a user-initiated stop). Best-effort: a
-                // close failure shouldn't crash the script outcome —
-                // we already finished, the watchdog will catch the
-                // dying session and clean up.
-                _log.LogInformation(
-                    "Script '{Name}' for '{P}' finished cleanly; auto-closing browser",
-                    script.Name, profile.Name);
+                // Phase 60c — script returned. Auto-close the browser
+                // session so we don't leave an orphan window burning
+                // proxy bandwidth + fingerprints. The probe-in-profile
+                // path already does this; the regular "kick assigned
+                // script" path was missing it — the browser stayed open
+                // after script completion until the user pressed Stop.
+                //
+                // Phase 70 — log the actual run status, don't claim
+                // "finished cleanly" if it didn't. ExecuteAsync now
+                // re-throws on aborts so the only way we land here is
+                // a non-aborted return (status = ok / partial / failed).
+                // "ok" is genuinely clean; "partial" / "failed" should
+                // be logged as warnings so the user can see something
+                // went wrong without trawling individual step entries.
+                var finishVerb = scriptResult.Status switch
+                {
+                    "ok"      => "finished cleanly",
+                    "partial" => $"finished WITH FAILURES ({scriptResult.StepsFailed}/{scriptResult.StepsExecuted} steps failed)",
+                    _         => $"finished with status='{scriptResult.Status}' ({scriptResult.StepsFailed}/{scriptResult.StepsExecuted} steps failed)",
+                };
+                if (string.Equals(scriptResult.Status, "ok", StringComparison.Ordinal))
+                {
+                    _log.LogInformation(
+                        "Script '{Name}' for '{P}' {Verb}; auto-closing browser",
+                        script.Name, profile.Name, finishVerb);
+                }
+                else
+                {
+                    _log.LogWarning(
+                        "Script '{Name}' for '{P}' {Verb}; auto-closing browser",
+                        script.Name, profile.Name, finishVerb);
+                }
                 try
                 {
                     await StopInternalAsync(

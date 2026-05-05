@@ -162,7 +162,21 @@
                     <!-- Status / ready -->
                     <CheckBox x:Name="IsReadyField"
                               Content="Mark profile as ready to launch"
-                              Margin="0,0,0,14"/>
+                              Margin="0,0,0,4"/>
+                    <TextBlock Style="{StaticResource DimText}"
+                               Margin="22,0,0,14"
+                               TextWrapping="Wrap"
+                               Text="Profile must be ready before it can be launched."/>
+
+                    <!-- Auto-rotate IP on launch -->
+                    <CheckBox x:Name="AutoRotateIpField"
+                              Content="Auto-rotate IP on launch (if proxy supports it)"
+                              Margin="0,0,0,4"
+                              ToolTip="Triggers the proxy's rotation URL before each browser start. Only takes effect when the assigned proxy has a rotation URL configured."/>
+                    <TextBlock Style="{StaticResource DimText}"
+                               Margin="22,0,0,14"
+                               TextWrapping="Wrap"
+                               Text="When enabled, the runtime hits the proxy rotation URL right before launching the browser, getting a fresh IP for each session."/>
 
                     <!-- ─── Phase 20: Ad-domain configuration ────────
                          Drives the script runner's per-step domain

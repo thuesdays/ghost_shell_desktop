@@ -41,6 +41,16 @@ public partial class App : Application
     private EventWaitHandle? _showWindowEvent;
     private volatile bool _appShuttingDown;
 
+    /// <summary>
+    /// Phase 71 — process-wide cancellation token source. The periodic
+    /// update-check loop subscribes to this Token so it bails cleanly
+    /// when the app exits (otherwise the loop's <c>Task.Delay(6h)</c>
+    /// would hold a thread-pool worker alive past Application.Shutdown
+    /// and block ProcessExit handlers from firing). Created in
+    /// OnStartup, Cancelled + Disposed in OnExit.
+    /// </summary>
+    private CancellationTokenSource? _appShutdownCts;
+
     // Phase 38: Static flag to signal shutdown from tray's Quit handler
     public static bool AllowingShutdown { get; set; }
 
@@ -201,6 +211,13 @@ public partial class App : Application
     {
         BootTrace("Building host");
 
+        // Phase 71 — process-wide cancellation token so the periodic
+        // update-check loop can be killed cleanly on app exit. Created
+        // here (before the Task.Run that uses it) and cancelled in
+        // OnExit. Without this, the 6-hour Task.Delay would pin a
+        // worker thread past process-exit handlers.
+        _appShutdownCts = new CancellationTokenSource();
+
         // Show splash screen before anything else. It will remain visible
         // and update with progress as we initialize services and the DB.
         var splash = new Views.SplashWindow();
@@ -217,6 +234,9 @@ public partial class App : Application
                 // Phase 38: Tray icon (singleton + hosted service)
                 s.AddSingleton<TrayIconHost>();
                 s.AddHostedService<TrayIconHost>(sp => sp.GetRequiredService<TrayIconHost>());
+
+                // Phase 71: Orphan-run sweep (must run BEFORE RunnerHost)
+                s.AddHostedService<StartupRunSweeper>();
 
                 // Background runner (Phase 1 stub)
                 s.AddHostedService<RunnerHost>();
@@ -597,83 +617,105 @@ public partial class App : Application
                 bootLogger.LogWarning(ex, "Couldn't subscribe ShutdownRequested handler");
             }
 
-            // [Phase 37 fix:] Fire-and-forget update check on a background task
-            // Use InvokeAsync to avoid dispatcher deadlock, and guard against
-            // dispatcher being destroyed during shutdown
+            // Phase 71 — periodic update check every 6 hours. The first check
+            // runs after a 30-second startup grace period (lets splash close +
+            // main window render cleanly). Then repeats every 6 hours thereafter.
+            var _dialogShownForVersion = (Version?)null; // Track to skip re-dialog on same version
             _ = Task.Run(async () =>
             {
-                try
-                {
-                    var svc = Host.Services.GetRequiredService<IUpdateService>();
-                    var info = await svc.CheckAsync();
-                    if (info is not null && svc.UpdateAvailable)
-                    {
-                        // Phase 69c — also persist as a bell-drawer
-                        // notification so the user can re-open the
-                        // dialog any time, not just on this startup.
-                        // Dedupes against existing ACTIVE rows for the
-                        // same target version: if the user already has
-                        // a pending update notification, we don't add a
-                        // second one. Dismissed rows DON'T count, so
-                        // dismiss-then-restart re-surfaces the badge.
-                        try
-                        {
-                            var notifSvc = Host.Services.GetRequiredService<INotificationService>();
-                            var src = $"update:{info.LatestVersion}";
-                            var active = await notifSvc.ListActiveAsync(200);
-                            var alreadyPresent = active.Any(n =>
-                                string.Equals(n.Source, src, StringComparison.Ordinal));
-                            if (!alreadyPresent)
-                            {
-                                var title = $"Update available — v{info.LatestVersion}";
-                                var body  = string.IsNullOrWhiteSpace(info.ReleaseName)
-                                    ? $"You're on v{info.CurrentVersion}. Click to install."
-                                    : $"You're on v{info.CurrentVersion}. {info.ReleaseName}. Click to install.";
-                                await notifSvc.AddAsync(
-                                    severity: NotificationSeverity.Info,
-                                    title:    title,
-                                    body:     body,
-                                    action:   "show_update",
-                                    actionArg: info.LatestVersion.ToString(),
-                                    source:   src);
-                            }
-                        }
-                        catch (Exception nx)
-                        {
-                            bootLogger.LogWarning(nx,
-                                "Couldn't persist update-available notification (non-fatal)");
-                        }
+                var ct = _appShutdownCts?.Token ?? CancellationToken.None;
+                // First check after a 30-second startup grace period (lets the
+                // splash close + main window render cleanly).
+                try { await Task.Delay(TimeSpan.FromSeconds(30), ct); }
+                catch (OperationCanceledException) { return; }
 
-                        // [Phase 37 fix:] Use InvokeAsync + Task to avoid deadlock
-                        // and check that Application.Current still exists.
-                        // The previous `await … ?? Task.CompletedTask` form
-                        // doesn't compile: DispatcherOperation isn't a Task
-                        // and `??` can't mix with `await` on a void-typed
-                        // chain. Guard explicitly.
-                        try
+                while (!ct.IsCancellationRequested)
+                {
+                    try
+                    {
+                        var svc = Host.Services.GetRequiredService<IUpdateService>();
+                        var info = await svc.CheckAsync();
+                        if (info is not null && svc.UpdateAvailable)
                         {
-                            var app = Application.Current;
-                            if (app is not null)
+                            // Phase 69c — also persist as a bell-drawer
+                            // notification so the user can re-open the
+                            // dialog any time, not just on this startup.
+                            // Dedupes against existing ACTIVE rows for the
+                            // same target version: if the user already has
+                            // a pending update notification, we don't add a
+                            // second one. Dismissed rows DON'T count, so
+                            // dismiss-then-restart re-surfaces the badge.
+                            try
                             {
-                                await app.Dispatcher.InvokeAsync(() =>
+                                var notifSvc = Host.Services.GetRequiredService<INotificationService>();
+                                var src = $"update:{info.LatestVersion}";
+                                var active = await notifSvc.ListActiveAsync(200);
+                                var alreadyPresent = active.Any(n =>
+                                    string.Equals(n.Source, src, StringComparison.Ordinal));
+                                if (!alreadyPresent)
                                 {
-                                    if (Application.Current is not null)
-                                    {
-                                        UpdateAvailableDialog.ShowFor(MainWindow, svc, info);
-                                    }
-                                });
+                                    var title = $"Update available — v{info.LatestVersion}";
+                                    var body  = string.IsNullOrWhiteSpace(info.ReleaseName)
+                                        ? $"You're on v{info.CurrentVersion}. Click to install."
+                                        : $"You're on v{info.CurrentVersion}. {info.ReleaseName}. Click to install.";
+                                    await notifSvc.AddAsync(
+                                        severity: NotificationSeverity.Info,
+                                        title:    title,
+                                        body:     body,
+                                        action:   "show_update",
+                                        actionArg: info.LatestVersion.ToString(),
+                                        source:   src);
+                                }
                             }
-                        }
-                        catch (TaskCanceledException)
-                        {
-                            // Dispatcher was destroyed during shutdown; ignore
-                            bootLogger.LogDebug("Update dialog skipped — app shutting down");
+                            catch (Exception nx)
+                            {
+                                bootLogger.LogWarning(nx,
+                                    "Couldn't persist update-available notification (non-fatal)");
+                            }
+
+                            // Phase 71 — only show the dialog once per discovered version.
+                            // The notification bell already handles repeated notifications,
+                            // but the modal dialog should surface only once so the user
+                            // isn't pestered repeatedly.
+                            if (_dialogShownForVersion != info.LatestVersion)
+                            {
+                                _dialogShownForVersion = info.LatestVersion;
+                                // [Phase 37 fix:] Use InvokeAsync + Task to avoid deadlock
+                                // and check that Application.Current still exists.
+                                // The previous `await … ?? Task.CompletedTask` form
+                                // doesn't compile: DispatcherOperation isn't a Task
+                                // and `??` can't mix with `await` on a void-typed
+                                // chain. Guard explicitly.
+                                try
+                                {
+                                    var app = Application.Current;
+                                    if (app is not null)
+                                    {
+                                        await app.Dispatcher.InvokeAsync(() =>
+                                        {
+                                            if (Application.Current is not null)
+                                            {
+                                                UpdateAvailableDialog.ShowFor(MainWindow, svc, info);
+                                            }
+                                        });
+                                    }
+                                }
+                                catch (TaskCanceledException)
+                                {
+                                    // Dispatcher was destroyed during shutdown; ignore
+                                    bootLogger.LogDebug("Update dialog skipped — app shutting down");
+                                }
+                            }
                         }
                     }
-                }
-                catch (Exception ex)
-                {
-                    bootLogger.LogWarning(ex, "Update check failed at startup");
+                    catch (Exception ex)
+                    {
+                        bootLogger.LogWarning(ex, "Periodic update check failed");
+                    }
+
+                    // Wait 6 hours before the next check
+                    try { await Task.Delay(TimeSpan.FromHours(6), ct); }
+                    catch (OperationCanceledException) { break; }
                 }
             });
         }
@@ -736,6 +778,20 @@ public partial class App : Application
     {
         // Phase 38: Signal shutdown to the wake-event listener thread
         _appShuttingDown = true;
+
+        // Phase 71 — cancel the periodic update-check loop's token. The
+        // loop sits in `await Task.Delay(TimeSpan.FromHours(6), ct)` and
+        // would otherwise pin a thread-pool worker until the wait
+        // expired naturally — past process-exit handler completion.
+        // Cancelling lets the loop observe OperationCanceledException
+        // and unwind cleanly during the OnExit window.
+        try
+        {
+            _appShutdownCts?.Cancel();
+            _appShutdownCts?.Dispose();
+            _appShutdownCts = null;
+        }
+        catch { /* best-effort cleanup */ }
 
         // Phase 38: Tell every Window the close is real this time so
         // the OnClosing override doesn't hijack it back into a hide.

@@ -123,13 +123,35 @@ public partial class CompetitorsView : UserControl
             }
         }
 
-        if (minDate is null || maxDate is null || minDate == maxDate)
+        if (minDate is null || maxDate is null)
         {
-            var tb = new TextBlock { Text = "Insufficient data points.", FontSize = 11 };
+            var tb = new TextBlock { Text = "No data yet.", FontSize = 11 };
             Canvas.SetLeft(tb, 12);
             Canvas.SetTop(tb, 12);
             ChartCanvas.Children.Add(tb);
             return;
+        }
+        if (minDate == maxDate)
+        {
+            // Phase 70 — single-day data is what every fresh user has on
+            // their first run. Showing "Insufficient data points" reads
+            // as "you have no data" which is wrong. Nudge the date range
+            // by half a day each side so all the day's points stack at
+            // the centre + the X-axis renders cleanly. Non-trend domains
+            // still get their dots; comes alive once the user has runs
+            // across multiple days.
+            minDate = ((DateTime)minDate).AddHours(-12);
+            maxDate = ((DateTime)maxDate).AddHours(+12);
+
+            var hint = new TextBlock
+            {
+                Text = "Single-day snapshot — chart fills in once you have runs across multiple days.",
+                FontSize = 10,
+                Foreground = (Brush)(TryFindResource("TextDim") ?? Brushes.Gray),
+            };
+            Canvas.SetLeft(hint, 12);
+            Canvas.SetTop(hint, 4);
+            ChartCanvas.Children.Add(hint);
         }
 
         var dateRange = ((DateTime)maxDate - (DateTime)minDate).TotalMilliseconds;

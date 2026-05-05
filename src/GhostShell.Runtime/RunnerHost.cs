@@ -59,6 +59,7 @@ public sealed class RunnerHost : IHostedService, IDisposable
     private readonly IProfileService  _profiles;
     private readonly IProfileGroupService _groups;
     private readonly IProfileRunner   _runner;
+    private readonly IUpdateService _update;
     private readonly ILogger<RunnerHost> _log;
 
     private CancellationTokenSource? _cts;
@@ -84,12 +85,14 @@ public sealed class RunnerHost : IHostedService, IDisposable
         IProfileService  profiles,
         IProfileGroupService groups,
         IProfileRunner   runner,
+        IUpdateService update,
         ILogger<RunnerHost> log)
     {
         _schedules = schedules;
         _profiles  = profiles;
         _groups    = groups;
         _runner    = runner;
+        _update    = update;
         _log       = log;
     }
 
@@ -159,6 +162,14 @@ public sealed class RunnerHost : IHostedService, IDisposable
     /// </summary>
     public async Task TickAsync(CancellationToken ct)
     {
+        // Phase 71 — if an update is preparing, skip this tick so active
+        // runs can drain naturally without the scheduler firing new ones.
+        if (_update.IsUpdatePending)
+        {
+            _log.LogDebug("Scheduler tick skipped — update is preparing");
+            return;
+        }
+
         // Snapshot BOTH time references at the top of the tick so all
         // downstream comparisons see the same moment. UTC is what
         // SQLite uses for the GetDueAsync comparison; local is what

@@ -21,8 +21,15 @@
             <RowDefinition Height="Auto"/>  <!-- toolbar -->
             <RowDefinition Height="Auto"/>  <!-- KPI tiles -->
             <RowDefinition Height="Auto"/>  <!-- chart -->
-            <RowDefinition Height="Auto"/>  <!-- tabs + content -->
-            <RowDefinition Height="*"/>     <!-- filler -->
+            <!-- Phase 70 fix — tabs row now takes the rest of the page
+                 (Height="*"). Was Auto, which made every child of the
+                 inner Grid that used Height="*" collapse to 0 height —
+                 specifically the DataGrid that holds the leaderboard rows.
+                 The page showed the tab buttons + the "3 competitor(s)"
+                 footer (both Auto) but the grid itself was invisible.
+                 Removed the trailing filler row since this row now
+                 grows to fill the remaining space. -->
+            <RowDefinition Height="*"/>     <!-- tabs + content -->
         </Grid.RowDefinitions>
 
         <!-- ─── Header ─── -->
@@ -317,10 +324,63 @@
                                   SelectionMode="Single"
                                   Margin="0,0,0,12">
                             <DataGrid.Columns>
-                                <DataGridTextColumn Header="#" Width="40" Binding="{Binding ., Converter={StaticResource StringEqualsConverter}}"/>
+                                <!-- Phase 70 — drop the broken "#" column.
+                                     It was binding the entire row through
+                                     a StringEqualsConverter (a Visibility
+                                     converter), producing garbage. Domain
+                                     is the natural primary key here and
+                                     numbering provides no insight. -->
                                 <DataGridTextColumn Header="Domain" Width="*" Binding="{Binding Domain}"/>
-                                <DataGridTextColumn Header="Mentions" Width="140" Binding="{Binding Mentions}"/>
-                                <DataGridTextColumn Header="Trend" Width="100" Binding="{Binding MentionsPrev}"/>
+                                <!-- Classification badge — drives row colour
+                                     by the row's ClassificationBadge value:
+                                       mine       → soft-red  (own ad — should never see this)
+                                       target     → soft-green (paid target)
+                                       blocked    → muted     (in block list)
+                                       not_target → soft-amber (genuine new competitor)
+                                     The amber "not_target" badge calls out
+                                     domains the user hasn't decided about yet
+                                     so they can hit Target / Block to triage. -->
+                                <DataGridTemplateColumn Header="Status" Width="110">
+                                    <DataGridTemplateColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <Border Padding="6,2" CornerRadius="3"
+                                                    HorizontalAlignment="Left"
+                                                    VerticalAlignment="Center"
+                                                    BorderThickness="1">
+                                                <Border.Style>
+                                                    <Style TargetType="Border">
+                                                        <Setter Property="Background"  Value="{StaticResource BgRaised}"/>
+                                                        <Setter Property="BorderBrush" Value="{StaticResource Border}"/>
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding ClassificationBadge}" Value="not_target">
+                                                                <Setter Property="Background"  Value="{StaticResource WarnSoftBrush}"/>
+                                                                <Setter Property="BorderBrush" Value="{StaticResource WarnBrush}"/>
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding ClassificationBadge}" Value="target">
+                                                                <Setter Property="Background"  Value="{StaticResource OkSoftBrush}"/>
+                                                                <Setter Property="BorderBrush" Value="{StaticResource OkBrush}"/>
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding ClassificationBadge}" Value="blocked">
+                                                                <Setter Property="Background"  Value="{StaticResource BgDeep}"/>
+                                                                <Setter Property="BorderBrush" Value="{StaticResource TextDim}"/>
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding ClassificationBadge}" Value="mine">
+                                                                <Setter Property="Background"  Value="{StaticResource ErrSoftBrush}"/>
+                                                                <Setter Property="BorderBrush" Value="{StaticResource ErrBrush}"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </Border.Style>
+                                                <TextBlock Text="{Binding ClassificationBadge}"
+                                                           FontFamily="{StaticResource FontMono}"
+                                                           FontSize="10"
+                                                           Foreground="{StaticResource Text}"/>
+                                            </Border>
+                                        </DataTemplate>
+                                    </DataGridTemplateColumn.CellTemplate>
+                                </DataGridTemplateColumn>
+                                <DataGridTextColumn Header="Mentions" Width="100" Binding="{Binding Mentions}"/>
+                                <DataGridTextColumn Header="Prev" Width="80" Binding="{Binding MentionsPrev}"/>
                                 <DataGridTextColumn Header="Queries" Width="80" Binding="{Binding QueriesCount}"/>
                                 <DataGridTextColumn Header="Clicks" Width="80" Binding="{Binding ClicksCount}"/>
                                 <DataGridTextColumn Header="Last Seen" Width="140" Binding="{Binding LastSeen, StringFormat='{}{0:g}'}"/>
@@ -328,16 +388,25 @@
                                     <DataGridTemplateColumn.CellTemplate>
                                         <DataTemplate>
                                             <StackPanel Orientation="Horizontal" Margin="4,0">
+                                                <!-- Phase 70 — disable Target / Block buttons when the
+                                                     domain is already in that list. AddToTargetAsync
+                                                     dedupes server-side too (returns "Already in list"),
+                                                     but pre-disabling makes the state visible without
+                                                     having to click. -->
                                                 <Button Command="{Binding RelativeSource={RelativeSource AncestorType=DataGrid}, Path=DataContext.AddToTargetCommand}"
                                                         CommandParameter="{Binding .}"
                                                         Style="{StaticResource ButtonGhost}"
                                                         Padding="8,4" FontSize="10"
-                                                        Content="Target"/>
+                                                        Content="Target"
+                                                        IsEnabled="{Binding IsInTarget, Converter={StaticResource InverseBoolConverter}}"
+                                                        ToolTip="Add this domain to the global Target list (no duplicates)."/>
                                                 <Button Command="{Binding RelativeSource={RelativeSource AncestorType=DataGrid}, Path=DataContext.AddToBlockCommand}"
                                                         CommandParameter="{Binding .}"
                                                         Style="{StaticResource ButtonGhost}"
                                                         Padding="8,4" FontSize="10" Margin="6,0,0,0"
-                                                        Content="Block"/>
+                                                        Content="Block"
+                                                        IsEnabled="{Binding IsInBlock, Converter={StaticResource InverseBoolConverter}}"
+                                                        ToolTip="Add this domain to the global Block list (no duplicates)."/>
                                             </StackPanel>
                                         </DataTemplate>
                                     </DataGridTemplateColumn.CellTemplate>

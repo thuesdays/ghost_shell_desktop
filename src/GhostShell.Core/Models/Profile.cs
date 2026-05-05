@@ -88,4 +88,12 @@ public sealed record Profile
 
     /// <summary>Domains the profile is paid to drive traffic to.</summary>
     public string? TargetDomainsCsv { get; init; }
+
+    // ─── Phase 71: Auto-rotate IP on launch ────────────────────────────
+    /// <summary>
+    /// Phase 71 — when true AND the assigned proxy has a non-empty
+    /// RotationUrl + IsRotating=true, the runner hits the rotation URL
+    /// before each launch. Default false (preserves existing behaviour).
+    /// </summary>
+    public bool AutoRotateIp { get; init; } = false;
 }

@@ -62,6 +62,25 @@ public sealed record CompetitorLeaderRow
     public int      ClicksCount    { get; init; }     // distinct click events
     public DateTime LastSeen       { get; init; }
     public bool     IsNew          { get; init; }     // first seen inside the period
+
+    // Phase 70 — domain-list membership flags. Populated by the VM
+    // AFTER the SQL fetch by intersecting the leaderboard's domains
+    // with the global Target / Block / My lists. Drives the "in target"
+    // / "in block" / "not_target" badges in the leaderboard grid + lets
+    // the row's "Add to Target" button reflect already-classified state.
+    public bool     IsInTarget     { get; init; }
+    public bool     IsInBlock      { get; init; }
+    public bool     IsInMyDomains  { get; init; }
+
+    /// <summary>
+    /// Composite status string for the badge column. Priority:
+    ///   mine → target → blocked → not_target.
+    /// </summary>
+    public string ClassificationBadge =>
+        IsInMyDomains ? "mine"     :
+        IsInTarget    ? "target"   :
+        IsInBlock     ? "blocked"  :
+                        "not_target";
 }
 
 /// <summary>One sample on the Competitors volume-trend line chart.</summary>

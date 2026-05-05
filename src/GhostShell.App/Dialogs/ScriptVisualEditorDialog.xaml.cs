@@ -427,9 +427,13 @@ public partial class ScriptVisualEditorDialog : Window
         // its condition panel.
         var nKey = n.Type.ToLowerInvariant();
         var condIn = nKey is "if" or "while_loop" ? n.ConditionJson : null;
-        var dlg = new ScriptStepParamsTypedDialog(n.Type, n.ParamsJson, condIn) { Owner = this };
+        // Phase 70 — pass current Probability so the inline slider renders
+        // at the right position; write result back so saving the params
+        // also preserves the slider's final value.
+        var dlg = new ScriptStepParamsTypedDialog(n.Type, n.ParamsJson, condIn, n.Probability) { Owner = this };
         if (dlg.ShowDialog() != true || dlg.Result is null) return;
         n.ParamsJson = dlg.Result;
+        n.Probability = dlg.Probability;
         if (dlg.ConditionResult is not null && (nKey is "if" or "while_loop"))
             n.ConditionJson = dlg.ConditionResult;
         // No call to Items.Refresh — INotifyPropertyChanged on
@@ -861,10 +865,11 @@ public partial class ScriptVisualEditorDialog : Window
 
             if (!r.Enabled) w.WriteBoolean("enabled", false);
 
-            // Phase 19: per-step flags. Only emit when non-default so
+            // Phase 19+70: per-step flags. Only emit non-default values so
             // round-trip stays clean (default JSON has no extra keys).
+            // `probability` is clamped to [0..1] and rounded to 2 dp.
             if (r.Probability < 1.0)
-                w.WriteNumber("probability", Math.Round(r.Probability, 2));
+                w.WriteNumber("probability", Math.Round(Math.Clamp(r.Probability, 0.0, 1.0), 2));
             if (r.AbortOnError)    w.WriteBoolean("abort_on_error",    true);
             if (r.SkipOnMyDomain)  w.WriteBoolean("skip_on_my_domain", true);
             if (r.SkipOnTarget)    w.WriteBoolean("skip_on_target",    true);
@@ -983,6 +988,17 @@ public partial class ScriptVisualEditorDialog : Window
             pdoc.RootElement.WriteTo(w);
         if (!n.Enabled) w.WriteBoolean("enabled", false);
 
+        // Phase 70 fix — emit probability for nested rows too. Without
+        // this the user's slider position on a nested step (e.g.
+        // commercial_inflate inside a foreach body) was set into
+        // NestedStepRow.Probability in memory, but SerialiseNested
+        // never wrote it to JSON, so the saved script had no
+        // probability key and the runtime fell back to 1.0 (always
+        // run). Same convention as top-level: omit when default 1.0,
+        // write rounded-to-2dp double otherwise.
+        if (n.Probability < 1.0)
+            w.WriteNumber("probability", Math.Round(Math.Clamp(n.Probability, 0.0, 1.0), 2));
+
         // Emit condition for nested if / while_loop. Pre-fix: this
         // path didn't write `condition` at all, so any user-authored
         // condition on a nested if-step (like the
@@ -1087,6 +1103,17 @@ public partial class ScriptVisualEditorDialog : Window
                 && cEl.ValueKind == JsonValueKind.Object)
             {
                 row.ConditionJson = cEl.GetRawText();
+            }
+
+            // Phase 70 — hydrate Probability from the saved JSON.
+            // ScriptRunner emits "probability" only when < 1.0, so the
+            // absence of the key means default 100% (already set by the
+            // row's field initialiser). When present, it's a double 0..1.
+            if (s.TryGetProperty("probability", out var pEl)
+                && (pEl.ValueKind == JsonValueKind.Number))
+            {
+                if (pEl.TryGetDouble(out var pVal))
+                    row.Probability = Math.Clamp(pVal, 0.0, 1.0);
             }
 
             // Recursively populate nested rows for control-flow steps.
@@ -1686,6 +1713,13 @@ public partial class ScriptVisualEditorDialog : Window
         /// when the user toggles a step's type back and forth in the
         /// editor without re-creating it.</summary>
         public string ConditionJson { get; set; } = "{\"kind\":\"true\"}";
+
+        /// <summary>Phase 70 — universal stochastic gate (0..1) for the
+        /// step. Default 1.0 means "always run". Surfaces in the inline
+        /// slider on ScriptStepParamsTypedDialog, persists in the row's
+        /// underlying ScriptStep.Probability when the visual editor
+        /// flushes its state back to model.</summary>
+        public double Probability { get; set; } = 1.0;
 
         public string Summary => SummariseParams(_paramsJson);
 

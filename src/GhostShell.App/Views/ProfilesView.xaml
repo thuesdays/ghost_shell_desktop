@@ -260,25 +260,37 @@
                                 <TextBlock Text="Stop" VerticalAlignment="Center"/>
                             </StackPanel>
                         </Button>
-                        <!-- Quick FP regenerate — small icon button.
-                             Doesn't leave the page; calls
-                             IFingerprintService.RegenerateAsync and
-                             shows a brief score dialog. The user can
-                             open the full Fingerprint page from the
-                             sidebar for the detailed view. -->
-                        <Button Grid.Column="1" Content="↻ FP"
-                                Command="{Binding DataContext.QuickRegenerateFpCommand,
-                                          Source={x:Reference PageRoot}}"
-                                CommandParameter="{Binding}"
-                                ToolTip="Regenerate fingerprint payload"
-                                MinWidth="44"
-                                Margin="0,0,4,0"/>
-                        <Button Grid.Column="1" Content="Edit"
-                                Command="{Binding DataContext.EditCommand,
-                                          Source={x:Reference PageRoot}}"
-                                CommandParameter="{Binding}"
-                                MinWidth="60"
-                                HorizontalAlignment="Right"/>
+                        <!-- Phase 70 fix — wrap right-side action buttons
+                             in a StackPanel. Previously both '↻ FP' and
+                             'Edit' lived in Grid.Column=1 directly which
+                             made WPF stack them at the same position →
+                             the FP button's text rendered ON TOP of the
+                             Edit text + its tooltip leaked through both,
+                             producing the garbled "C…ВРР" overlap the
+                             user reported. StackPanel.Orientation=Horizontal
+                             lays them out side-by-side with proper
+                             spacing. -->
+                        <StackPanel Grid.Column="1" Orientation="Horizontal"
+                                    HorizontalAlignment="Right">
+                            <!-- Quick FP regenerate — small icon button.
+                                 Doesn't leave the page; calls
+                                 IFingerprintService.RegenerateAsync and
+                                 shows a brief score dialog. The user can
+                                 open the full Fingerprint page from the
+                                 sidebar for the detailed view. -->
+                            <Button Content="↻ FP"
+                                    Command="{Binding DataContext.QuickRegenerateFpCommand,
+                                              Source={x:Reference PageRoot}}"
+                                    CommandParameter="{Binding}"
+                                    ToolTip="Regenerate fingerprint payload"
+                                    MinWidth="44"
+                                    Margin="0,0,4,0"/>
+                            <Button Content="Edit"
+                                    Command="{Binding DataContext.EditCommand,
+                                              Source={x:Reference PageRoot}}"
+                                    CommandParameter="{Binding}"
+                                    MinWidth="60"/>
+                        </StackPanel>
                     </Grid>
                 </Grid>
             </Border>

@@ -81,6 +81,15 @@
                                VerticalAlignment="Center"
                                TextTrimming="CharacterEllipsis"/>
                     <WrapPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                        <!-- Phase 70 — bulk delete. Pass DataGrid.SelectedItems
+                             via CommandParameter so the VM can pluck Proxy rows
+                             out of the live selection. Ctrl+click / Shift+click
+                             on rows to multi-select. -->
+                        <Button Content="🗑  Delete selected"
+                                Command="{Binding BulkDeleteCommand}"
+                                CommandParameter="{Binding ElementName=ProxyGrid, Path=SelectedItems}"
+                                Margin="0,0,8,4"
+                                ToolTip="Delete every proxy currently highlighted (Ctrl/Shift-click to multi-select)."/>
                         <Button Content="📋  Bulk import"
                                 Command="{Binding BulkImportCommand}"
                                 Margin="0,0,8,4"/>
@@ -135,13 +144,16 @@
 
                 <Border Style="{StaticResource Card}" Padding="0"
                         Visibility="{Binding IsEmpty, Converter={StaticResource InverseBoolToVis}}">
-                    <DataGrid ItemsSource="{Binding Items}"
-                              SelectionMode="Single"
+                    <DataGrid x:Name="ProxyGrid"
+                              ItemsSource="{Binding Items}"
+                              SelectionMode="Extended"
+                              SelectionUnit="FullRow"
                               EnableRowVirtualization="True"
                               EnableColumnVirtualization="True"
                               VirtualizingStackPanel.IsVirtualizing="True"
                               VirtualizingStackPanel.VirtualizationMode="Recycling"
                               ScrollViewer.CanContentScroll="True"
+                              HeadersVisibility="Column"
                               RowHeight="28"
                               MinRowHeight="26">
                         <DataGrid.RowStyle>
@@ -151,6 +163,33 @@
                             </Style>
                         </DataGrid.RowStyle>
                         <DataGrid.Columns>
+                            <!-- Phase 70 — checkbox selection column. Bound to
+                                 DataGridRow.IsSelected via RelativeSource so the
+                                 checkbox + the row's existing selection state
+                                 stay in sync (Ctrl/Shift-click on the row also
+                                 ticks the box). The Bulk Delete button reads
+                                 DataGrid.SelectedItems directly, so any of the
+                                 three selection mechanisms — checkbox, row
+                                 click, header SelectAll — feeds the same set. -->
+                            <DataGridTemplateColumn Header="" Width="32"
+                                                    CanUserResize="False"
+                                                    CanUserSort="False"
+                                                    CanUserReorder="False">
+                                <DataGridTemplateColumn.HeaderTemplate>
+                                    <DataTemplate>
+                                        <CheckBox HorizontalAlignment="Center"
+                                                  ToolTip="Select all / clear all"
+                                                  IsChecked="{Binding RelativeSource={RelativeSource AncestorType={x:Type DataGrid}}, Path=Tag, Mode=TwoWay}"
+                                                  Click="OnProxySelectAllClick"/>
+                                    </DataTemplate>
+                                </DataGridTemplateColumn.HeaderTemplate>
+                                <DataGridTemplateColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <CheckBox HorizontalAlignment="Center"
+                                                  IsChecked="{Binding IsSelected, RelativeSource={RelativeSource AncestorType={x:Type DataGridRow}}, Mode=TwoWay}"/>
+                                    </DataTemplate>
+                                </DataGridTemplateColumn.CellTemplate>
+                            </DataGridTemplateColumn>
                             <DataGridTextColumn Header="NAME"     Binding="{Binding Name}"        Width="*" IsReadOnly="True"/>
                             <!-- Phase 52 — coloured status pill so user can scan the grid for
                                  failed proxies without reading text. Match the verdict-ellipse
@@ -184,61 +223,30 @@
                                     </DataTemplate>
                                 </DataGridTemplateColumn.CellTemplate>
                             </DataGridTemplateColumn>
-                            <DataGridTextColumn Header="URL"      Binding="{Binding Url}"         Width="2*" IsReadOnly="True">
-                                <DataGridTextColumn.ElementStyle>
-                                    <Style TargetType="TextBlock"
-                                           BasedOn="{StaticResource {x:Type TextBlock}}">
-                                        <Setter Property="FontFamily" Value="{StaticResource FontMono}"/>
-                                    </Style>
-                                </DataGridTextColumn.ElementStyle>
-                            </DataGridTextColumn>
+                            <!-- Phase 70 — URL / DEFAULT / ROTATE removed. URL was
+                                 mostly truncated and not actionable in-grid; Default
+                                 and Rotate are toggled via the Edit dialog so a
+                                 read-only checkbox column was just visual noise.
+                                 The freed pixels go to NAME / GEO / IP TYPE which
+                                 the user actually scans by. Right-click row → Edit
+                                 surfaces all three hidden fields when needed. -->
                             <DataGridTextColumn Header="GEO"      Binding="{Binding Country}"     Width="140" IsReadOnly="True"/>
                             <DataGridTextColumn Header="IP TYPE"  Binding="{Binding IpType}"      Width="100" IsReadOnly="True"/>
                             <DataGridTextColumn Header="LATENCY"  Binding="{Binding LatencyMs, StringFormat='{}{0} ms'}" Width="80" IsReadOnly="True"/>
                             <DataGridTextColumn Header="PROFILES" Binding="{Binding ProfileCount}" Width="70" IsReadOnly="True"/>
 
-                            <!-- Read-only display checkboxes — toggling is done via the Edit
-                                 dialog. Using a template column with IsHitTestVisible=False
-                                 sidesteps the WPF DataGridCheckBoxColumn's "first click
-                                 enters edit mode, second click toggles" two-tap problem. -->
-                            <DataGridTemplateColumn Header="DEFAULT" Width="70" IsReadOnly="True">
-                                <DataGridTemplateColumn.CellTemplate>
-                                    <DataTemplate>
-                                        <CheckBox IsChecked="{Binding IsDefault, Mode=OneWay}"
-                                                  IsHitTestVisible="False" Focusable="False"
-                                                  HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                    </DataTemplate>
-                                </DataGridTemplateColumn.CellTemplate>
-                            </DataGridTemplateColumn>
-                            <DataGridTemplateColumn Header="ROTATE"  Width="70" IsReadOnly="True">
-                                <DataGridTemplateColumn.CellTemplate>
-                                    <DataTemplate>
-                                        <CheckBox IsChecked="{Binding IsRotating, Mode=OneWay}"
-                                                  IsHitTestVisible="False" Focusable="False"
-                                                  HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                    </DataTemplate>
-                                </DataGridTemplateColumn.CellTemplate>
-                            </DataGridTemplateColumn>
-
                             <DataGridTextColumn Header="CHECKED"
                                                 Binding="{Binding LastCheckedAt, StringFormat='{}{0:yyyy-MM-dd HH:mm}'}"
                                                 Width="120" IsReadOnly="True"/>
 
-                            <!-- Actions column — explicit icon buttons.
-
-                                 Multi-attempt-three sizing: previous tries used Width=130
-                                 then 150 then 175 with various paddings; trashcan kept
-                                 getting clipped at the column boundary. Root cause was
-                                 the DataGridCell's default focus-visual stroke + cell
-                                 padding eating the rightmost ~10-15px on top of the
-                                 visible scrollbar lane. Final fix:
-                                   • CellStyle with Padding=0 + BorderThickness=0
-                                     kills DataGridCell's own chrome.
-                                   • Width=210 leaves ~120px of slack over the three
-                                     30×30 buttons (96px) + 6px inter-button margin.
-                                   • HorizontalAlignment=Center inside that slack
-                                     gives even breathing room left+right. -->
-                            <DataGridTemplateColumn Header="" MinWidth="210" Width="210" IsReadOnly="True"
+                            <!-- Actions column — three icon buttons (Test, Edit,
+                                 Delete). Phase 70 — trimmed from 210 to 116px:
+                                 the previous slack went to URL/DEFAULT/ROTATE
+                                 columns now removed. 32×3 buttons + 6×2 margin
+                                 + 4px breathing on each side = 116. CellStyle
+                                 still kills DataGridCell padding so the trash
+                                 icon doesn't clip at the right edge. -->
+                            <DataGridTemplateColumn Header="" MinWidth="116" Width="116" IsReadOnly="True"
                                                     CanUserResize="False" CanUserSort="False"
                                                     CanUserReorder="False">
                                 <DataGridTemplateColumn.CellStyle>

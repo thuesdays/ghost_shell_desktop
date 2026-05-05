@@ -152,6 +152,51 @@
                                            Text="Compound conditions (and/or/not) carry a list of child conditions. Flip to JSON view to edit those — the typed form keeps the kind but won't show child editors."/>
                             </StackPanel>
                         </Border>
+                        <!-- Phase 70 — universal Probability slider visible
+                             at the top of the params form for every action.
+                             Bound to ScriptStep.Probability (0..1). The
+                             previous design hid this in a separate "Step
+                             Flags" dialog which users couldn't find from
+                             the params form. Now it's a first-class field
+                             every action surfaces — defaults to 100 (always
+                             run), drag down to vary stochastic behaviour. -->
+                        <Border x:Name="ProbabilityPanel"
+                                Margin="0,0,0,12"
+                                Padding="12,10"
+                                CornerRadius="6"
+                                Background="{StaticResource BgRaised}"
+                                BorderBrush="{StaticResource Border}"
+                                BorderThickness="1">
+                            <StackPanel>
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="PROBABILITY"
+                                               Style="{StaticResource CardHeader}"
+                                               FontSize="10" FontWeight="Bold"/>
+                                    <TextBlock Grid.Column="1" x:Name="ProbabilityLabel"
+                                               FontFamily="{StaticResource FontMono}"
+                                               FontSize="12"
+                                               Foreground="{StaticResource Accent}"
+                                               Text="100%"/>
+                                </Grid>
+                                <TextBlock
+                                    Style="{StaticResource DimText}"
+                                    FontSize="10"
+                                    TextWrapping="Wrap"
+                                    Margin="0,2,0,8"
+                                    Text="Chance this step runs each time it's reached. 100% always, 0% never. Useful inside loops to vary per-iteration behaviour."/>
+                                <Slider x:Name="ProbabilitySlider"
+                                        Minimum="0" Maximum="100"
+                                        Value="100"
+                                        TickFrequency="10"
+                                        IsSnapToTickEnabled="False"
+                                        TickPlacement="None"
+                                        ValueChanged="OnProbabilityChanged"/>
+                            </StackPanel>
+                        </Border>
                         <!-- Regular params -->
                         <ItemsControl x:Name="FieldsList">
                             <ItemsControl.ItemTemplate>

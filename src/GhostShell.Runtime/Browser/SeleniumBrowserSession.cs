@@ -126,6 +126,28 @@ internal sealed class SeleniumBrowserSession : IBrowserSession
                     result.Add(MapCdpCookieToEntry(c));
                 return result;
             }
+            catch (OpenQA.Selenium.NoSuchWindowException)
+            {
+                // Phase 70 — expected when the window was closed by the
+                // user or torn down by the watchdog. No need to dump a
+                // stack trace; just info-log and return empty so the
+                // run-tail snapshot path treats this as "no cookies
+                // available" rather than an error.
+                _log.LogInformation(
+                    "GetCookies skipped for '{Profile}': window already closed",
+                    ProfileName);
+                return Array.Empty<CookieEntry>();
+            }
+            catch (Exception ex) when (
+                ex.Message?.Contains("invalid session id", StringComparison.OrdinalIgnoreCase) == true
+             || ex.Message?.Contains("session deleted", StringComparison.OrdinalIgnoreCase) == true
+             || ex.Message?.Contains("not connected to DevTools", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                _log.LogInformation(
+                    "GetCookies skipped for '{Profile}': session already gone ({Msg})",
+                    ProfileName, ex.Message);
+                return Array.Empty<CookieEntry>();
+            }
             catch (Exception ex)
             {
                 _log.LogWarning(ex, "GetCookies via CDP failed for '{Profile}'", ProfileName);

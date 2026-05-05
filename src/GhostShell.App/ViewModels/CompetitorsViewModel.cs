@@ -107,6 +107,29 @@ public sealed partial class CompetitorsViewModel : BaseViewModel
             var recent = await _competitors.GetRecentAsync(Days, 200, ct);
             var byQuery = await _competitors.GetByQueryAsync(Days, 50, ct);
 
+            // Phase 70 — fetch the three global domain lists (My / Target /
+            // Block) so we can stamp each leaderboard row with membership
+            // flags (IsInTarget, IsInBlock, IsInMyDomains). Drives the
+            // "not_target" / "in target" / "in block" / "mine" badge in
+            // the grid + lets the user see at a glance which competitors
+            // they haven't classified yet. Cheap — these lists are small
+            // (typically <200 entries each).
+            var myDomains     = await _domainLists.ListAsync(DomainListKind.My,     ct);
+            var targetDomains = await _domainLists.ListAsync(DomainListKind.Target, ct);
+            var blockDomains  = await _domainLists.ListAsync(DomainListKind.Block,  ct);
+            var mySet     = new HashSet<string>(myDomains.Select(d => Normalise(d.Domain)),     StringComparer.OrdinalIgnoreCase);
+            var targetSet = new HashSet<string>(targetDomains.Select(d => Normalise(d.Domain)), StringComparer.OrdinalIgnoreCase);
+            var blockSet  = new HashSet<string>(blockDomains.Select(d => Normalise(d.Domain)),  StringComparer.OrdinalIgnoreCase);
+
+            // Stamp membership flags via record-with so we don't need a
+            // wrapper VM. The new instances replace the SQL-loaded ones.
+            var enriched = leaderboard.Select(r => r with
+            {
+                IsInMyDomains = mySet.Contains(Normalise(r.Domain)),
+                IsInTarget    = targetSet.Contains(Normalise(r.Domain)),
+                IsInBlock     = blockSet.Contains(Normalise(r.Domain)),
+            }).ToList();
+
             // Update KPI tiles
             RecordsCount = kpis.Records;
             UniqueDomainsCount = kpis.UniqueDomains;
@@ -114,14 +137,11 @@ public sealed partial class CompetitorsViewModel : BaseViewModel
             ActiveDomainCount = kpis.ActiveDomains;
             QuietingDomainsCount = kpis.QuietingDomains;
 
-            // Update collections on the UI thread. WPF's Dispatcher
-            // doesn't have an `UIThread` static — that's Avalonia's
-            // syntax. The right call here is the Application's own
-            // dispatcher, which lives on the UI thread by definition.
+            // Update collections on the UI thread.
             Application.Current.Dispatcher.Invoke(() =>
             {
                 LeaderboardRows.Clear();
-                foreach (var row in leaderboard)
+                foreach (var row in enriched)
                     LeaderboardRows.Add(row);
 
                 ByQueryRows.Clear();
@@ -142,6 +162,19 @@ public sealed partial class CompetitorsViewModel : BaseViewModel
                 "OK", ConfirmSeverity.Error);
         }
         finally { IsLoading = false; }
+    }
+
+    /// <summary>
+    /// Phase 70 — normalise a domain for set membership checks. Lower-
+    /// case + strip leading "www." so "Goodmedika.com.ua" / "goodmedika.com.ua"
+    /// / "www.goodmedika.com.ua" all collide on the same key. Mirrors
+    /// the runtime's host comparison shortcut in RunContext.
+    /// </summary>
+    private static string Normalise(string domain)
+    {
+        var d = (domain ?? "").Trim().ToLowerInvariant();
+        if (d.StartsWith("www.")) d = d[4..];
+        return d;
     }
 
     [RelayCommand]

@@ -527,4 +527,68 @@ public sealed partial class ProxyViewModel : BaseViewModel
             _log.LogError(ex, "Failed to delete proxy '{Slug}'", selected.Slug);
         }
     }
+
+    /// <summary>
+    /// Phase 70 — bulk delete N selected proxies. The DataGrid binds
+    /// its <see cref="System.Collections.IList"/> SelectedItems via
+    /// CommandParameter. We snapshot to a typed list FIRST because
+    /// Items.Clear() during ReloadAsync would invalidate the live
+    /// selection enumerator. Falls back to single-row behaviour if
+    /// only one is picked, with a friendlier prompt.
+    /// </summary>
+    [RelayCommand]
+    private async Task BulkDeleteAsync(System.Collections.IList? selected)
+    {
+        if (selected is null) return;
+        var picks = selected.OfType<Proxy>().ToList();
+        if (picks.Count == 0) return;
+
+        var title = picks.Count == 1
+            ? $"Delete proxy '{picks[0].Name ?? picks[0].Slug}'?"
+            : $"Delete {picks.Count} proxies?";
+        var body = picks.Count == 1
+            ? "Profiles bound to this proxy will keep the slug reference, " +
+              "but launches will fail until they're rebound. Diagnostics " +
+              "history is kept."
+            : "Profiles bound to any of these proxies will keep the slug " +
+              "reference, but launches will fail until they're rebound. " +
+              "Diagnostics history is kept.\n\n" +
+              "Will delete:\n  • " +
+              string.Join("\n  • ",
+                  picks.Take(15).Select(p => p.Name ?? p.Slug)) +
+              (picks.Count > 15 ? $"\n  • …and {picks.Count - 15} more" : "");
+
+        var ok = await _dialogs.ConfirmAsync(title, body, "Delete",
+            picks.Count > 1 ? ConfirmSeverity.Danger : ConfirmSeverity.Neutral);
+        if (!ok) return;
+
+        // Sequential delete — IProxyService.DeleteAsync is per-row. We
+        // track failures so a single bad row doesn't abort the rest.
+        var failed = new List<(string slug, string err)>();
+        foreach (var p in picks)
+        {
+            try { await _proxies.DeleteAsync(p.Slug); }
+            catch (Exception ex)
+            {
+                _log.LogError(ex, "Failed to delete proxy '{Slug}' in bulk pass", p.Slug);
+                failed.Add((p.Slug, ex.Message));
+            }
+        }
+        var deleted = picks.Count - failed.Count;
+        _log.LogInformation(
+            "Bulk delete: {Done}/{Total} proxies deleted ({Failed} failed)",
+            deleted, picks.Count, failed.Count);
+        await ReloadAsync();
+
+        if (failed.Count > 0)
+        {
+            var detail = string.Join("\n  • ",
+                failed.Take(10).Select(f => $"{f.slug}: {f.err}"));
+            if (failed.Count > 10) detail += $"\n  • …and {failed.Count - 10} more";
+            await _dialogs.ConfirmAsync(
+                "Bulk delete — partial",
+                $"Deleted {deleted} of {picks.Count}. Errors:\n  • {detail}",
+                "OK", ConfirmSeverity.Warning);
+        }
+    }
 }

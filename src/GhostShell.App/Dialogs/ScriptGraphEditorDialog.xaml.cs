@@ -964,9 +964,13 @@ public partial class ScriptGraphEditorDialog : Window
                 nv.SummaryText.Text = SummariseCondition(nv.ConditionJson);
             return;
         }
-        var dlg = new ScriptStepParamsTypedDialog(nv.Type, nv.ParamsJson) { Owner = this };
+        // Phase 70 — pass current Probability so the inline slider on the
+        // dialog's params form is positioned correctly; write the slider's
+        // result back so saving the dialog also persists the new value.
+        var dlg = new ScriptStepParamsTypedDialog(nv.Type, nv.ParamsJson, nv.Probability) { Owner = this };
         if (dlg.ShowDialog() != true || dlg.Result is null) return;
         nv.ParamsJson = dlg.Result;
+        nv.Probability = dlg.Probability;
         if (nv.SummaryText is not null)
             nv.SummaryText.Text = SummariseParams(nv.ParamsJson);
     }

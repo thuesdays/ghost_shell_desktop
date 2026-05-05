@@ -1066,7 +1066,46 @@ public sealed partial class SessionsViewModel : BaseViewModel
             return;
         }
         IsChromeImporting = true;
-        ChromeImportStatus = "Importing…";
+        ChromeImportStatus = "Importing… 0s";
+
+        // Phase 70 — UI-thread responsiveness. The previous code awaited
+        // ImportAsync directly on the dispatcher; ChromeImporter's
+        // internal SQLite reads + DPAPI calls block synchronously, so
+        // the UI froze for the duration of the import (typically 3-6s).
+        // Two improvements:
+        //   • A DispatcherTimer ticks every 500ms and rewrites the
+        //     status with elapsed seconds + a stage hint so the user
+        //     sees the import is alive, not hung.
+        //   • The import call itself is wrapped in Task.Run so its
+        //     synchronous SQLite reads happen on a thread-pool worker.
+        //     The dispatcher stays free for the timer + any other UI
+        //     work (tray badge, log tail, etc).
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        var stageHints = new[]
+        {
+            "reading Local State key",
+            "copying Cookies DB",
+            "decrypting cookie values",
+            "reading History DB",
+            "filtering sensitive domains",
+            "saving snapshot",
+        };
+        var timer = new System.Windows.Threading.DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(500),
+        };
+        timer.Tick += (_, _) =>
+        {
+            // Pick a stage hint based on elapsed time so the message
+            // tracks roughly with where the importer actually is. It's
+            // best-effort theatre -- accurate enough for "the app is
+            // working, just wait".
+            var sec = (int)stopwatch.Elapsed.TotalSeconds;
+            var stageIdx = Math.Min(sec / 1, stageHints.Length - 1);
+            ChromeImportStatus = $"Importing… {sec}s · {stageHints[stageIdx]}";
+        };
+        timer.Start();
+
         try
         {
             var opts = new ChromeImportOptions
@@ -1078,7 +1117,11 @@ public sealed partial class SessionsViewModel : BaseViewModel
                 MaxUrls               = Math.Max(0, ChromeMaxUrls),
                 SkipSensitiveDomains  = ChromeSkipSensitive,
             };
-            var result = await _chrome.ImportAsync(opts);
+            // Off-thread the import so the dispatcher stays responsive
+            // while ChromeImporter's blocking SQLite reads run.
+            var result = await Task.Run(() => _chrome.ImportAsync(opts));
+            timer.Stop();
+            stopwatch.Stop();
             ChromeImportStatus = result.Summary;
             await ReloadSelectedAsync();
 
@@ -1096,13 +1139,40 @@ public sealed partial class SessionsViewModel : BaseViewModel
         }
         catch (Exception ex)
         {
+            timer.Stop();
+            stopwatch.Stop();
             _log.LogError(ex, "Chrome import failed");
-            ChromeImportStatus = "Import failed: " + ex.Message;
+            // Phase 70 — recognise the "Chrome is running" footprint and
+            // surface an actionable message. SQLite Error 14 ("unable to
+            // open database file") at the source-direct fallback means
+            // Chrome holds an exclusive lock on Cookies/History; closing
+            // Chrome is the only fix.
+            var msg = ex.Message ?? "";
+            string friendly;
+            if (msg.Contains("unable to open database file", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("database is locked", StringComparison.OrdinalIgnoreCase))
+            {
+                friendly =
+                    "Chrome is running and has its data files locked.\n\n" +
+                    "Close ALL Chrome windows (also check Task Manager for stray chrome.exe processes) " +
+                    "and retry the import.\n\n" +
+                    "Original error: " + msg;
+            }
+            else
+            {
+                friendly = msg;
+            }
+            ChromeImportStatus = "Import failed: " + msg;
             await _dialogs.ConfirmAsync(
-                "Chrome import failed", ex.Message, "OK", ConfirmSeverity.Error);
+                "Chrome import failed", friendly, "OK", ConfirmSeverity.Error);
         }
         finally
         {
+            // Belt-and-braces: stop the timer + watch even if try/catch
+            // exited via an unexpected path. Calling Stop() on an
+            // already-stopped DispatcherTimer is a no-op.
+            try { timer.Stop(); } catch { /* ignore */ }
+            try { stopwatch.Stop(); } catch { /* ignore */ }
             IsChromeImporting = false;
         }
     }

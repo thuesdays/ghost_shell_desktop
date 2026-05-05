@@ -29,6 +29,16 @@ public partial class ScriptStepParamsTypedDialog : Window
     /// </summary>
     public string? ConditionResult { get; private set; }
 
+    /// <summary>
+    /// Phase 70 — value of the universal Probability slider (0..1).
+    /// Caller writes it back into the parent step's
+    /// <see cref="GhostShell.Core.Models.ScriptStep.Probability"/>
+    /// field on save. Defaults to 1.0 (always run) — same as the
+    /// model default — so callers that don't pass a current value
+    /// get backwards-compatible behaviour.
+    /// </summary>
+    public double Probability { get; private set; } = 1.0;
+
     private readonly string _actionType;
     private readonly ObservableCollection<FieldRow> _rows = new();
     private readonly ObservableCollection<FieldRow> _condRows = new();
@@ -51,10 +61,20 @@ public partial class ScriptStepParamsTypedDialog : Window
     /// a condition. Just forwards to the full constructor.
     /// </summary>
     public ScriptStepParamsTypedDialog(string actionType, string currentJson)
-        : this(actionType, currentJson, conditionJson: null) { }
+        : this(actionType, currentJson, conditionJson: null, currentProbability: 1.0) { }
+
+    /// <summary>Phase 70 overload — accepts the step's current Probability
+    /// so the inline slider can render the correct initial position. Non-
+    /// control-flow shortcut.</summary>
+    public ScriptStepParamsTypedDialog(string actionType, string currentJson, double currentProbability)
+        : this(actionType, currentJson, conditionJson: null, currentProbability) { }
 
     public ScriptStepParamsTypedDialog(
         string actionType, string currentJson, string? conditionJson)
+        : this(actionType, currentJson, conditionJson, currentProbability: 1.0) { }
+
+    public ScriptStepParamsTypedDialog(
+        string actionType, string currentJson, string? conditionJson, double currentProbability)
     {
         InitializeComponent();
         _actionType   = actionType;
@@ -71,6 +91,16 @@ public partial class ScriptStepParamsTypedDialog : Window
         BuildFields(currentJson);
         FieldsList.ItemsSource = _rows;
         ConditionFieldsList.ItemsSource = _condRows;
+
+        // Phase 70 — universal Probability slider. Convert the model's
+        // 0..1 representation to the 0..100 percent the slider exposes.
+        // Initialise BEFORE wiring ValueChanged isn't strictly necessary
+        // (we do bind in XAML so the first render fires the handler with
+        // the seed value) but setting Result to a sane default first
+        // means an unmodified Save still preserves the input.
+        Probability = Math.Clamp(currentProbability, 0.0, 1.0);
+        ProbabilitySlider.Value = Probability * 100.0;
+        UpdateProbabilityLabel();
 
         if (_wantsCondition)
         {
@@ -518,6 +548,10 @@ public partial class ScriptStepParamsTypedDialog : Window
                 ConditionResult = SerialiseCondition();
             }
 
+            // Phase 70 — capture the slider's final value into the
+            // 0..1 result. Caller writes it into ScriptStep.Probability.
+            Probability = Math.Clamp(ProbabilitySlider.Value / 100.0, 0.0, 1.0);
+
             DialogResult = true;
             Close();
         }
@@ -532,6 +566,25 @@ public partial class ScriptStepParamsTypedDialog : Window
     {
         DialogResult = false;
         Close();
+    }
+
+    // ─── Probability slider ──────────────────────────────────────
+
+    /// <summary>
+    /// Phase 70 — Slider.ValueChanged handler. Updates the percent
+    /// label live (e.g. "73%") so the user sees the position they're
+    /// dragging toward.
+    /// </summary>
+    private void OnProbabilityChanged(object sender,
+        RoutedPropertyChangedEventArgs<double> e)
+    {
+        UpdateProbabilityLabel();
+    }
+
+    private void UpdateProbabilityLabel()
+    {
+        if (ProbabilityLabel is null) return;
+        ProbabilityLabel.Text = $"{(int)Math.Round(ProbabilitySlider.Value)}%";
     }
 
     // ─── FieldRow ────────────────────────────────────────────────

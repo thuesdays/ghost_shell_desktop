@@ -35,17 +35,23 @@ internal sealed class CompetitorService : ICompetitorService
               (@runId, @profileName, @capturedAt, @query, @domain, @adTitle, @displayUrl, @cleanUrl, @clickUrl);
             """;
         var capturedAt = row.CapturedAt.ToString("O");
+        // Phase 70 fix — Microsoft.Data.Sqlite is CASE-SENSITIVE on parameter
+        // names (unlike SqlClient). The SQL uses @runId / @profileName (camel-
+        // case) but the anonymous-object shorthand `new { row.RunId }` projects
+        // a property named "RunId" (PascalCase). Mismatch → "Must add values
+        // for the following parameters" exception every time. Spell each
+        // parameter explicitly so the names match.
         var result = await _db.QueueAsync(c => c.ExecuteAsync(sql, new
         {
-            row.RunId,
-            row.ProfileName,
+            runId       = row.RunId,
+            profileName = row.ProfileName,
             capturedAt,
-            row.Query,
-            row.Domain,
-            row.AdTitle,
-            row.DisplayUrl,
-            row.CleanUrl,
-            row.ClickUrl,
+            query       = row.Query,
+            domain      = row.Domain,
+            adTitle     = row.AdTitle,
+            displayUrl  = row.DisplayUrl,
+            cleanUrl    = row.CleanUrl,
+            clickUrl    = row.ClickUrl,
         }), ct);
         return 1; // scalar insert; could return the last insert rowid via ExecuteScalarAsync if needed
     }
@@ -65,17 +71,21 @@ internal sealed class CompetitorService : ICompetitorService
             foreach (var row in rows)
             {
                 var capturedAt = row.CapturedAt.ToString("O");
+                // Phase 70 fix — explicit camelCase parameter names so
+                // they match the SQL placeholders. See RecordAsync above
+                // for the full root-cause comment (SQLite is case-
+                // sensitive on parameter names).
                 await c.ExecuteAsync(sql, new
                 {
-                    row.RunId,
-                    row.ProfileName,
+                    runId       = row.RunId,
+                    profileName = row.ProfileName,
                     capturedAt,
-                    row.Query,
-                    row.Domain,
-                    row.AdTitle,
-                    row.DisplayUrl,
-                    row.CleanUrl,
-                    row.ClickUrl,
+                    query       = row.Query,
+                    domain      = row.Domain,
+                    adTitle     = row.AdTitle,
+                    displayUrl  = row.DisplayUrl,
+                    cleanUrl    = row.CleanUrl,
+                    clickUrl    = row.ClickUrl,
                 }, tx);
             }
             tx.Commit();

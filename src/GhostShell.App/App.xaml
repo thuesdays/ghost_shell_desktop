@@ -18,6 +18,7 @@
             <!-- Converters available globally -->
             <conv:BoolToVisibilityConverter         x:Key="BoolToVis"/>
             <conv:InverseBoolToVisibilityConverter  x:Key="InverseBoolToVis"/>
+            <conv:InverseBoolConverter              x:Key="InverseBoolConverter"/>
             <conv:StringEqualsVisibilityConverter   x:Key="StringEqualsVis"/>
             <conv:StringEqualsBoolConverter         x:Key="StringEqualsBool"/>
             <conv:NullToCollapsedConverter          x:Key="NullToCollapsedConverter"/>

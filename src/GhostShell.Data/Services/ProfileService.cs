@@ -37,7 +37,8 @@ internal sealed class ProfileService : IProfileService
         fp_noise_salt        AS FpNoiseSalt,
         assigned_script_id   AS AssignedScriptId,
         my_domains           AS MyDomainsCsv,
-        target_domains       AS TargetDomainsCsv
+        target_domains       AS TargetDomainsCsv,
+        auto_rotate_ip       AS AutoRotateIp
     """;
 
     public async Task<IReadOnlyList<Profile>> ListAsync(CancellationToken ct = default)
@@ -82,12 +83,12 @@ internal sealed class ProfileService : IProfileService
                 (name, group_name, template_id, language, proxy_slug,
                  is_ready, enrich_on_first_run, last_run_at, run_count,
                  note, created_at, updated_at,
-                 my_domains, target_domains)
+                 my_domains, target_domains, auto_rotate_ip)
             VALUES
                 (@Name, @GroupName, @TemplateId, @Language, @ProxySlug,
                  @IsReady, @EnrichOnFirstRun, @LastRunAt, @RunCount,
                  @Note, @CreatedAt, @UpdatedAt,
-                 @MyDomainsCsv, @TargetDomainsCsv);
+                 @MyDomainsCsv, @TargetDomainsCsv, @AutoRotateIp);
         """;
         await _db.Get().ExecuteAsync(sql, p);
         _log.LogInformation(
@@ -114,7 +115,8 @@ internal sealed class ProfileService : IProfileService
                    note                 = @Note,
                    updated_at           = @UpdatedAt,
                    my_domains           = @MyDomainsCsv,
-                   target_domains       = @TargetDomainsCsv
+                   target_domains       = @TargetDomainsCsv,
+                   auto_rotate_ip       = @AutoRotateIp
              WHERE name                 = @Name;
         """;
         await _db.Get().ExecuteAsync(sql, p);
@@ -319,6 +321,8 @@ internal sealed class ProfileService : IProfileService
         // Phase 20 — per-profile ad-domain configuration.
         public string? MyDomainsCsv { get; init; }
         public string? TargetDomainsCsv { get; init; }
+        // Phase 71 — auto-rotate IP on launch when proxy supports it.
+        public int AutoRotateIp { get; init; }
     }
 
     private static Profile ToModel(ProfileRow r) => new()
@@ -340,6 +344,7 @@ internal sealed class ProfileService : IProfileService
         AssignedScriptId = r.AssignedScriptId,
         MyDomainsCsv     = r.MyDomainsCsv,
         TargetDomainsCsv = r.TargetDomainsCsv,
+        AutoRotateIp     = r.AutoRotateIp == 1,
     };
 
     private static ProfileRow ToRow(Profile p) => new()
@@ -358,5 +363,6 @@ internal sealed class ProfileService : IProfileService
         UpdatedAt        = p.UpdatedAt,
         MyDomainsCsv     = p.MyDomainsCsv,
         TargetDomainsCsv = p.TargetDomainsCsv,
+        AutoRotateIp     = p.AutoRotateIp ? 1 : 0,
     };
 }

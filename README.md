@@ -10,7 +10,7 @@ This is a **clean rewrite**. The legacy Flask + browser dashboard
 behavior, schema, and UX patterns — we read from it, we don't depend
 on it.
 
-## Status — Phase 69 (vault aliases + bulk credential import)
+## Status — Phase 71 (graceful self-update with active-runs drain)
 
 - [x] Solution + 4 projects scaffolded
 - [x] Core domain models (Profile, Run, Proxy, DeviceTemplate, ProxyHealthEvent…)
@@ -42,9 +42,65 @@ on it.
 - [x] **Extension popup recorder** — multi-window drain via Selenium handles (Phase 68)
 - [x] **Profile-scoped vault aliases** — `{{vault.SEED}}`, `{{vault.PASSWORD}}`, `{{vault.TOTP}}` resolve through profile-bound credentials, no numeric IDs (Phase 69)
 - [x] **Bulk vault import** — paste CSV / load file / fetch Google Sheet, map columns to fields, auto-bind rows to profiles by name (Phase 69)
+- [x] **Auto-rotate IP on launch** — per-profile checkbox, triggers proxy rotation URL pre-launch (Phase 71)
 - [ ] Auto-update — Velopack (deferred)
 
-### v0.0.2.3 — self-update fixes + persistent update notification (this release)
+### v0.0.2.8 — auto-rotate IP per profile (this release)
+
+Single focused feature: **Per-profile "Auto-rotate IP on launch" toggle.** When enabled AND the assigned proxy has `IsRotating=true` + a non-empty rotation URL, the runtime hits that rotation URL with a simple HTTP GET right BEFORE launching the browser, getting a fresh IP for each session. Best-effort design: if the rotation request times out or fails, the runner logs a warning and proceeds with the existing IP (launch isn't aborted). Default OFF for existing profiles (preserves behaviour). 
+
+Changes:
+- **Profile model:** New `AutoRotateIp` bool field (default false).
+- **Database:** Migration V26 adds `auto_rotate_ip INTEGER NOT NULL DEFAULT 0` column to `profiles` table.
+- **ProfileEditorDialog:** New checkbox "Auto-rotate IP on launch (if proxy supports it)" with tooltip explaining the feature is best-effort and only works when the proxy has a rotation URL configured.
+- **RealProfileRunner:** Phase 71 checks the toggle on every `StartAsync`; if true + proxy is configured + has rotation enabled, fetches the proxy record, extracts the `RotationApiUrl`, and hits it with `HttpClient.GetAsync` before `_launcher.LaunchAsync`. 2-second settle after rotation so the upstream proxy has time to register the new exit IP.
+
+### v0.0.2.7 — graceful self-update: active-runs drain, scheduler pause, orphan sweep
+
+Four coordinated changes ensure self-updates don't kill active scripts mid-execution:
+
+1. **`IsUpdatePending` flag + scheduler pause.** When `ApplyAsync` starts, it sets `IsUpdatePending = true`. Every scheduler tick at the TOP of `TickAsync` checks this flag and returns early (skips firing any new schedules). This stops the scheduler from launching fresh runs while an update is preparing.
+2. **Active-runs drain loop.** After extraction completes but BEFORE spawning PowerShell, `ApplyAsync` polls `IRunService.ListAsync(status: Running)` every 3 seconds, capped at 5 minutes. When the count hits zero, the drain is complete and the file swap can proceed. If 5 minutes elapse with stale runs still active, we log a warning and continue anyway so a hung browser session doesn't block updates indefinitely. Progress jumps from 91 → 95 during the drain.
+3. **Startup orphan-run sweep.** New `StartupRunSweeper` IHostedService runs BEFORE `RunnerHost` at app boot. It queries for any runs with `finished_at IS NULL` from the previous session (crash without cleanup) and marks them as "interrupted" with exit_code=130 + stop_reason="interrupted_by_restart". Reconciles the state so orphan rows don't confuse the runner.
+4. **Periodic update re-check every 6 hours.** Replaced the one-shot startup check with a loop that fires every 6 hours (first check after 30s startup grace, then every 6h thereafter). Dialog only surfaces once per discovered version (deduped by `LatestVersion`), so the user isn't pestered if they dismiss it and an app restart happens before the next check. Notification bell still dedupes per-version separately via the `source = "update:<version>"` key.
+
+The update can still fail (network timeout, checksum mismatch, locked files) but those failures no longer leave zombie "running" rows behind, and the scheduler never races against the drain window.
+
+### v0.0.2.6 — UX polish: import progress, multi-delete proxies, universal step probability
+
+Three quality-of-life improvements stacked together:
+
+1. **Chrome import no longer freezes the UI for 5 seconds.** The import call ran on the dispatcher thread with synchronous SQLite + DPAPI work inside, so the page locked up while it ran. Now the import is wrapped in `Task.Run` and a `DispatcherTimer` ticks every 500 ms to update the status with elapsed seconds + a stage hint ("Importing… 2s · decrypting cookie values"). The status reads as a live progress indicator instead of a frozen "Importing…" string.
+2. **Bulk delete on the Proxies page.** `SelectionMode="Extended"` on the data grid + a new "🗑 Delete selected" button + `BulkDeleteAsync` command. Ctrl-click / Shift-click rows to multi-select, hit the button, and N proxies vanish in one confirmation prompt. Per-row failures are tracked separately so a single bad row doesn't abort the rest of the pass.
+3. **Universal `probability` per-step gate.** The existing `ScriptStep.Probability` field (0..1) is now consistently applied at the top of step dispatch in BOTH list and graph mode. Default 1.0 = always run (existing scripts unchanged). Set to e.g. 0.7 via the Step Flags dialog's slider → step fires on ~7 of 10 invocations. Works for ANY action — `click_ad`, `commercial_inflate`, `search_query`, `save_var`, anything inside a `foreach` body — so you can build varied per-iteration behaviour without writing if-conditions. The previous attempt to ship a `probability` param specifically on `commercial_inflate` was reverted in favour of this consolidated approach (one slider in one place, applies universally).
+
+### v0.0.2.5 — Chrome import: 3-tier file-acquisition + v20-prefix diagnostics
+
+The previous import path failed against running Chrome with `SQLite Error 14: 'unable to open database file'` because both the file copy AND the source-direct fallback hit Chrome's exclusive lock. Replaced with a three-tier strategy:
+
+1. **`File.Copy` with `FileShare.ReadWrite | FileShare.Delete`** — works for the common case where Chrome opened the file with normal sharing.
+2. **Hand-rolled `FileStream` copy** — same share flags but routed through user-mode stream API instead of Win32 `CopyFileEx`. Sometimes succeeds where `File.Copy` doesn't (memory-mapped regions, AV file-system filters that block kernel-mode copy).
+3. **SQLite-direct with `immutable=1` URI flag** — last-resort lock bypass. The `?immutable=1` query parameter tells SQLite "this database file will not change while you have it open" — SQLite then skips ALL `LockFileEx` calls and journal-file probing, which lets us open the file even when Chrome holds an exclusive write lock. Trade-off: any rows still in the live WAL aren't visible (we see whatever was last checkpointed into the main file, typically minutes-old at worst), but we read SOMETHING instead of erroring out.
+
+`BuildSqliteConnString` now takes a `sourceIsLocked` flag and switches between the two URI forms. The pathway is logged so you can see which tier won (e.g. "stream-copy succeeded for Cookies (File.Copy was blocked)" or "reading source DB directly via SQLite immutable=1").
+
+**Diagnostic for "0 cookies, 62 undecryptable".** The previous version silently lumped every unreadable cookie into a single counter. Now the import tracks the encryption-prefix histogram (`v10`, `v11`, `v20`, `(empty)`, …) and surfaces an actionable warning when undecryptable cookies are detected:
+- `v20` cookies (Chrome v127+ App-Bound encryption) → "X cookies use Chrome v127+ App-Bound encryption (prefix 'v20') which can only be decrypted from inside an authenticated chrome.exe process. Workaround: launch Chrome with `--disable-features=LockProfileCookieDatabase`, or use a different browser profile (Edge / Brave / older Chrome) for the source."
+- Unknown prefixes (future Chrome versions) → listed verbatim with counts.
+
+This is the typical cause of the user-visible "62 undecryptable" pattern in the user's log.
+
+### v0.0.2.4 — script-runner abort propagation + clearer Chrome import errors
+
+**`ScriptAbortException` was being absorbed by the foreach handler.** When a step inside a `foreach` body died on a closed browser session, the inner `ExecuteStepsAsync` correctly raised `ScriptAbortException("browser session closed mid-run")`. But the OUTER `ExecuteStepsAsync` (one level up, processing the foreach as a top-level step) caught it as a generic `Exception`, marked the foreach as a failed step, and continued — letting `ExecuteAsync` return "partial" status without re-throwing. RealProfileRunner saw a clean return and logged "Script ... finished cleanly", which contradicted the warning lines right above showing the script had aborted with a dead session. Fix: both list-mode and graph-mode catch handlers now check `if (ex is ScriptAbortException) throw;` BEFORE the generic-error branch, so explicit aborts propagate strict.
+
+**`RealProfileRunner` now logs the actual run status.** Previously every script return path logged "finished cleanly" regardless of whether `ScriptRun.Status` was `ok`, `partial`, or `failed`. Now the verb depends on status (`finished cleanly` only for `ok`; `finished WITH FAILURES (X/Y steps failed)` for `partial`/`failed`) and the severity is `Warning` instead of `Information` for non-clean runs.
+
+**Quieter dead-session logging.** Selenium's `NoSuchWindowException` ("target window already closed") was dumped with a full stack trace whenever the user closed the browser mid-run or the watchdog tore down the session. Both ScriptRunner (step-level) and SeleniumBrowserSession.GetCookies (cookie-snapshot path) now recognize `NoSuchWindowException` + the related `invalid session id` / `session deleted` / `not connected to DevTools` messages, log them at info-level with a one-line message, and skip the stack trace.
+
+**Chrome import — actionable error message.** SQLite Error 14 ("unable to open database file") happens when Chrome is running and holds an exclusive lock on `Cookies` / `History`. The dialog used to surface the bare exception text; now if the message contains `unable to open database file` or `database is locked`, the dialog says "Chrome is running and has its data files locked. Close ALL Chrome windows (also check Task Manager for stray chrome.exe processes) and retry the import." Original error text is still appended for debugging.
+
+### v0.0.2.3 — self-update fixes + persistent update notification
 
 **Self-update never restarted.** Three coordinated bugs caused self-update to "minimise to tray and close everything" without ever swapping in the new build:
 

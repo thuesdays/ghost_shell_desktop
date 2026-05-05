@@ -42,7 +42,7 @@ public sealed class MigrationRunner
 
     // Phase 37 audit fix #4: All known migration versions including tolerant ones (11, 13-23).
     // Used to detect downgrade scenario where DB schema is newer than binary's knowledge.
-    private static readonly int[] KnownVersions = new[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25 };
+    private static readonly int[] KnownVersions = new[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26 };
 
     public void Run()
     {
@@ -182,6 +182,15 @@ public sealed class MigrationRunner
         if (!applied.Contains(25))
         {
             ApplyTolerantStatements(conn, 25, Migrations_V25.Statements);
+        }
+
+        // V26 — auto_rotate_ip column for per-profile IP rotation on launch
+        // (Phase 71). When true + proxy.IsRotating=true + proxy.RotationUrl
+        // non-empty, the runner hits the rotation URL before browser launch.
+        // Default false preserves existing behaviour.
+        if (!applied.Contains(26))
+        {
+            ApplyTolerantStatements(conn, 26, Migrations_V26.Statements);
         }
     }
 

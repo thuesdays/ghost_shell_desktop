@@ -7,6 +7,7 @@ using System.Windows.Media;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using GhostShell.App.Navigation;
+using GhostShell.Core.Services;
 
 namespace GhostShell.App.ViewModels;
 
@@ -17,16 +18,27 @@ namespace GhostShell.App.ViewModels;
 public sealed partial class MainViewModel : ObservableObject
 {
     private readonly INavigationService _nav;
+    private readonly IUpdateService _updateService;
 
     /// <summary>Phase 29 — bell-button + drawer VM, exposed so the
     /// title bar binds the badge count and the drawer's IsOpen flag
     /// to it. Wired by DI.</summary>
     public NotificationsViewModel Notifications { get; }
 
-    public MainViewModel(INavigationService nav, NotificationsViewModel notifications)
+    public MainViewModel(INavigationService nav, NotificationsViewModel notifications, IUpdateService updateService)
     {
         _nav = nav;
+        _updateService = updateService;
         Notifications = notifications;
+
+        // Phase 71 — observe update pending state so the UI can show
+        // "Update preparing — scheduler paused" banner.
+        _updateService.UpdatePendingChanged += (_, _) =>
+        {
+            OnPropertyChanged(nameof(IsUpdatePending));
+        };
+        // Set initial state
+        OnPropertyChanged(nameof(IsUpdatePending));
 
         // Build the nav list FIRST — the CurrentChanged handler walks
         // it to update the highlight, and subscribing before assignment
@@ -55,6 +67,11 @@ public sealed partial class MainViewModel : ObservableObject
 
     [ObservableProperty]
     private string? _currentKey;
+
+    /// <summary>Phase 71 — true when an update is preparing (download +
+    /// extract + waiting for active runs to drain). Used to show a banner
+    /// "Update preparing — scheduler paused".</summary>
+    public bool IsUpdatePending => _updateService.IsUpdatePending;
 
     public ObservableCollection<SidebarRow> NavItems { get; }
 
