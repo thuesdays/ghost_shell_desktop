@@ -99,6 +99,39 @@ public sealed class RunContext
     public Dictionary<string, string> VaultAliases { get; }
         = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Phase 71 — set of cleartext secret values that must NEVER hit
+    /// step logs. Populated as <see cref="Vault"/> / <see cref="VaultAliases"/>
+    /// resolution stores values; the log-emit path passes every
+    /// outgoing string through <see cref="RedactSecrets"/> which
+    /// replaces any occurrence of an entry in this set with "***[N]".
+    ///
+    /// Stored as plaintext in memory (we have no choice — the runtime
+    /// needs to substitute it into <c>{{vault.X}}</c> placeholders), but
+    /// logged-out values are scrubbed before they leave the runtime.
+    /// Empty cleartext / 1–2 character values are excluded (too noisy
+    /// to redact globally, and not actually secret).
+    /// </summary>
+    public HashSet<string> SecretValues { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Phase 71 — replace any occurrence of a cleartext secret value
+    /// from <see cref="SecretValues"/> in <paramref name="raw"/> with
+    /// a redacted placeholder. Cheap O(N · |raw|) scan; called only
+    /// at log-emit time so the per-step cost stays small.
+    /// </summary>
+    public string RedactSecrets(string? raw)
+    {
+        if (string.IsNullOrEmpty(raw) || SecretValues.Count == 0) return raw ?? "";
+        var s = raw;
+        foreach (var secret in SecretValues)
+        {
+            if (string.IsNullOrEmpty(secret) || secret.Length < 3) continue;
+            s = s.Replace(secret, $"***[{secret.Length}]");
+        }
+        return s;
+    }
+
     /// <summary>Pop a fresh var-name without colliding with existing keys.</summary>
     public string NextVarName(string baseName)
     {

@@ -25,12 +25,29 @@ public static class LogParser
     // Group order: 1=ts, 2=lvl, 3=pid, 4=source, 5=message.
     // Whitespace tolerant so a future format tweak (different
     // padding) stays compatible.
+    //
+    // Phase 71cc — the level alternation now includes WRN (Serilog's
+    // 3-char abbreviation for Warning). The original regex used
+    // "WAR" which doesn't match Serilog's `{Level:u3}` output —
+    // every Warning line silently fell through to the RAW path,
+    // logged with timestamp 00:00:00 in the Logs export. Same fix
+    // applied to ERR/FTL forms (already matched).
     private static readonly Regex Line = new(
         @"^\[(?<ts>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d{3}\s+[+-]\d{2}:\d{2})\s+" +
-        @"(?<lvl>VRB|DBG|INF|WAR|ERR|FTL)\]\s+" +
+        @"(?<lvl>VRB|DBG|INF|WRN|ERR|FTL)\]\s+" +
         @"(?:\[pid:(?<pid>\d+)\]\s+)?" +
         @"(?:(?<src>[^:]+):\s+)?" +
         @"(?<msg>.*)$",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    // Phase 71cc — secondary regex for RAW-classified lines that
+    // STILL contain a parseable head (rare race when the file was
+    // partially written + reread). If we can extract the embedded
+    // timestamp we project it onto the entry instead of the
+    // 00:00:00 default — keeps export sort order intact.
+    private static readonly Regex EmbeddedTs = new(
+        @"\[(?<ts>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d{3}\s+[+-]\d{2}:\d{2})\s+" +
+        @"(?<lvl>VRB|DBG|INF|WRN|ERR|FTL)\]",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>
@@ -47,7 +64,20 @@ public static class LogParser
         {
             // Continuation line (stack-trace) or unrecognised — keep
             // the raw text so the UI can still render it.
-            return new LogEntry(DateTime.MinValue, "RAW", null, null, line);
+            // Phase 71cc — even for unparseable lines try to extract
+            // an embedded ISO timestamp so the export's [HH:mm:ss]
+            // column shows the real time instead of 00:00:00. Common
+            // case: a line that has the ISO head but trailing text
+            // doesn't match our column shape.
+            var embedded = EmbeddedTs.Match(line);
+            DateTime ts2 = DateTime.MinValue;
+            if (embedded.Success
+                && DateTimeOffset.TryParse(embedded.Groups["ts"].Value,
+                       CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out var dto2))
+            {
+                ts2 = dto2.LocalDateTime;
+            }
+            return new LogEntry(ts2, "RAW", null, null, line);
         }
 
         var tsRaw = m.Groups["ts"].Value;

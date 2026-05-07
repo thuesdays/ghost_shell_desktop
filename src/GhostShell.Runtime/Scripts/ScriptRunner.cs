@@ -112,10 +112,29 @@ public sealed class ScriptRunner : IScriptRunner
         // profile runner) decrypts the items the script needs before
         // we start executing, so the runner never holds the master key.
         if (vault is not null)
-            foreach (var kv in vault) ctx.Vault[kv.Key] = kv.Value;
+        {
+            foreach (var kv in vault)
+            {
+                ctx.Vault[kv.Key] = kv.Value;
+                // Phase 71 — also stamp every cleartext value into the
+                // log-redaction set. Skip ultra-short values to avoid
+                // redacting common substrings (e.g. a 2-char password
+                // would redact "to", "no", "is" everywhere).
+                foreach (var v in kv.Value.Values)
+                    if (!string.IsNullOrEmpty(v) && v.Length >= 3)
+                        ctx.SecretValues.Add(v);
+            }
+        }
         // Phase 69 — pre-resolved profile-scoped aliases.
         if (vaultAliases is not null)
-            foreach (var kv in vaultAliases) ctx.VaultAliases[kv.Key] = kv.Value;
+        {
+            foreach (var kv in vaultAliases)
+            {
+                ctx.VaultAliases[kv.Key] = kv.Value;
+                if (!string.IsNullOrEmpty(kv.Value) && kv.Value.Length >= 3)
+                    ctx.SecretValues.Add(kv.Value);
+            }
+        }
         var counters = new RunCounters();
         string? lastError = null;
         var aborted = false;
@@ -796,7 +815,15 @@ public sealed class ScriptRunner : IScriptRunner
         // exactly which step initiated each browser action.
         try
         {
-            var paramSnap = StepParamSnapshot(step, ctx);
+            // Phase 71 audit fix — StepParamSnapshot calls InterpolateVars
+            // internally which means {{vault.X}} placeholders may be
+            // resolved into cleartext secrets before the snapshot string
+            // is built. Run the snapshot through ctx.RedactSecrets BEFORE
+            // it hits ILogger so passwords/tokens never reach external
+            // log sinks (file logger, console, EventLog) regardless of
+            // sink configuration. The JSON run-log gets a separate
+            // redaction pass in Finalise().
+            var paramSnap = ctx.RedactSecrets(StepParamSnapshot(step, ctx));
             _log.LogInformation(
                 "▶ STEP {Type}{Params}  (run #{Run}, profile '{Profile}')",
                 type, paramSnap, runId, profileName);
@@ -1070,6 +1097,12 @@ public sealed class ScriptRunner : IScriptRunner
                     _log.LogWarning("search_query: empty query, skipping");
                     break;
                 }
+                // Phase 71dd — bump the per-run query counter so the
+                // Run History grid's REQ column shows real numbers.
+                // Counted once per step invocation (not per attempt)
+                // — retries on the same query are still one "request"
+                // from the user's POV.
+                counters.QueriesExecuted++;
                 var locale = ParamString(step, "locale") ?? "uk";
                 var maxAttempts = Math.Max(1, ParamInt(step, "max_attempts", 4));
                 var retryMinSec = Math.Max(1, ParamInt(step, "retry_min_sec", 13));
@@ -1145,6 +1178,10 @@ public sealed class ScriptRunner : IScriptRunner
                     break;
                 }
                 var n = Math.Clamp(ParamInt(step, "n", 2), 1, 10);
+                // Phase 71dd — commercial_inflate fires N implicit
+                // Google searches; count them so REQ on the Run History
+                // grid reflects the real workload.
+                counters.QueriesExecuted += n;
                 var locale = ParamString(step, "locale") ?? "uk";
                 var dwellMin = Math.Max(1, ParamInt(step, "dwell_min", 4));
                 var dwellMax = Math.Max(dwellMin, ParamInt(step, "dwell_max", 10));
@@ -1757,6 +1794,13 @@ public sealed class ScriptRunner : IScriptRunner
                     _log.LogDebug("solve_captcha: no captcha detected");
                     break;
                 }
+                // Phase 71dd — bump the per-run captcha counter so the
+                // CAPTCHA column in Run History stops showing zeros.
+                // Counted on detect (i.e. once we know there's a real
+                // challenge to solve), regardless of whether the solver
+                // succeeds — failed solves are still encounters worth
+                // surfacing in the audit grid.
+                counters.CaptchasSolved++;
                 var timeoutSec = ParamInt(step, "timeout_sec", 180);
                 var solved = await _captcha.SolveAsync(s, kind,
                     TimeSpan.FromSeconds(timeoutSec), ct);
@@ -3003,11 +3047,15 @@ public sealed class ScriptRunner : IScriptRunner
     /// placeholders. The runner passes the result to
     /// <c>IVaultService.ResolveAliasesAsync(profileName, aliases)</c>
     /// at run start so all profile-bound credentials materialise in
-    /// one round-trip. Aliases are case-insensitive but de-duped to
-    /// the canonical form from <see cref="GhostShell.Core.Models.VaultAliases.All"/>.
-    /// Unknown aliases are silently dropped — the placeholder will
-    /// fall through to literal text at interpolation time, which the
-    /// user can grep for in the log to identify typos.
+    /// one round-trip. Aliases are case-insensitive but de-duped.
+    ///
+    /// Phase 70b — we no longer filter by <c>VaultAliases.IsKnown</c>;
+    /// any <c>{{vault.X}}</c> identifier is forwarded to the resolver,
+    /// which falls back to direct secret-key lookup when X isn't in
+    /// the canonical alias catalog. This makes user-defined custom
+    /// secret fields (e.g. <c>{{vault.discord_token}}</c>) work
+    /// without any code changes — just add the field in the bulk-
+    /// import dialog or the editor and reference it in the script.
     /// </summary>
     public static IReadOnlyList<string> CollectVaultAliases(params string?[] jsonPayloads)
     {
@@ -3018,8 +3066,7 @@ public sealed class ScriptRunner : IScriptRunner
             foreach (System.Text.RegularExpressions.Match m in VaultAliasPattern.Matches(json))
             {
                 var alias = m.Groups[1].Value;
-                if (GhostShell.Core.Models.VaultAliases.IsKnown(alias))
-                    seen.Add(alias);
+                seen.Add(alias);   // forward unknown aliases too
             }
         }
         return seen.ToList();
@@ -3060,6 +3107,31 @@ public sealed class ScriptRunner : IScriptRunner
     {
         var finishedAt = DateTime.UtcNow;
         var dur = (finishedAt - startedAt).TotalSeconds;
+
+        // Phase 71 — final-pass redaction. The serialised log entries
+        // contain step params with interpolated {{vault.X}} values
+        // that may contain cleartext secrets (passwords, tokens,
+        // raw TOTP seeds). Walk every string value in every entry
+        // through ctx.RedactSecrets so the persisted JSON never
+        // contains a verbatim secret. This is a belt-and-suspenders
+        // measure on top of the per-step redaction wrappers — the
+        // global pass guarantees coverage even if a future step type
+        // forgets to redact.
+        if (ctx.SecretValues.Count > 0)
+        {
+            foreach (var entry in log)
+            {
+                var keys = entry.Keys.ToList();
+                foreach (var k in keys)
+                {
+                    if (entry[k] is string s)
+                        entry[k] = ctx.RedactSecrets(s);
+                }
+            }
+            if (!string.IsNullOrEmpty(lastError))
+                lastError = ctx.RedactSecrets(lastError);
+        }
+
         var logJson = JsonSerializer.Serialize(log, JsonOpts);
         // Phase 24 audit fix — drop vault references so the cleartext
         // bag becomes eligible for GC the moment ExecuteAsync returns.
@@ -3071,18 +3143,20 @@ public sealed class ScriptRunner : IScriptRunner
         ctx.Vault.Clear();
         return new ScriptRun
         {
-            Id            = runId,
-            ScriptId      = 0,
-            ProfileName   = "",
-            StartedAt     = startedAt,
-            FinishedAt    = finishedAt,
-            Status        = status,
-            StepsExecuted = c.Executed,
-            StepsFailed   = c.Failed,
-            AdsClicked    = c.AdsClicked,
-            DurationSec   = dur,
-            LastError     = lastError,
-            LogJson       = logJson,
+            Id              = runId,
+            ScriptId        = 0,
+            ProfileName     = "",
+            StartedAt       = startedAt,
+            FinishedAt      = finishedAt,
+            Status          = status,
+            StepsExecuted   = c.Executed,
+            StepsFailed     = c.Failed,
+            AdsClicked      = c.AdsClicked,
+            QueriesExecuted = c.QueriesExecuted,
+            CaptchasSolved  = c.CaptchasSolved,
+            DurationSec     = dur,
+            LastError       = lastError,
+            LogJson         = logJson,
         };
     }
 
@@ -3091,6 +3165,10 @@ public sealed class ScriptRunner : IScriptRunner
         public int Executed { get; set; }
         public int Failed { get; set; }
         public int AdsClicked { get; set; }
+        // Phase 71dd — surfaced to runs.total_queries / runs.captchas
+        // so the Run History grid stops showing zeros.
+        public int QueriesExecuted { get; set; }
+        public int CaptchasSolved  { get; set; }
     }
 
     /// <summary>

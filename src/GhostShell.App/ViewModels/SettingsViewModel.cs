@@ -9,6 +9,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using GhostShell.App.Dialogs;
 using GhostShell.App.Logging;
+using GhostShell.App.Theming;
 using GhostShell.Core.Common;
 using GhostShell.Core.Models;
 using GhostShell.Core.Services;
@@ -35,6 +36,7 @@ public sealed partial class SettingsViewModel : BaseViewModel
     private readonly IScriptService _scripts;
     private readonly ITrafficService _traffic;
     private readonly IDialogService _dialogs;
+    private readonly IThemeService _theme;
     private readonly ILogger<SettingsViewModel> _log;
     private bool _initialised;
 
@@ -47,6 +49,7 @@ public sealed partial class SettingsViewModel : BaseViewModel
         IScriptService scripts,
         ITrafficService traffic,
         IDialogService dialogs,
+        IThemeService theme,
         ILogger<SettingsViewModel> log)
     {
         _chromiumLocator = chromiumLocator;
@@ -57,7 +60,13 @@ public sealed partial class SettingsViewModel : BaseViewModel
         _scripts         = scripts;
         _traffic         = traffic;
         _dialogs         = dialogs;
+        _theme           = theme;
         _log             = log;
+        // Phase 71aa — pre-populate the appearance picker from the
+        // currently-active theme so the radio buttons show the right
+        // checked state on first navigation.
+        _isLightTheme = _theme.Active == AppTheme.Light;
+        _isDarkTheme  = _theme.Active == AppTheme.Dark;
         ProbeChromium();
     }
 
@@ -68,6 +77,7 @@ public sealed partial class SettingsViewModel : BaseViewModel
 
     public IReadOnlyList<SettingsTab> Tabs { get; } = new[]
     {
+        new SettingsTab("appearance",    "🎨  Appearance"),
         new SettingsTab("build-info",    "🚀  Build info"),
         new SettingsTab("ua-spoof",      "🎭  UA spoof range"),
         new SettingsTab("serp",          "🍯  SERP engagement"),
@@ -76,6 +86,94 @@ public sealed partial class SettingsViewModel : BaseViewModel
         new SettingsTab("export-import", "📦  Export / Import"),
         new SettingsTab("danger-zone",   "⚠  Danger zone"),
     };
+
+    // ─── Phase 71aa — Appearance / theme picker ──────────────────────
+    /// <summary>True when the user has selected (but not necessarily
+    /// applied) the Dark variant in the radio group. Saved + restart
+    /// prompt happens via <see cref="ApplyThemeCommand"/>.</summary>
+    [ObservableProperty] private bool _isDarkTheme;
+    [ObservableProperty] private bool _isLightTheme;
+
+    /// <summary>True when the picker selection differs from the
+    /// theme that was loaded at app startup. Drives the visibility
+    /// of the "Apply &amp; restart" button so it only appears when
+    /// there's actually something to apply.</summary>
+    public bool ThemeChanged
+    {
+        get
+        {
+            var picked = IsLightTheme ? AppTheme.Light : AppTheme.Dark;
+            return picked != _theme.Active;
+        }
+    }
+
+    partial void OnIsDarkThemeChanged(bool value)
+    {
+        if (value) IsLightTheme = false;
+        OnPropertyChanged(nameof(ThemeChanged));
+    }
+
+    partial void OnIsLightThemeChanged(bool value)
+    {
+        if (value) IsDarkTheme = false;
+        OnPropertyChanged(nameof(ThemeChanged));
+    }
+
+    [RelayCommand]
+    private async Task ApplyThemeAsync()
+    {
+        var picked = IsLightTheme ? AppTheme.Light : AppTheme.Dark;
+        if (picked == _theme.Active) return;
+
+        await _theme.SaveAsync(picked);
+        OnPropertyChanged(nameof(ThemeChanged));
+
+        // StaticResource brushes are baked at parse time, so a live
+        // swap won't repaint already-rendered windows. Prompt for a
+        // restart — user clicks "Restart now" → we tear down the app
+        // and the OS shell respawns it (app is registered with a
+        // shortcut/installer so Process.Start on the assembly path
+        // starts the right binary).
+        var ok = await _dialogs.ConfirmAsync(
+            "Restart Ghost Shell?",
+            $"The {picked} theme is saved. Restart now to apply, or keep the current look until next launch.",
+            "Restart now");
+        if (!ok) return;
+
+        try
+        {
+            var exe = System.Diagnostics.Process.GetCurrentProcess().MainModule?.FileName;
+            if (!string.IsNullOrEmpty(exe))
+            {
+                // Indirect launch via cmd.exe with a 1-second delay.
+                // App.OnStartup holds a singleton Mutex (Local\GhostShellDesktop_Singleton);
+                // a direct Process.Start would race against the OS
+                // teardown of THIS process and the new instance would
+                // see the mutex still held, signal the existing
+                // window, and exit. The 1-second pause via `timeout`
+                // gives the kernel enough time to fully release the
+                // mutex handle before the new process starts.
+                var psi = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName        = "cmd.exe",
+                    Arguments       = $"/c timeout /t 1 /nobreak >nul && start \"\" \"{exe}\"",
+                    UseShellExecute = false,
+                    CreateNoWindow  = true,
+                };
+                System.Diagnostics.Process.Start(psi);
+            }
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "Theme restart: couldn't relaunch — user must reopen manually");
+        }
+
+        // Bypass the tray-hide branch in MainWindow.OnClosing so
+        // we actually exit; the periodic update loop has the same
+        // hook so reusing AllowingShutdown is safe.
+        App.AllowingShutdown = true;
+        Application.Current?.Shutdown(0);
+    }
 
     [RelayCommand]
     private void SetActiveTab(string? id) { if (!string.IsNullOrEmpty(id)) ActiveTab = id; }

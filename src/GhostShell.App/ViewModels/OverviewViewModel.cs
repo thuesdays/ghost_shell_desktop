@@ -288,14 +288,24 @@ public sealed partial class OverviewViewModel : BaseViewModel
 
     // ─── Quick actions ─────────────────────────────────────────────
 
-    [RelayCommand] private void GoProfiles()    => _nav.NavigateTo("profiles");
-    [RelayCommand] private void GoScripts()     => _nav.NavigateTo("scripts");
-    [RelayCommand] private void GoVault()       => _nav.NavigateTo("vault");
-    [RelayCommand] private void GoFingerprint() => _nav.NavigateTo("fingerprint");
-    [RelayCommand] private void GoScheduler()   => _nav.NavigateTo("scheduler");
-    [RelayCommand] private void GoTraffic()     => _nav.NavigateTo("traffic");
-    [RelayCommand] private void GoLogs()        => _nav.NavigateTo("logs");
-    [RelayCommand] private void GoExtensions()  => _nav.NavigateTo("extensions");
+    // Phase 71v — every Overview-originated nav passes pushHistory=true
+    // so the destination page surfaces a Back chip in the title bar.
+    // From the user's POV: clicking a tile = "drill in", not "switch
+    // sections", so a Back affordance is the natural pair.
+    [RelayCommand] private void GoProfiles()    => _nav.NavigateTo("profiles", pushHistory: true);
+    [RelayCommand] private void GoScripts()     => _nav.NavigateTo("scripts", pushHistory: true);
+    [RelayCommand] private void GoVault()       => _nav.NavigateTo("vault", pushHistory: true);
+    [RelayCommand] private void GoFingerprint() => _nav.NavigateTo("fingerprint", pushHistory: true);
+    [RelayCommand] private void GoScheduler()   => _nav.NavigateTo("scheduler", pushHistory: true);
+    [RelayCommand] private void GoTraffic()     => _nav.NavigateTo("traffic", pushHistory: true);
+    [RelayCommand] private void GoLogs()        => _nav.NavigateTo("logs", pushHistory: true);
+    // Phase 71u — "View all runs" on the Recent Activity card was
+    // pointing at GoLogsCommand which navigates to the Logs page.
+    // Logs is the raw text-stream view; what the button label
+    // promises is the Runs history grid. Add a dedicated command.
+    [RelayCommand] private void GoRuns()        => _nav.NavigateTo("runs", pushHistory: true);
+    [RelayCommand] private void GoProxy()       => _nav.NavigateTo("proxy", pushHistory: true);
+    [RelayCommand] private void GoExtensions()  => _nav.NavigateTo("extensions", pushHistory: true);
 
     [RelayCommand]
     public async Task ConfigureLayoutAsync()

@@ -86,6 +86,140 @@
             <ScrollViewer Grid.Column="1" VerticalScrollBarVisibility="Auto">
                 <StackPanel>
 
+                    <!-- APPEARANCE — Phase 71aa -->
+                    <StackPanel Visibility="{Binding ActiveTab, Converter={StaticResource StringEqualsVis}, ConverterParameter=appearance}">
+                        <Border Style="{StaticResource Card}" Margin="0,0,0,12">
+                            <StackPanel>
+                                <TextBlock Style="{StaticResource CardHeader}" Text="🎨  THEME"/>
+                                <TextBlock Style="{StaticResource MutedText}" TextWrapping="Wrap" Margin="0,4,0,12"
+                                           Text="Pick a colour palette for the whole app. Selection saves instantly; the visible look refreshes after a restart (cards/sidebar/text are styled from baked StaticResources at parse time)."/>
+
+                                <!-- Two-card radio picker. Click anywhere
+                                     on a tile to flip its radio. The
+                                     selected tile lifts via Accent border
+                                     + AccentSoft fill. -->
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+
+                                    <!-- DARK TILE -->
+                                    <Border Grid.Column="0" Margin="0,0,8,0"
+                                            Cursor="Hand"
+                                            CornerRadius="8" BorderThickness="2"
+                                            Padding="14">
+                                        <Border.Style>
+                                            <Style TargetType="Border">
+                                                <Setter Property="Background" Value="{StaticResource BgRaised}"/>
+                                                <Setter Property="BorderBrush" Value="{StaticResource Border}"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding IsDarkTheme}" Value="True">
+                                                        <Setter Property="BorderBrush" Value="{StaticResource Accent}"/>
+                                                        <Setter Property="Background" Value="{StaticResource AccentSoft}"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </Border.Style>
+                                        <StackPanel>
+                                            <RadioButton GroupName="ThemePicker"
+                                                         Content="Dark — Linear / Vercel"
+                                                         FontWeight="SemiBold"
+                                                         IsChecked="{Binding IsDarkTheme, Mode=TwoWay}"/>
+                                            <TextBlock Style="{StaticResource MutedText}" FontSize="11" Margin="0,6,0,10"
+                                                       TextWrapping="Wrap"
+                                                       Text="High-contrast inkblot — near-black canvas, cards lift visibly, hue-tinted dashboard tiles pop. Default."/>
+                                            <!-- Mini swatch strip. Hard-coded colours
+                                                 (not StaticResource) so the preview
+                                                 always shows the dark palette regardless
+                                                 of which theme is currently active. -->
+                                            <StackPanel Orientation="Horizontal">
+                                                <Border Width="22" Height="22" CornerRadius="4" Margin="0,0,4,0"
+                                                        Background="#FF0A0A0B" BorderBrush="#FF2A2A2F" BorderThickness="1"/>
+                                                <Border Width="22" Height="22" CornerRadius="4" Margin="0,0,4,0"
+                                                        Background="#FF1F1F22" BorderBrush="#FF2A2A2F" BorderThickness="1"/>
+                                                <Border Width="22" Height="22" CornerRadius="4" Margin="0,0,4,0"
+                                                        Background="#FF131316" BorderBrush="#FF2A2A2F" BorderThickness="1"/>
+                                                <Border Width="22" Height="22" CornerRadius="4" Margin="0,0,4,0"
+                                                        Background="#FF3B82F6" BorderBrush="#FF2A2A2F" BorderThickness="1"/>
+                                                <Border Width="22" Height="22" CornerRadius="4" Margin="0,0,4,0"
+                                                        Background="#FF22C55E" BorderBrush="#FF2A2A2F" BorderThickness="1"/>
+                                            </StackPanel>
+                                        </StackPanel>
+                                    </Border>
+
+                                    <!-- LIGHT TILE -->
+                                    <Border Grid.Column="1" Margin="8,0,0,0"
+                                            Cursor="Hand"
+                                            CornerRadius="8" BorderThickness="2"
+                                            Padding="14">
+                                        <Border.Style>
+                                            <Style TargetType="Border">
+                                                <Setter Property="Background" Value="{StaticResource BgRaised}"/>
+                                                <Setter Property="BorderBrush" Value="{StaticResource Border}"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding IsLightTheme}" Value="True">
+                                                        <Setter Property="BorderBrush" Value="{StaticResource Accent}"/>
+                                                        <Setter Property="Background" Value="{StaticResource AccentSoft}"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </Border.Style>
+                                        <StackPanel>
+                                            <RadioButton GroupName="ThemePicker"
+                                                         Content="Light — Solar"
+                                                         FontWeight="SemiBold"
+                                                         IsChecked="{Binding IsLightTheme, Mode=TwoWay}"/>
+                                            <TextBlock Style="{StaticResource MutedText}" FontSize="11" Margin="0,6,0,10"
+                                                       TextWrapping="Wrap"
+                                                       Text="Clean near-white canvas, pure-white cards, soft gray sidebar. Hue palette punched up to tailwind-500 weights for legibility on white."/>
+                                            <StackPanel Orientation="Horizontal">
+                                                <Border Width="22" Height="22" CornerRadius="4" Margin="0,0,4,0"
+                                                        Background="#FFF7F8FA" BorderBrush="#FFE2E5EA" BorderThickness="1"/>
+                                                <Border Width="22" Height="22" CornerRadius="4" Margin="0,0,4,0"
+                                                        Background="#FFFFFFFF" BorderBrush="#FFE2E5EA" BorderThickness="1"/>
+                                                <Border Width="22" Height="22" CornerRadius="4" Margin="0,0,4,0"
+                                                        Background="#FFF1F3F6" BorderBrush="#FFE2E5EA" BorderThickness="1"/>
+                                                <Border Width="22" Height="22" CornerRadius="4" Margin="0,0,4,0"
+                                                        Background="#FF2563EB" BorderBrush="#FFE2E5EA" BorderThickness="1"/>
+                                                <Border Width="22" Height="22" CornerRadius="4" Margin="0,0,4,0"
+                                                        Background="#FF16A34A" BorderBrush="#FFE2E5EA" BorderThickness="1"/>
+                                            </StackPanel>
+                                        </StackPanel>
+                                    </Border>
+                                </Grid>
+
+                                <!-- Apply / restart banner — visible only
+                                     when the radio selection differs from
+                                     the currently-loaded theme. -->
+                                <Border Margin="0,14,0,0" Padding="12,10"
+                                        CornerRadius="6"
+                                        Background="{StaticResource AccentSoft}"
+                                        BorderBrush="{StaticResource Accent}"
+                                        BorderThickness="1"
+                                        Visibility="{Binding ThemeChanged, Converter={StaticResource BoolToVis}}">
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Grid.Column="0" VerticalAlignment="Center"
+                                                   FontSize="11"
+                                                   Foreground="{StaticResource Text}"
+                                                   TextWrapping="Wrap"
+                                                   Text="Theme selection changed — restart Ghost Shell to apply the new palette across every page."/>
+                                        <Button Grid.Column="1"
+                                                Content="↻  Apply &amp; restart"
+                                                Style="{StaticResource ButtonPrimary}"
+                                                Margin="12,0,0,0"
+                                                Padding="14,6"
+                                                Command="{Binding ApplyThemeCommand}"/>
+                                    </Grid>
+                                </Border>
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+
                     <!-- BUILD INFO -->
                     <StackPanel Visibility="{Binding ActiveTab, Converter={StaticResource StringEqualsVis}, ConverterParameter=build-info}">
                         <Border Style="{StaticResource Card}" Margin="0,0,0,12">

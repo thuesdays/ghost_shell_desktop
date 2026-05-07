@@ -80,6 +80,19 @@ public interface IRunService
     /// if deleted; false if the run is still running.
     /// </summary>
     Task<bool> DeleteAsync(long runId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Phase 71dd — stamp the per-run counters (queries / ads /
+    /// captchas) onto the row. The script runner accumulates these
+    /// internally and calls this once at the end of ExecuteAsync.
+    /// Pre-fix the runs.total_queries / total_ads / captchas columns
+    /// were created in V1 but nobody ever UPDATEd them, so the Run
+    /// History grid showed REQ=ADS=CAPTCHA=0 across the board even
+    /// while ads were genuinely being clicked.
+    /// </summary>
+    Task UpdateCountersAsync(
+        long runId, int totalQueries, int totalAds, int captchas,
+        CancellationToken ct = default);
 }
 
 public enum RunStatusFilter

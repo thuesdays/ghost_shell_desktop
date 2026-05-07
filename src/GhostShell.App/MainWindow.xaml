@@ -7,6 +7,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="clr-namespace:GhostShell.App.ViewModels"
         xmlns:nav="clr-namespace:GhostShell.App.Navigation"
+        xmlns:common="clr-namespace:GhostShell.App.Common"
         d:DataContext="{d:DesignInstance Type=vm:MainViewModel}"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
@@ -19,7 +20,13 @@
         WindowStyle="None"
         AllowsTransparency="False"
         ResizeMode="CanResize"
-        Background="{StaticResource BgBase}">
+        Background="{StaticResource BgBase}"
+        UseLayoutRounding="True"
+        SnapsToDevicePixels="True"
+        TextOptions.TextFormattingMode="Ideal"
+        TextOptions.TextRenderingMode="ClearType"
+        TextOptions.TextHintingMode="Fixed"
+        RenderOptions.ClearTypeHint="Enabled">
 
     <WindowChrome.WindowChrome>
         <WindowChrome
@@ -37,68 +44,289 @@
          routed events inside Style triggers (which WPF rejects).
          ──────────────────────────────────────────────────────────── -->
     <Window.Resources>
-        <!-- Section header — non-interactive, just a label -->
+        <!-- Phase 71m — collapsed/expanded sidebar.
+             The sidebar Border (named "SidebarBorder" below) animates
+             between a 64-px icon-only rail and a 232-px full menu on
+             hover. Section headers + item labels react to the Border's
+             IsMouseOver state so they fade in only when the user is
+             actively pointing at the sidebar. The Border overflows its
+             64-px Grid column with Panel.ZIndex=10 so the content
+             pane never shifts when the menu expands. -->
+
+        <!-- Phase 71p — modern section template.
+             • Collapsed sidebar: a thin horizontal divider line
+               (no text) to keep the rail focused on icons while
+               still grouping items visually.
+             • Expanded sidebar: small all-uppercase-ish bold
+               label tinted TextDim. The label sits inside the
+               same fixed-height row so the underlying nav items
+               keep their Y-coordinates whether the sidebar is
+               collapsed or expanded — no vertical jump on hover. -->
         <DataTemplate x:Key="SidebarSectionTemplate">
-            <TextBlock Text="{Binding Label}"
-                       Foreground="{StaticResource TextDim}"
-                       FontSize="9.5"
-                       FontWeight="SemiBold"
-                       Margin="14,16,12,4"/>
+            <Grid Height="22" Margin="0,10,0,2">
+                <Border Height="1"
+                        Background="{StaticResource Border}"
+                        Opacity="0.45"
+                        Margin="16,0,16,0"
+                        VerticalAlignment="Center"
+                        Visibility="{Binding ElementName=SidebarBorder, Path=IsMouseOver,
+                                             Converter={StaticResource InverseBoolToVis}}"/>
+                <TextBlock Text="{Binding Label}"
+                           Foreground="{StaticResource TextDim}"
+                           FontSize="10"
+                           FontWeight="SemiBold"
+                           Margin="18,0,12,0"
+                           VerticalAlignment="Center"
+                           Visibility="{Binding ElementName=SidebarBorder, Path=IsMouseOver,
+                                                Converter={StaticResource BoolToVis}}"/>
+            </Grid>
         </DataTemplate>
 
-        <!-- Nav item — Button so Click "just works" inside templates -->
+        <!-- Phase 71m — group row template. Same icon/label layout as
+             a regular nav item, but instead of navigating on click it
+             toggles a Popup flyout to the right showing the group's
+             Children. The host Grid wires MouseEnter/Leave to
+             OnGroupMouseEnter/Leave (code-behind), which manages a
+             grace-timer so the user can shuffle the cursor across
+             the gap between button and popup without losing it. -->
+        <DataTemplate x:Key="SidebarGroupTemplate">
+            <Grid x:Name="GroupHost"
+                  MouseEnter="OnGroupMouseEnter"
+                  MouseLeave="OnGroupMouseLeave"
+                  Tag="{Binding}"
+                  Background="Transparent">
+                <Grid Margin="0,1" Height="36">
+                    <!-- Phase 71p — group row mirrors the
+                         SidebarItemTemplate's visual stack:
+                         hover/active pill on the right, accent
+                         bar on the left when popup is open. -->
+                    <Border x:Name="GroupBd"
+                            Background="Transparent"
+                            CornerRadius="0,8,8,0"
+                            Margin="0,0,8,0">
+                        <Border.Style>
+                            <Style TargetType="Border">
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding ElementName=GroupHost, Path=IsMouseOver}" Value="True">
+                                        <Setter Property="Background" Value="{StaticResource BgHover}"/>
+                                    </DataTrigger>
+                                    <DataTrigger Binding="{Binding IsExpanded}" Value="True">
+                                        <Setter Property="Background" Value="{StaticResource AccentSoft}"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Border.Style>
+                    </Border>
+                    <Border Width="3"
+                            HorizontalAlignment="Left"
+                            Background="{StaticResource Accent}"
+                            CornerRadius="0,2,2,0"
+                            Margin="0,5">
+                        <Border.Style>
+                            <Style TargetType="Border">
+                                <Setter Property="Opacity" Value="0"/>
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsExpanded}" Value="True">
+                                        <Setter Property="Opacity" Value="1"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Border.Style>
+                    </Border>
+                    <Grid Margin="0,0,8,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="56"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0"
+                                   Text="{Binding Icon}"
+                                   FontFamily="Segoe MDL2 Assets"
+                                   FontSize="20"
+                                   Foreground="{Binding IconBrush}"
+                                   Opacity="1"
+                                   HorizontalAlignment="Center"
+                                   VerticalAlignment="Center"
+                                   UseLayoutRounding="True"
+                                   SnapsToDevicePixels="True"
+                                   TextOptions.TextRenderingMode="ClearType"
+                                   TextOptions.TextFormattingMode="Ideal"/>
+                        <TextBlock Grid.Column="1"
+                                   Text="{Binding Label}"
+                                   Foreground="{StaticResource Text}"
+                                   FontSize="14"
+                                   FontWeight="Medium"
+                                   VerticalAlignment="Center"
+                                   Margin="0,0,0,0"
+                                   TextTrimming="CharacterEllipsis"
+                                   UseLayoutRounding="True"
+                                   SnapsToDevicePixels="True"
+                                   TextOptions.TextRenderingMode="ClearType"
+                                   TextOptions.TextFormattingMode="Ideal"
+                                   Visibility="{Binding ElementName=SidebarBorder, Path=IsMouseOver,
+                                                        Converter={StaticResource BoolToVis}}"/>
+                        <!-- Chevron rotates 90° when popup is open
+                             so the user has a clear "expanded" cue
+                             beyond the active accent bar. -->
+                        <TextBlock Grid.Column="2"
+                                   Text="&#xE76C;"
+                                   FontFamily="Segoe MDL2 Assets"
+                                   FontSize="10"
+                                   Foreground="{StaticResource TextDim}"
+                                   VerticalAlignment="Center"
+                                   Margin="0,0,8,0"
+                                   Visibility="{Binding ElementName=SidebarBorder, Path=IsMouseOver,
+                                                        Converter={StaticResource BoolToVis}}"/>
+                    </Grid>
+                </Grid>
+                <!-- Hover-flyout popup. StaysOpen=True keeps it on
+                     screen while we juggle MouseEnter/Leave manually
+                     in code-behind via the IsExpanded VM flag. -->
+                <Popup IsOpen="{Binding IsExpanded, Mode=OneWay}"
+                       PlacementTarget="{Binding ElementName=GroupHost}"
+                       Placement="Right"
+                       HorizontalOffset="2"
+                       StaysOpen="True"
+                       AllowsTransparency="True"
+                       PopupAnimation="Fade">
+                    <Border Background="{StaticResource BgSidebar}"
+                            BorderBrush="{StaticResource Border}"
+                            BorderThickness="1"
+                            CornerRadius="6"
+                            Padding="6"
+                            MinWidth="180"
+                            MouseEnter="OnGroupPopupMouseEnter"
+                            MouseLeave="OnGroupPopupMouseLeave"
+                            Tag="{Binding}">
+                        <StackPanel>
+                            <TextBlock Text="{Binding Label}"
+                                       Foreground="{StaticResource TextDim}"
+                                       FontSize="9.5"
+                                       FontWeight="SemiBold"
+                                       Margin="8,4,8,8"/>
+                            <!-- Phase 71m fix — DynamicResource (not Static)
+                                 because SidebarItemTemplate is declared
+                                 BELOW SidebarGroupTemplate in this same
+                                 ResourceDictionary, and StaticResource
+                                 can't resolve forward references. The
+                                 dynamic lookup happens at first popup
+                                 render, by which time both templates
+                                 are registered. -->
+                            <ItemsControl ItemsSource="{Binding Children}"
+                                          ItemTemplate="{DynamicResource SidebarItemTemplate}"/>
+                        </StackPanel>
+                    </Border>
+                </Popup>
+            </Grid>
+        </DataTemplate>
+
+        <!-- Phase 71p — modern nav-item template.
+             Three visual states layered cleanly:
+               1) Default: transparent background, icon at full hue,
+                  label at primary text color.
+               2) Hover: BgHover background fills the right-pill
+                  shape (rounded only on the right so the active
+                  bar can slot flush against the sidebar edge).
+               3) Selected: AccentSoft tint background + 3 px
+                  vertical accent bar at the left edge — the
+                  signature "left rail" indicator used by Linear,
+                  Vercel, Notion, Figma.
+             36 px row height + 1 px vertical margin = consistent
+             rhythm across collapsed/expanded states. -->
         <DataTemplate x:Key="SidebarItemTemplate">
             <Button Click="OnNavItemClicked"
                     Tag="{Binding PageKey}"
                     HorizontalContentAlignment="Stretch"
                     Cursor="Hand"
-                    Margin="6,1"
-                    Padding="10,7"
                     BorderThickness="0"
-                    Background="Transparent">
+                    Background="Transparent"
+                    Padding="0"
+                    ToolTip="{Binding Label}">
                 <Button.Template>
                     <ControlTemplate TargetType="Button">
-                        <Border x:Name="Bd"
-                                Background="{TemplateBinding Background}"
-                                CornerRadius="4"
-                                Padding="{TemplateBinding Padding}">
-                            <ContentPresenter VerticalAlignment="Center"/>
-                        </Border>
+                        <Grid Margin="0,1" Height="36">
+                            <!-- Hover/active background pill.
+                                 CornerRadius asymmetric: rounded on
+                                 the right only so the vertical
+                                 accent bar can sit flush with the
+                                 sidebar's left edge without a gap. -->
+                            <Border x:Name="Bd"
+                                    Background="Transparent"
+                                    CornerRadius="0,8,8,0"
+                                    Margin="0,0,8,0"/>
+
+                            <!-- Active accent bar (3 px wide, full
+                                 row height). Hidden by default;
+                                 fades in via DataTrigger when row
+                                 IsSelected. CornerRadius on the
+                                 right makes it look "pulled out"
+                                 from the sidebar edge. -->
+                            <Border x:Name="ActiveBar"
+                                    Width="3"
+                                    HorizontalAlignment="Left"
+                                    Background="{StaticResource Accent}"
+                                    CornerRadius="0,2,2,0"
+                                    Margin="0,5"
+                                    Opacity="0"/>
+
+                            <Grid Margin="0,0,8,0">
+                                <Grid.ColumnDefinitions>
+                                    <!-- Fixed icon column = sidebar
+                                         collapsed width minus right
+                                         margin, so icons land dead-
+                                         centre in the 64 px rail. -->
+                                    <ColumnDefinition Width="56"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0"
+                                           x:Name="IconText"
+                                           Text="{Binding Icon}"
+                                           FontFamily="Segoe MDL2 Assets"
+                                           FontSize="20"
+                                           Foreground="{Binding IconBrush}"
+                                           Opacity="1"
+                                           HorizontalAlignment="Center"
+                                           VerticalAlignment="Center"
+                                           UseLayoutRounding="True"
+                                           SnapsToDevicePixels="True"
+                                           TextOptions.TextRenderingMode="ClearType"
+                                           TextOptions.TextFormattingMode="Ideal"/>
+                                <TextBlock Grid.Column="1"
+                                           x:Name="LabelText"
+                                           Text="{Binding Label}"
+                                           Foreground="{StaticResource Text}"
+                                           FontSize="14"
+                                           FontWeight="Medium"
+                                           VerticalAlignment="Center"
+                                           Margin="0,0,0,0"
+                                           TextTrimming="CharacterEllipsis"
+                                           UseLayoutRounding="True"
+                                           SnapsToDevicePixels="True"
+                                           TextOptions.TextRenderingMode="ClearType"
+                                           TextOptions.TextFormattingMode="Ideal"
+                                           Visibility="{Binding ElementName=SidebarBorder, Path=IsMouseOver,
+                                                                Converter={StaticResource BoolToVis}}"/>
+                            </Grid>
+                        </Grid>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
                                 <Setter TargetName="Bd" Property="Background" Value="{StaticResource BgHover}"/>
                             </Trigger>
                             <DataTrigger Binding="{Binding IsSelected}" Value="True">
-                                <Setter TargetName="Bd" Property="Background" Value="{StaticResource BgActive}"/>
+                                <Setter TargetName="Bd" Property="Background" Value="{StaticResource AccentSoft}"/>
+                                <Setter TargetName="ActiveBar" Property="Opacity" Value="1"/>
+                                <Setter TargetName="LabelText" Property="FontWeight" Value="SemiBold"/>
                             </DataTrigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
                 </Button.Template>
-                <StackPanel Orientation="Horizontal">
-                    <!-- Per-page icon hue. The IconBrush comes from the
-                         row VM (Overview blue, Profiles green, Runs
-                         orange, etc.) so the sidebar reads as a colour
-                         map at a glance — mirrors the legacy web's
-                         hue palette. Saturation/value is consistent
-                         across the set so no single icon dominates. -->
-                    <TextBlock Text="{Binding Icon}"
-                               FontFamily="Segoe MDL2 Assets"
-                               FontSize="14"
-                               Width="22"
-                               Foreground="{Binding IconBrush}"
-                               VerticalAlignment="Center"/>
-                    <TextBlock Text="{Binding Label}"
-                               Foreground="{StaticResource Text}"
-                               FontSize="12"
-                               VerticalAlignment="Center"
-                               Margin="2,0,0,0"/>
-                </StackPanel>
             </Button>
         </DataTemplate>
 
         <nav:SidebarRowTemplateSelector x:Key="SidebarRowSelector"
                                         SectionTemplate="{StaticResource SidebarSectionTemplate}"
-                                        ItemTemplate="{StaticResource SidebarItemTemplate}"/>
+                                        ItemTemplate="{StaticResource SidebarItemTemplate}"
+                                        GroupTemplate="{StaticResource SidebarGroupTemplate}"/>
     </Window.Resources>
 
     <Border BorderBrush="{StaticResource BorderStrong}" BorderThickness="1">
@@ -137,6 +365,39 @@
                                Foreground="{StaticResource TextDim}"
                                FontFamily="{StaticResource FontMono}"
                                FontSize="10.5"/>
+                    <!-- Phase 71v — Back chip. Visible ONLY when the
+                         user reached the current page via an in-page
+                         deep link (Overview tile, "View all runs",
+                         etc.) — i.e. when the navigation back-stack
+                         is non-empty. Sidebar/footer clicks reset
+                         the stack so this chip stays hidden during
+                         normal section-to-section browsing.
+                         IsHitTestVisibleInChrome=True so the click
+                         isn't eaten by the WindowChrome drag region. -->
+                    <Button Margin="14,0,0,0"
+                            Padding="10,4"
+                            Cursor="Hand"
+                            Command="{Binding GoBackCommand}"
+                            ToolTip="{Binding BackTooltip}"
+                            WindowChrome.IsHitTestVisibleInChrome="True"
+                            Visibility="{Binding CanGoBack, Converter={StaticResource BoolToVis}}">
+                        <Button.Style>
+                            <Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+                                <Setter Property="Background" Value="{StaticResource AccentSoft}"/>
+                                <Setter Property="BorderBrush" Value="{StaticResource Accent}"/>
+                                <Setter Property="Foreground" Value="{StaticResource Accent}"/>
+                                <Setter Property="FontSize" Value="11"/>
+                                <Setter Property="FontWeight" Value="SemiBold"/>
+                            </Style>
+                        </Button.Style>
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock FontFamily="Segoe MDL2 Assets" FontSize="10"
+                                       Text="&#xE72B;"
+                                       VerticalAlignment="Center"
+                                       Margin="0,0,6,0"/>
+                            <TextBlock Text="Back" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Button>
                 </StackPanel>
 
                 <Border Grid.Column="1" Background="Transparent"/>
@@ -207,36 +468,158 @@
             </Grid>
 
             <!-- ─── BODY: sidebar + content ─── -->
+            <!-- Phase 71s — body Grid carries a soft BlurEffect when
+                 the active page is busy hydrating data. The blur is
+                 hardware-accelerated (BlurEffect renders on the GPU
+                 via D3D), so it stays smooth even while the page's
+                 background work threads churn. The LoadingOverlay
+                 below sits as a sibling at Grid.Row="1" so the dim
+                 backdrop + spinner card render crisply ON TOP of the
+                 blurred content (and over the sidebar). -->
             <Grid Grid.Row="1">
+                <Grid.Style>
+                    <Style TargetType="Grid">
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding IsBusy}" Value="True">
+                                <Setter Property="Effect">
+                                    <Setter.Value>
+                                        <BlurEffect Radius="8"
+                                                    KernelType="Gaussian"
+                                                    RenderingBias="Performance"/>
+                                    </Setter.Value>
+                                </Setter>
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </Grid.Style>
                 <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="232"/>
+                    <!-- Phase 71m fix — column is Auto so it tracks
+                         the SidebarBorder's animated Width. Content in
+                         column 1 (*) reflows smoothly as the sidebar
+                         expands/collapses. The earlier `Width="64"`
+                         clamped Border.Width to the cell width during
+                         layout, which is why the storyboard "appeared
+                         to do nothing" — labels still rendered (because
+                         their Visibility binding still flipped) but
+                         everything was crushed into the 64-px rail. -->
+                    <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="*"/>
                 </Grid.ColumnDefinitions>
 
                 <!-- ─── SIDEBAR ─── -->
-                <Border Grid.Column="0" Background="{StaticResource BgSidebar}"
-                        BorderBrush="{StaticResource Border}" BorderThickness="0,0,1,0">
+                <Border x:Name="SidebarBorder"
+                        Grid.Column="0"
+                        Background="{StaticResource BgSidebar}"
+                        BorderBrush="{StaticResource Border}"
+                        BorderThickness="0,0,1,0">
+                    <Border.Style>
+                        <Style TargetType="Border">
+                            <!-- Default = collapsed (icons only). -->
+                            <Setter Property="Width" Value="64"/>
+                            <Style.Triggers>
+                                <!-- Phase 71m — animate Width on
+                                     IsMouseOver. EnterActions runs the
+                                     forward storyboard, ExitActions
+                                     reverses it. 180 ms feels snappy
+                                     without flickering on quick
+                                     pointer-cross-overs. -->
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Trigger.EnterActions>
+                                        <BeginStoryboard>
+                                            <Storyboard>
+                                                <DoubleAnimation Storyboard.TargetProperty="Width"
+                                                                 To="240"
+                                                                 Duration="0:0:0.20">
+                                                    <DoubleAnimation.EasingFunction>
+                                                        <CubicEase EasingMode="EaseOut"/>
+                                                    </DoubleAnimation.EasingFunction>
+                                                </DoubleAnimation>
+                                            </Storyboard>
+                                        </BeginStoryboard>
+                                    </Trigger.EnterActions>
+                                    <Trigger.ExitActions>
+                                        <BeginStoryboard>
+                                            <Storyboard>
+                                                <DoubleAnimation Storyboard.TargetProperty="Width"
+                                                                 To="64"
+                                                                 Duration="0:0:0.18">
+                                                    <DoubleAnimation.EasingFunction>
+                                                        <CubicEase EasingMode="EaseIn"/>
+                                                    </DoubleAnimation.EasingFunction>
+                                                </DoubleAnimation>
+                                            </Storyboard>
+                                        </BeginStoryboard>
+                                    </Trigger.ExitActions>
+                                </Trigger>
+                            </Style.Triggers>
+                        </Style>
+                    </Border.Style>
                     <DockPanel LastChildFill="True">
-                        <!-- Footer (status indicator) -->
-                        <Border DockPanel.Dock="Bottom" Padding="14,10"
+                        <!-- Phase 71p — minimal status footer.
+                             • Collapsed: just a centred green pulse dot
+                               (with ToolTip for context) — keeps the
+                               rail clean and uniform width.
+                             • Expanded: dot + readable status text on
+                               the left, no "Status" label (the live
+                               dot makes it obvious). -->
+                        <!-- Phase 71r — fixed-height Status footer.
+                             Bug fix: previously the inner Grid sized
+                             to its currently-visible child (8 px when
+                             collapsed → just the Ellipse; ~16 px when
+                             expanded → Ellipse + TextBlock). That 8-px
+                             swing propagated up the DockPanel so the
+                             FooterItems (Settings) jumped during the
+                             sidebar Width animation. Pinning the Grid
+                             to Height=20 keeps the footer's vertical
+                             footprint constant in both states. -->
+                        <Border DockPanel.Dock="Bottom"
+                                Padding="0,10,0,12"
                                 BorderBrush="{StaticResource Border}"
                                 BorderThickness="0,1,0,0">
-                            <StackPanel>
-                                <TextBlock Style="{StaticResource DimText}" Text="Status"/>
-                                <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
-                                    <Ellipse Width="6" Height="6"
+                            <Grid Height="20">
+                                <Ellipse Width="8" Height="8"
+                                         Fill="{StaticResource OkBrush}"
+                                         HorizontalAlignment="Center"
+                                         VerticalAlignment="Center"
+                                         ToolTip="Idle — 0 active runs"
+                                         Visibility="{Binding ElementName=SidebarBorder, Path=IsMouseOver,
+                                                              Converter={StaticResource InverseBoolToVis}}"/>
+                                <StackPanel Orientation="Horizontal"
+                                            Margin="20,0,0,0"
+                                            VerticalAlignment="Center"
+                                            Visibility="{Binding ElementName=SidebarBorder, Path=IsMouseOver,
+                                                                 Converter={StaticResource BoolToVis}}">
+                                    <Ellipse Width="8" Height="8"
                                              Fill="{StaticResource OkBrush}"
                                              VerticalAlignment="Center"/>
-                                    <TextBlock Margin="6,0,0,0"
+                                    <TextBlock Margin="10,0,0,0"
                                                Foreground="{StaticResource Text}"
-                                               FontSize="11"
+                                               FontSize="12"
+                                               VerticalAlignment="Center"
                                                Text="Idle — 0 active runs"/>
                                 </StackPanel>
-                            </StackPanel>
+                            </Grid>
                         </Border>
 
-                        <!-- Nav list -->
-                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                        <!-- Phase 71q — Settings (and any future bottom-
+                             pinned utility items) lives in FooterItems
+                             docked just ABOVE the Status footer. Same
+                             template selector as the main nav, so it
+                             gets the active accent bar / hover pill
+                             treatment for free. -->
+                        <ItemsControl DockPanel.Dock="Bottom"
+                                      Margin="0,0,0,6"
+                                      ItemsSource="{Binding FooterItems}"
+                                      ItemTemplateSelector="{StaticResource SidebarRowSelector}"/>
+
+                        <!-- Phase 71o — main nav list. ScrollBarVisibility=Auto
+                             would still show a thin scroll lane while
+                             measuring; the compressed item heights now
+                             fit the full menu in any reasonable window
+                             height (~640 px min). Disabled = no rail
+                             at all. -->
+                        <ScrollViewer VerticalScrollBarVisibility="Disabled"
+                                      HorizontalScrollBarVisibility="Disabled">
                             <ItemsControl ItemsSource="{Binding NavItems}"
                                           ItemTemplateSelector="{StaticResource SidebarRowSelector}"/>
                         </ScrollViewer>
@@ -409,6 +792,16 @@
                     </Grid>
                 </Border>
             </Grid>
+
+            <!-- ─── Phase 71s — window-level loading overlay ───
+                 Drawn on top of EVERYTHING in the body row (sidebar +
+                 content + drawer) so the dim+spinner card sits clean
+                 above the GaussianBlur. Spans only Grid.Row="1" so
+                 the title bar buttons (min/max/close) stay clickable
+                 even while a page is hydrating. -->
+            <common:LoadingOverlay Grid.Row="1"
+                                   IsActive="{Binding IsBusy}"
+                                   Caption="Loading data…"/>
         </Grid>
     </Border>
 

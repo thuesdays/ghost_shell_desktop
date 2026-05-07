@@ -87,4 +87,11 @@ public static class SettingsKeys
     public const string BlockSocialWidgets    = "browser.block_social_widgets";
     public const string BlockVideoEverywhere  = "browser.block_video_everywhere";
     public const string BlockCustomPatterns   = "browser.block_custom_patterns"; // newline-separated
+
+    /// <summary>Phase 71aa — UI theme picker. Values: "dark" (default,
+    /// Linear/Vercel high-contrast inkblot) or "light" (Solar near-white).
+    /// Read at app startup by IThemeService BEFORE MainWindow is shown
+    /// so the saved choice applies on the first frame; persisted by
+    /// the Settings → Appearance tab.</summary>
+    public const string UiTheme               = "ui.theme";
 }

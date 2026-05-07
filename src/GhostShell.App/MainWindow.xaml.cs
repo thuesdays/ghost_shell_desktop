@@ -93,7 +93,88 @@ public partial class MainWindow : Window
             var app = (App)Application.Current;
             var nav = app.Host?.Services.GetRequiredService<INavigationService>();
             nav?.NavigateTo(pageKey);
+
+            // Phase 71m — clicking a sub-item inside a group's popup
+            // should close the popup so the user immediately sees the
+            // navigated page. Walk up the visual tree from the
+            // clicked Button to find the SidebarRow whose IsExpanded
+            // owns the popup, and flip it false.
+            CollapseAnyOpenGroupFlyout();
         }
+    }
+
+    // ─── Phase 71m — Monitoring (and any future) group flyout ────────
+    //
+    // The sidebar group template hosts a Popup with StaysOpen=True;
+    // its IsOpen is bound OneWay to SidebarRow.IsExpanded. We manage
+    // that flag from code-behind so we can cover the gap between
+    // button and popup with a small grace timer, otherwise the popup
+    // would close the instant the cursor crossed the seam.
+
+    private System.Windows.Threading.DispatcherTimer? _groupCloseTimer;
+    private ViewModels.SidebarRow? _hoveredGroup;
+
+    private void OnGroupMouseEnter(object sender, System.Windows.Input.MouseEventArgs e)
+    {
+        if (sender is FrameworkElement fe && fe.Tag is ViewModels.SidebarRow row)
+        {
+            // Cancel any pending close — the user came back.
+            _groupCloseTimer?.Stop();
+            _hoveredGroup = row;
+            row.IsExpanded = true;
+        }
+    }
+
+    private void OnGroupMouseLeave(object sender, System.Windows.Input.MouseEventArgs e)
+    {
+        if (sender is FrameworkElement fe && fe.Tag is ViewModels.SidebarRow row)
+        {
+            ScheduleGroupClose(row);
+        }
+    }
+
+    private void OnGroupPopupMouseEnter(object sender, System.Windows.Input.MouseEventArgs e)
+    {
+        // Cursor moved INTO the popup — cancel close.
+        _groupCloseTimer?.Stop();
+    }
+
+    private void OnGroupPopupMouseLeave(object sender, System.Windows.Input.MouseEventArgs e)
+    {
+        if (sender is FrameworkElement fe && fe.Tag is ViewModels.SidebarRow row)
+        {
+            ScheduleGroupClose(row);
+        }
+    }
+
+    private void ScheduleGroupClose(ViewModels.SidebarRow row)
+    {
+        _groupCloseTimer?.Stop();
+        _groupCloseTimer = new System.Windows.Threading.DispatcherTimer
+        {
+            Interval = System.TimeSpan.FromMilliseconds(220),
+        };
+        _groupCloseTimer.Tick += (_, __) =>
+        {
+            _groupCloseTimer?.Stop();
+            // Only close if neither the host Grid nor the popup is
+            // currently being hovered. The MouseEnter handlers above
+            // cancel the timer when the cursor returns, so by the time
+            // we get here it's been ~220 ms since both were idle.
+            row.IsExpanded = false;
+            if (_hoveredGroup == row) _hoveredGroup = null;
+        };
+        _groupCloseTimer.Start();
+    }
+
+    private void CollapseAnyOpenGroupFlyout()
+    {
+        if (_hoveredGroup is { } row)
+        {
+            row.IsExpanded = false;
+            _hoveredGroup = null;
+        }
+        _groupCloseTimer?.Stop();
     }
 
     /// <summary>Phase 29 audit fix — when the user clicks the per-row

@@ -92,11 +92,16 @@
                 <TextBox Grid.Column="0"
                          Text="{Binding SearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                          ToolTip="Filter by name, identifier, notes, tags"/>
+                <!-- Phase 71i — was kind filter, now tag filter. Items
+                     are universal so kind no longer differentiates rows;
+                     tags are the user-meaningful axis (work, personal,
+                     test-account, twitter, …). The list is rebuilt from
+                     the loaded items in VaultViewModel.RebuildTagFilters. -->
                 <ComboBox Grid.Column="1" Margin="12,0,0,0"
                           MinWidth="160"
-                          ItemsSource="{Binding KindFilters}"
-                          SelectedItem="{Binding KindFilter}"
-                          ToolTip="Filter by kind"/>
+                          ItemsSource="{Binding TagFilters}"
+                          SelectedItem="{Binding TagFilter}"
+                          ToolTip="Filter by tag"/>
                 <StackPanel Grid.Column="2" Orientation="Horizontal" Margin="16,0,0,0"
                             VerticalAlignment="Center"
                             ToolTip="Lock the vault automatically after this many minutes of idle time. 0 = never auto-lock.">
@@ -163,6 +168,30 @@
                 </StackPanel>
             </Border>
 
+            <!-- Phase 71 — bulk-delete bar + grid wrapped in a
+                 DockPanel so the bar docks above the grid instead of
+                 overlapping with it (both are siblings of Row 2's
+                 Grid; without the DockPanel the Border floated on top
+                 of the DataGrid). -->
+            <DockPanel Visibility="{Binding IsEmpty, Converter={StaticResource InverseBoolToVis}}">
+                <Border Background="{StaticResource BgRaised}"
+                        BorderBrush="{StaticResource Border}"
+                        BorderThickness="0,0,0,1"
+                        Padding="12,8,12,8"
+                        DockPanel.Dock="Top"
+                        Visibility="{Binding HasSelection, Converter={StaticResource BoolToVis}}">
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                        <TextBlock Text="{Binding SelectedCount, StringFormat='{}{0} selected'}"
+                                   VerticalAlignment="Center"
+                                   Margin="0,0,12,0"
+                                   Foreground="{StaticResource TextMuted}"/>
+                        <Button Content="🗑  Delete selected"
+                                Command="{Binding BulkDeleteCommand}"
+                                Style="{StaticResource ButtonDanger}"
+                                MinWidth="160"/>
+                    </StackPanel>
+                </Border>
+
             <DataGrid ItemsSource="{Binding Items}"
                       AutoGenerateColumns="False"
                       CanUserAddRows="False"
@@ -172,45 +201,72 @@
                       SelectionMode="Single"
                       Visibility="{Binding IsEmpty, Converter={StaticResource InverseBoolToVis}}">
                 <DataGrid.Columns>
-                    <DataGridTextColumn Header="Name"
-                                        Binding="{Binding Name}" Width="*"/>
-                    <DataGridTextColumn Header="Kind"
-                                        Binding="{Binding Kind}" Width="120"/>
-                    <DataGridTextColumn Header="Service"
-                                        Binding="{Binding Service}" Width="120"/>
-                    <DataGridTextColumn Header="Identifier"
-                                        Binding="{Binding Identifier}" Width="200"/>
-                    <DataGridTextColumn Header="Profile"
-                                        Binding="{Binding ProfileName}" Width="140"/>
-                    <DataGridTextColumn Header="Status"
-                                        Binding="{Binding Status}" Width="100"/>
-                    <!-- Phase 26 — TOTP code + countdown for totp_only rows.
-                         Empty for non-TOTP rows; the per-second timer in
-                         VaultViewModel re-fires .RefreshTotp() so the
-                         display updates live. -->
-                    <DataGridTemplateColumn Header="TOTP" Width="120">
+                    <!-- Phase 71 — multiselect checkbox column. Mirrors
+                         the proxies grid pattern: bound TwoWay to
+                         VaultItemRow.IsSelected; the VM listens for
+                         per-row PropertyChanged and bumps SelectedCount
+                         which drives the red bulk-delete bar above.
+                         Width 48 (was 36 — the old value clipped the
+                         checkbox + cell padding to a sliver that read
+                         as a "(" character on the left edge). -->
+                    <DataGridTemplateColumn Width="48"
+                                            CanUserReorder="False"
+                                            CanUserResize="False"
+                                            CanUserSort="False">
+                        <!-- Phase 71d — header "select all" checkbox.
+                             Three-state: checked = all rows selected,
+                             unchecked = none, indeterminate = mixed.
+                             Bound TwoWay to VM.IsAllSelected; the VM's
+                             setter propagates the value to every row's
+                             IsSelected in one pass (with a re-entry
+                             guard so the per-row handler doesn't
+                             quadratically recount during the loop). -->
+                        <DataGridTemplateColumn.HeaderTemplate>
+                            <DataTemplate>
+                                <CheckBox IsChecked="{Binding DataContext.IsAllSelected,
+                                                      RelativeSource={RelativeSource AncestorType=DataGrid},
+                                                      Mode=TwoWay}"
+                                          IsThreeState="True"
+                                          HorizontalAlignment="Center"
+                                          VerticalAlignment="Center"
+                                          ToolTip="Select all / none"/>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.HeaderTemplate>
                         <DataGridTemplateColumn.CellTemplate>
                             <DataTemplate>
-                                <StackPanel Orientation="Horizontal"
-                                            Visibility="{Binding IsTotp, Converter={StaticResource BoolToVis}}"
-                                            ToolTip="Live RFC 6238 code — rolls over every 30 seconds.">
-                                    <TextBlock Text="{Binding TotpCode}"
-                                               FontFamily="Consolas" FontSize="13"
-                                               Foreground="{StaticResource Accent}"
-                                               VerticalAlignment="Center"/>
-                                    <TextBlock Text="{Binding TotpRemaining, StringFormat='  ({0}s)'}"
-                                               FontSize="10"
-                                               Foreground="{StaticResource TextDim}"
-                                               VerticalAlignment="Center"
-                                               Margin="0,0,0,0"/>
-                                </StackPanel>
+                                <CheckBox IsChecked="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged, Mode=TwoWay}"
+                                          HorizontalAlignment="Center"
+                                          VerticalAlignment="Center"/>
                             </DataTemplate>
                         </DataGridTemplateColumn.CellTemplate>
                     </DataGridTemplateColumn>
+
+                    <!-- Phase 71 — slim column set per spec: name, profile,
+                         status, tags, updated. Kind/Service/Identifier/TOTP
+                         dropped from the grid (kind is now mostly "universal"
+                         for new items; per-field TOTP codes live INSIDE the
+                         editor, not as a row-level cell). -->
+                    <DataGridTextColumn Header="Name"
+                                        Binding="{Binding Name}"
+                                        Width="2*"/>
+                    <DataGridTextColumn Header="Profile"
+                                        Binding="{Binding ProfileName}"
+                                        Width="*"/>
+                    <DataGridTextColumn Header="Status"
+                                        Binding="{Binding Status}"
+                                        Width="100"/>
+                    <DataGridTextColumn Header="Tags"
+                                        Binding="{Binding Tags}"
+                                        Width="*"/>
                     <DataGridTextColumn Header="Updated"
                                         Binding="{Binding UpdatedAt, StringFormat='yyyy-MM-dd HH:mm'}"
-                                        Width="140"/>
-                    <DataGridTemplateColumn Header="" Width="120">
+                                        Width="130"/>
+
+                    <DataGridTemplateColumn Header=""
+                                            Width="100"
+                                            CanUserReorder="False"
+                                            CanUserResize="False"
+                                            CanUserSort="False">
                         <DataGridTemplateColumn.CellTemplate>
                             <DataTemplate>
                                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
@@ -232,6 +288,7 @@
                     </DataGridTemplateColumn>
                 </DataGrid.Columns>
             </DataGrid>
+            </DockPanel>
         </Grid>
     </Grid>
 </UserControl>

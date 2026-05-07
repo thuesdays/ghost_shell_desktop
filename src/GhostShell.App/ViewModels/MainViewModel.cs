@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Mykola Kovhanko <thuesdays@gmail.com>
 
 using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.Windows;
 using System.Windows.Media;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -44,18 +45,25 @@ public sealed partial class MainViewModel : ObservableObject
         // it to update the highlight, and subscribing before assignment
         // would let the compiler complain about NavItems being null
         // inside the lambda's capture.
-        NavItems = BuildNavItems();
+        NavItems    = BuildNavItems();
+        FooterItems = BuildFooterItems();
 
         _nav.CurrentChanged += (_, _) =>
         {
             Current    = _nav.Current;
             CurrentKey = _nav.CurrentKey;
-            foreach (var it in NavItems)
-            {
-                if (it.PageKey is null) continue;
-                it.IsSelected = string.Equals(
-                    it.PageKey, CurrentKey, StringComparison.OrdinalIgnoreCase);
-            }
+            // Phase 71q — walk both NavItems AND FooterItems (Settings
+            // lives in the footer collection now). Also descend into
+            // any group's Children so sub-items like Scheduler/Runs/
+            // Queue under Monitoring light up correctly.
+            UpdateSelection(NavItems);
+            UpdateSelection(FooterItems);
+            // Phase 71v — refresh the back-chip's visibility +
+            // label whenever Current changes (the Back-stack only
+            // mutates inside NavigateTo / GoBack, both of which
+            // raise CurrentChanged).
+            OnPropertyChanged(nameof(CanGoBack));
+            OnPropertyChanged(nameof(BackTooltip));
         };
 
         // Default landing page
@@ -73,14 +81,101 @@ public sealed partial class MainViewModel : ObservableObject
     /// "Update preparing — scheduler paused".</summary>
     public bool IsUpdatePending => _updateService.IsUpdatePending;
 
+    /// <summary>Phase 71s — bubbles the active page's IsBusy flag up to
+    /// the window so the LoadingOverlay (and BlurEffect on the body)
+    /// can be hosted at MainWindow level. That way the dim+blur covers
+    /// both the sidebar AND the content while a page hydrates, instead
+    /// of leaving the sidebar weirdly crisp on top of a blurred page.</summary>
+    public bool IsBusy => Current?.IsBusy ?? false;
+
+    /// <summary>Phase 71s — pivot the per-page PropertyChanged subscription
+    /// whenever Current swaps. The previous page (if any) had its handler
+    /// detached so we don't leak; the new page gets a fresh hook so
+    /// IsBusy on it propagates to MainViewModel.IsBusy.</summary>
+    partial void OnCurrentChanged(BaseViewModel? oldValue, BaseViewModel? newValue)
+    {
+        if (oldValue is INotifyPropertyChanged prev)
+            prev.PropertyChanged -= OnCurrentPagePropertyChanged;
+        if (newValue is INotifyPropertyChanged next)
+            next.PropertyChanged += OnCurrentPagePropertyChanged;
+
+        // The new page may have IsBusy=true already (e.g. its
+        // OnNavigatedToAsync set the flag synchronously before the
+        // subscription was wired). Push one notify so the overlay
+        // shows immediately on the very first navigation tick.
+        OnPropertyChanged(nameof(IsBusy));
+    }
+
+    private void OnCurrentPagePropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(BaseViewModel.IsBusy))
+            OnPropertyChanged(nameof(IsBusy));
+    }
+
     public ObservableCollection<SidebarRow> NavItems { get; }
+
+    /// <summary>Phase 71q — items pinned to the bottom of the
+    /// sidebar (above the Status footer). Currently just Settings;
+    /// follow the same template / selection logic as NavItems but
+    /// rendered into a separate DockPanel.Dock=Bottom region in
+    /// MainWindow.xaml so they stay visible regardless of scroll.</summary>
+    public ObservableCollection<SidebarRow> FooterItems { get; }
+
+    /// <summary>Phase 71q — sync IsSelected across a sidebar
+    /// collection AND any group rows' Children. Run for both
+    /// NavItems and FooterItems on every CurrentChanged.</summary>
+    private void UpdateSelection(ObservableCollection<SidebarRow> rows)
+    {
+        foreach (var it in rows)
+        {
+            if (it.PageKey is not null)
+            {
+                it.IsSelected = string.Equals(
+                    it.PageKey, CurrentKey, StringComparison.OrdinalIgnoreCase);
+            }
+            if (it.Children is not null)
+            {
+                foreach (var child in it.Children)
+                {
+                    if (child.PageKey is null) continue;
+                    child.IsSelected = string.Equals(
+                        child.PageKey, CurrentKey, StringComparison.OrdinalIgnoreCase);
+                }
+            }
+        }
+    }
 
     [RelayCommand]
     private void Navigate(string? pageKey)
     {
         if (string.IsNullOrWhiteSpace(pageKey)) return;
-        _nav.NavigateTo(pageKey);
+        // Sidebar / footer click = root nav. Pass pushHistory=false
+        // so the back-stack gets cleared (sidebar should never leave
+        // a Back chip — it's the user's explicit "take me here"
+        // gesture, not a deep link).
+        _nav.NavigateTo(pageKey, pushHistory: false);
     }
+
+    /// <summary>Phase 71v — bound to the Back chip in the title-row of
+    /// MainWindow. True when the user reached the current page via
+    /// an in-page deep link (Overview tile, "View all runs", etc.).</summary>
+    public bool CanGoBack => _nav.CanGoBack;
+
+    /// <summary>Phase 71v — humanised tooltip for the Back chip so the
+    /// user sees where it'll take them ("Back to Overview") instead
+    /// of just an arrow.</summary>
+    public string BackTooltip
+    {
+        get
+        {
+            // No prior page → no chip is shown anyway, but keep
+            // a sensible fallback in case the binding is read.
+            return _nav.CanGoBack ? "Back" : string.Empty;
+        }
+    }
+
+    [RelayCommand]
+    private void GoBack() => _nav.GoBack();
 
     // ─── Segoe Fluent Icons code points ────────────────────────────
     // Built from numeric values so the source stays pure ASCII. These
@@ -128,38 +223,38 @@ public sealed partial class MainViewModel : ObservableObject
         // wallet-specific JS APIs, etc.).
         new SidebarRow { PageKey = "extensions",  Label = "Extensions",   Icon = Glyph(0xECAA), IconBrush = Hue("HuePink")   }, // Puzzle
 
-        // Phase 34 — Advertisement section. Competitors is a pure
-        // observation surface for ads we've seen across runs.
-        //
-        // Domains used to live here too but was demoted off the
-        // sidebar — the lists are configured via a "Domain lists"
-        // toolbar button on the Scripts page (where they're
-        // actually consumed). The page+VM+route stay registered so
-        // that button can navigate to "domains" the same as before.
-        SidebarRow.Section("Advertisement"),
+        // Phase 71q — Competitors and Monitoring (group) merged into
+        // Identity for a tighter, single-section feel. The legacy
+        // "Advertisement" + "Monitoring" headers are gone — fewer
+        // dividers visually, all secondary surfaces live under one
+        // umbrella. Settings moves out entirely (now in FooterItems
+        // pinned to the sidebar bottom).
         new SidebarRow { PageKey = "competitors", Label = "Competitors", Icon = Glyph(0xE9F9), IconBrush = Hue("HueOrange") }, // BankBuilding
 
-        // Scheduler + Runs were originally up under Workspace because
-        // they're "things you start work with". Demoted into Monitoring
-        // because in practice they're observation surfaces — you go to
-        // Scheduler to see what's queued up, you go to Runs to see what
-        // happened. The only entry point users actually invoke from
-        // these pages is "Run now", and that's also reachable from
-        // Profiles/Groups directly.
-        SidebarRow.Section("Monitoring"),
-        new SidebarRow { PageKey = "scheduler", Label = "Scheduler", Icon = Glyph(0xE787), IconBrush = Hue("HueAmber")  }, // Calendar
-        new SidebarRow { PageKey = "runs",      Label = "Runs",      Icon = Glyph(0xE823), IconBrush = Hue("HueOrange") }, // History
-        // Phase 64 — bulk-start run queue. 0xE71D = "Boards" (rows of cards).
-        new SidebarRow { PageKey = "queue",     Label = "Queue",     Icon = Glyph(0xE71D), IconBrush = Hue("HueTeal")   },
-        // Phase 62 — was 0xEA0B which renders as "Section" (a thin
-        // vertical bar) in Segoe MDL2 Assets, not a chart. Switched to
-        // 0xE9D9 "Bar Chart 4 Legend" which is the canonical Windows
-        // bar-chart glyph (multiple bars + base axis).
-        new SidebarRow { PageKey = "traffic",   Label = "Traffic",   Icon = Glyph(0xE9D9), IconBrush = Hue("HueBlue")   }, // BarChart4Legend
-        new SidebarRow { PageKey = "logs",     Label = "Logs",      Icon = Glyph(0xE7C3), IconBrush = Hue("HueAmber")  }, // Page
+        new SidebarRow
+        {
+            PageKey   = null,                    // group has no page of its own
+            Label     = "Monitoring",
+            Icon      = Glyph(0xE9D9),           // BarChart4Legend
+            IconBrush = Hue("HueBlue"),
+            Children  = new[]
+            {
+                new SidebarRow { PageKey = "scheduler", Label = "Scheduler", Icon = Glyph(0xE787), IconBrush = Hue("HueAmber")  }, // Calendar
+                new SidebarRow { PageKey = "runs",      Label = "Runs",      Icon = Glyph(0xE823), IconBrush = Hue("HueOrange") }, // History
+                new SidebarRow { PageKey = "queue",     Label = "Queue",     Icon = Glyph(0xE71D), IconBrush = Hue("HueTeal")   }, // Boards
+                new SidebarRow { PageKey = "traffic",   Label = "Traffic",   Icon = Glyph(0xE9D9), IconBrush = Hue("HueBlue")   }, // BarChart4Legend
+                new SidebarRow { PageKey = "logs",      Label = "Logs",      Icon = Glyph(0xE7C3), IconBrush = Hue("HueAmber")  }, // Page
+            },
+        },
+    };
 
-        SidebarRow.Section(""),
-        new SidebarRow { PageKey = "settings", Label = "Settings",  Icon = Glyph(0xE713), IconBrush = Hue("HueSlate")  }, // Settings
+    /// <summary>Phase 71q — items pinned to the sidebar bottom
+    /// (above the Status footer). Settings is the only one for
+    /// now; future global utilities (Help, About, Sign-out) would
+    /// land here too.</summary>
+    private static ObservableCollection<SidebarRow> BuildFooterItems() => new()
+    {
+        new SidebarRow { PageKey = "settings", Label = "Settings", Icon = Glyph(0xE713), IconBrush = Hue("HueSlate") },
     };
 }
 
@@ -185,6 +280,26 @@ public sealed partial class SidebarRow : ObservableObject
 
     [ObservableProperty]
     private bool _isSelected;
+
+    /// <summary>
+    /// Phase 71m — sub-items for hover-flyout groups. When non-null
+    /// and non-empty, this row renders via the group template
+    /// (icon + popup with children) instead of the regular nav-item
+    /// template. Used to fold the Monitoring section into a single
+    /// icon entry — Scheduler/Runs/Queue/Traffic/Logs hide inside.
+    /// </summary>
+    public IReadOnlyList<SidebarRow>? Children { get; init; }
+
+    public bool HasChildren => Children is { Count: > 0 };
+
+    /// <summary>
+    /// Phase 71m — popup visibility for group rows. Set true on
+    /// MouseEnter of the group's host Grid (with a small grace
+    /// timer on leave so the user can shuffle the cursor across
+    /// the gap into the popup body without losing it).
+    /// </summary>
+    [ObservableProperty]
+    private bool _isExpanded;
 
     public static SidebarRow Section(string label) => new()
     {

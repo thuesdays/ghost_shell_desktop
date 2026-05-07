@@ -191,4 +191,28 @@ internal sealed class RunService : IRunService
             """, new { Id = runId }), ct);
         return affected > 0;
     }
+
+    public Task UpdateCountersAsync(
+        long runId, int totalQueries, int totalAds, int captchas,
+        CancellationToken ct = default) =>
+        // Phase 71dd — write the script-run counters back to the
+        // runs row. Called from RealProfileRunner once ExecuteAsync
+        // returns, with the totals the ScriptRunner accumulated.
+        // Guard on finished_at IS NULL is intentionally absent —
+        // the call happens AT FinishAsync time, by which the row
+        // may already be finished. We want the counters even if
+        // they arrive a hair after exit_code was stamped.
+        _db.QueueAsync(c => c.ExecuteAsync("""
+            UPDATE runs
+               SET total_queries = @Queries,
+                   total_ads     = @Ads,
+                   captchas      = @Captchas
+             WHERE id            = @Id;
+            """, new
+        {
+            Id       = runId,
+            Queries  = Math.Max(0, totalQueries),
+            Ads      = Math.Max(0, totalAds),
+            Captchas = Math.Max(0, captchas),
+        }), ct);
 }

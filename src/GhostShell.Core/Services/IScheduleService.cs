@@ -46,4 +46,20 @@ public interface IScheduleService
     /// "consistently failing" overnight.
     /// </summary>
     Task RecordDeferralAsync(long id, DateTime nextFireAt, CancellationToken ct = default);
+
+    /// <summary>
+    /// Phase 71cc — bump <c>fires_today</c> by one (or reset to 1 if
+    /// <c>last_fire_day</c> doesn't match <paramref name="localDay"/>),
+    /// and stamp <c>last_fire_day</c>. Persistent counter so the
+    /// runs-per-day cap survives app restarts. Returns the new count.
+    /// </summary>
+    Task<int> IncrementFiresTodayAsync(long id, DateOnly localDay, CancellationToken ct = default);
+
+    /// <summary>
+    /// Phase 71cc — read the persistent daily counter, automatically
+    /// resetting to 0 if <c>last_fire_day</c> is stale. Does NOT
+    /// touch the DB on the no-mutation path; only writes when the
+    /// counter actually needs to be reset.
+    /// </summary>
+    Task<int> GetFiresTodayAsync(long id, DateOnly localDay, CancellationToken ct = default);
 }

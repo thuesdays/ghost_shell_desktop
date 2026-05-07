@@ -515,6 +515,35 @@ public sealed class RealProfileRunner : IProfileRunner, IAsyncDisposable
                     script, session, profile.Name, cts.Token,
                     myDomains, tgDomains, vault, vaultAliases);
 
+                // Phase 71dd — stamp the per-run counters onto the runs
+                // row. Done BEFORE the auto-close so the row carries
+                // the numbers when Runs page picks it up. Failure here
+                // is non-fatal — counters are diagnostic, not load-
+                // bearing. We have to look up the run id via _sessions
+                // because KickAssignedScriptAsync's signature doesn't
+                // carry the runId from StartAsync.
+                if (_sessions.TryGetValue(profile.Name, out var liveSession))
+                {
+                    try
+                    {
+                        await _runs.UpdateCountersAsync(
+                            liveSession.RunId,
+                            scriptResult.QueriesExecuted,
+                            scriptResult.AdsClicked,
+                            scriptResult.CaptchasSolved,
+                            CancellationToken.None);
+                    }
+                    catch (Exception cx)
+                    {
+                        _log.LogWarning(cx,
+                            "Failed to write run counters for run #{RunId} (q={Q} a={A} c={C}) — Run History columns will show 0",
+                            liveSession.RunId,
+                            scriptResult.QueriesExecuted,
+                            scriptResult.AdsClicked,
+                            scriptResult.CaptchasSolved);
+                    }
+                }
+
                 // Phase 60c — script returned. Auto-close the browser
                 // session so we don't leave an orphan window burning
                 // proxy bandwidth + fingerprints. The probe-in-profile
@@ -529,11 +558,19 @@ public sealed class RealProfileRunner : IProfileRunner, IAsyncDisposable
                 // "ok" is genuinely clean; "partial" / "failed" should
                 // be logged as warnings so the user can see something
                 // went wrong without trawling individual step entries.
+                // Phase 71cc — clearer wording for cancelled runs.
+                // "0/N steps failed" reads like "everything succeeded"
+                // even when the user closed the browser mid-script and
+                // nothing actually completed past the cancel point.
+                // The cancelled path now reports "stopped at step X/N
+                // (external_close / user_stop)" so the audit log makes
+                // the cause obvious.
                 var finishVerb = scriptResult.Status switch
                 {
-                    "ok"      => "finished cleanly",
-                    "partial" => $"finished WITH FAILURES ({scriptResult.StepsFailed}/{scriptResult.StepsExecuted} steps failed)",
-                    _         => $"finished with status='{scriptResult.Status}' ({scriptResult.StepsFailed}/{scriptResult.StepsExecuted} steps failed)",
+                    "ok"        => "finished cleanly",
+                    "partial"   => $"finished WITH FAILURES ({scriptResult.StepsFailed}/{scriptResult.StepsExecuted} steps failed)",
+                    "cancelled" => $"cancelled after {scriptResult.StepsExecuted} step(s) (browser closed externally or user stopped)",
+                    _           => $"finished with status='{scriptResult.Status}' ({scriptResult.StepsFailed}/{scriptResult.StepsExecuted} steps failed)",
                 };
                 if (string.Equals(scriptResult.Status, "ok", StringComparison.Ordinal))
                 {

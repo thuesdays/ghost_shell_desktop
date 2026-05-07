@@ -17,11 +17,18 @@ public sealed class SidebarRowTemplateSelector : DataTemplateSelector
 {
     public DataTemplate? SectionTemplate { get; set; }
     public DataTemplate? ItemTemplate    { get; set; }
+    /// <summary>Phase 71m — group rows render as an icon + popup
+    /// flyout containing their <see cref="SidebarRow.Children"/>.</summary>
+    public DataTemplate? GroupTemplate   { get; set; }
 
     public override DataTemplate? SelectTemplate(object item, DependencyObject container)
     {
         if (item is SidebarRow row)
-            return row.IsSection ? SectionTemplate : ItemTemplate;
+        {
+            if (row.IsSection)   return SectionTemplate;
+            if (row.HasChildren) return GroupTemplate ?? ItemTemplate;
+            return ItemTemplate;
+        }
         return base.SelectTemplate(item, container);
     }
 }

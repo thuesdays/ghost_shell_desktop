@@ -78,11 +78,13 @@ public partial class ScheduleEditorDialog : Window
                     break;
                 case ScheduleTriggerKind.Simple:
                 default:
-                    SimpleTab.IsChecked       = true;
-                    RunsPerDayField.Text      = existing.RunsPerDay?.ToString(CultureInfo.InvariantCulture)
-                                                  ?? "150";
-                    MinJitterField.Text       = (existing.MinJitterSec ?? 20).ToString(CultureInfo.InvariantCulture);
-                    MaxJitterField.Text       = (existing.MaxJitterSec ?? 180).ToString(CultureInfo.InvariantCulture);
+                    SimpleTab.IsChecked      = true;
+                    RunsPerDayField.Text     = existing.RunsPerDay?.ToString(CultureInfo.InvariantCulture)
+                                                 ?? "150";
+                    // Phase 71cc — UseJitter replaces the old min/max-jitter
+                    // pair. Read the persisted bool; defaults to true for
+                    // pre-V28 rows that don't have the column.
+                    UseJitterCheckbox.IsChecked = existing.UseJitter;
                     break;
             }
 
@@ -154,42 +156,48 @@ public partial class ScheduleEditorDialog : Window
     {
         if (!IsInitialized) return;
 
-        var min = ParseInt(MinJitterField.Text);
-        var max = ParseInt(MaxJitterField.Text);
         var runs = ParseInt(RunsPerDayField.Text);
-
-        if (min is null || max is null || min < 1 || max < min)
+        if (runs is null || runs < 1)
         {
-            SimpleSummaryText.Text = "Set both min and max gap to positive seconds (max ≥ min).";
+            SimpleSummaryText.Text = "Runs / day must be a positive integer.";
             return;
         }
 
-        var avg = (min.Value + max.Value) / 2.0;
-
-        // Active-window estimate: prefer the dialog's hour fields if
-        // the user has filled them in. Otherwise assume 24h.
+        // Phase 71cc — gap is now derived: meanGap = window / runs.
+        // Match exactly what RunnerHost.ComputeNextFire does at fire
+        // time so the user's preview is honest.
         var fromH = ParseHour(FromHourField?.Text ?? "");
         var toH   = ParseHour(ToHourField?.Text ?? "");
         double windowHours;
         if (fromH is { } a && toH is { } b)
-            windowHours = b > a ? b - a + 1 : (24 - a) + b + 1; // inclusive
+            windowHours = b >= a ? b - a + 1 : (24 - a) + b + 1; // inclusive
         else
             windowHours = 24;
 
-        var expected = (windowHours * 3600.0) / avg;
-        var expectedRounded = (int)Math.Round(expected);
+        var meanGapSec = (windowHours * 3600.0) / runs.Value;
+        var useJitter  = UseJitterCheckbox?.IsChecked == true;
 
-        var note = $"Average gap {avg:F0}s × {windowHours:F0}h window ≈ {expectedRounded} fires/day";
-        if (runs is { } target && target > 0)
+        string gapLabel;
+        if (useJitter)
         {
-            if (expectedRounded > target)
-                note += $". Capped at {target}/day (rest of window stays idle).";
-            else if (expectedRounded < target * 0.7)
-                note += $". You asked for {target}/day — narrow the gap range to hit that target.";
-            else
-                note += $". Targeting ~{target}/day.";
+            var minGap = meanGapSec * 0.5;
+            var maxGap = meanGapSec * 1.5;
+            gapLabel = $"random {FormatGap(minGap)}–{FormatGap(maxGap)} (mean {FormatGap(meanGapSec)})";
         }
-        SimpleSummaryText.Text = note;
+        else
+        {
+            gapLabel = $"every {FormatGap(meanGapSec)}, evenly spaced";
+        }
+
+        SimpleSummaryText.Text =
+            $"{runs} fires across a {windowHours:F0}h window → {gapLabel}.";
+    }
+
+    private static string FormatGap(double seconds)
+    {
+        if (seconds < 90) return $"{seconds:F0}s";
+        if (seconds < 5400) return $"{seconds / 60:F1}m";
+        return $"{seconds / 3600:F2}h";
     }
 
     private static int? ParseInt(string raw)
@@ -343,8 +351,7 @@ public partial class ScheduleEditorDialog : Window
         string? cronExpr     = null;
         int?    intervalSec  = null;
         int?    runsPerDay   = null;
-        int?    minJitterSec = null;
-        int?    maxJitterSec = null;
+        bool    useJitter    = true;
 
         if (CronTab.IsChecked == true)
         {
@@ -370,24 +377,17 @@ public partial class ScheduleEditorDialog : Window
         }
         else
         {
-            // Simple — runs/day + jitter range. min/max are mandatory;
-            // runs/day is optional (acts as a daily cap).
+            // Phase 71cc — Simple = runs/day + use_jitter flag.
+            // Gap is computed by the runner from
+            // (active_window / runs_per_day).
             triggerKind = ScheduleTriggerKind.Simple;
-            var min = ParseInt(MinJitterField.Text);
-            var max = ParseInt(MaxJitterField.Text);
-            if (min is null or < 1 || max is null || max < min)
+            runsPerDay   = ParseInt(RunsPerDayField.Text);
+            if (runsPerDay is null or < 1)
             {
-                ShowStatus("Min and max gap must be positive integers (max ≥ min).", isError: true);
+                ShowStatus("Runs / day must be a positive integer.", isError: true);
                 return;
             }
-            minJitterSec = min;
-            maxJitterSec = max;
-            runsPerDay   = ParseInt(RunsPerDayField.Text); // null = no cap
-            if (runsPerDay is < 0)
-            {
-                ShowStatus("Runs/day must be a positive integer or empty.", isError: true);
-                return;
-            }
+            useJitter = UseJitterCheckbox.IsChecked == true;
         }
 
         int? fromHour = ParseHour(FromHourField.Text);
@@ -409,8 +409,16 @@ public partial class ScheduleEditorDialog : Window
             CronExpr       = cronExpr,
             IntervalSec    = intervalSec,
             RunsPerDay     = runsPerDay,
-            MinJitterSec   = minJitterSec,
-            MaxJitterSec   = maxJitterSec,
+            UseJitter      = useJitter,
+            // Phase 71cc — Min/Max jitter no longer set by the editor.
+            // We clear them on save so the runner falls through to the
+            // window-based computation. Pre-V28 rows with values still
+            // set keep them until re-edited (legacy back-compat path
+            // in RunnerHost.ComputeNextFire).
+            MinJitterSec   = null,
+            MaxJitterSec   = null,
+            FiresToday     = _existing?.FiresToday ?? 0,
+            LastFireDay    = _existing?.LastFireDay,
             ActiveDays     = ReadActiveDays(),
             ActiveFromHour = fromHour,
             ActiveToHour   = toHour,
@@ -434,6 +442,9 @@ public partial class ScheduleEditorDialog : Window
             CronExpr       = s.CronExpr,
             IntervalSec    = s.IntervalSec,
             RunsPerDay     = s.RunsPerDay,
+            UseJitter      = s.UseJitter,
+            FiresToday     = s.FiresToday,
+            LastFireDay    = s.LastFireDay,
             MinJitterSec   = s.MinJitterSec,
             MaxJitterSec   = s.MaxJitterSec,
             ActiveDays     = s.ActiveDays,
@@ -477,30 +488,11 @@ public partial class ScheduleEditorDialog : Window
 
     private static DateTime ComputeNextFire(Schedule s)
     {
-        var nowUtc = DateTime.UtcNow;
-        switch (s.TriggerKind)
-        {
-            case ScheduleTriggerKind.Cron:
-            {
-                var cron = CronExpression.TryParse(s.CronExpr, out _);
-                if (cron is null) return nowUtc.AddMinutes(15);
-                var local = cron.NextAfter(nowUtc.ToLocalTime());
-                return local?.ToUniversalTime() ?? nowUtc.AddDays(1);
-            }
-            case ScheduleTriggerKind.Simple:
-            {
-                var min = s.MinJitterSec is > 0 ? s.MinJitterSec.Value : 60;
-                var max = s.MaxJitterSec is > 0 && s.MaxJitterSec.Value >= min
-                    ? s.MaxJitterSec.Value
-                    : Math.Max(min, 120);
-                return nowUtc.AddSeconds(Random.Shared.Next(min, max + 1));
-            }
-            default:
-            {
-                var seconds = s.IntervalSec is > 0 ? s.IntervalSec.Value : 60;
-                return nowUtc.AddSeconds(seconds);
-            }
-        }
+        // Phase 71cc — defer to the runtime's canonical implementation
+        // so the editor's "preview next fire" matches what the runner
+        // actually computes at fire time. Keeps the two in lock-step
+        // even if the formula evolves further.
+        return GhostShell.Runtime.RunnerHost.ComputeNextFire(s, DateTime.UtcNow);
     }
 
     private void ShowStatus(string text, bool isError)

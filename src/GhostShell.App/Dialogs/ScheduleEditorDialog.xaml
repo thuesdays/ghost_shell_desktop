@@ -141,14 +141,19 @@
                         </StackPanel>
                     </Border>
 
-                    <!-- Simple pane — runs/day + jitter range.
-                         Active hours (set further down) bound the
-                         per-day window the engine spreads fires over. -->
+                    <!-- Simple pane — Phase 71cc redesign.
+                         The user only picks runs/day and whether to
+                         randomise; the engine derives the gap from
+                         (active_window / runs_per_day) automatically.
+                         Replaces the old min/max-jitter fields that
+                         had no relationship to runs_per_day and let
+                         the user accidentally fire 150 runs in 4
+                         hours instead of spread across 7am-9pm. -->
                     <Border x:Name="SimplePane" Padding="0" Margin="0,4,0,16">
                         <StackPanel>
                             <Grid>
                                 <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="160"/>
+                                    <ColumnDefinition Width="180"/>
                                     <ColumnDefinition Width="14"/>
                                     <ColumnDefinition Width="*"/>
                                 </Grid.ColumnDefinitions>
@@ -157,41 +162,34 @@
                                                Text="Runs / day"/>
                                     <TextBox x:Name="RunsPerDayField" Text="150"
                                              Margin="0,4,0,0"
-                                             TextChanged="OnSimpleChanged"/>
+                                             TextChanged="OnSimpleChanged"
+                                             ToolTip="How many times to fire per day. The gap between fires is computed automatically from this and the active-hours window below."/>
                                 </StackPanel>
-                                <StackPanel Grid.Column="2">
-                                    <TextBlock Style="{StaticResource MutedText}"
-                                               Text="Min / max gap (seconds)"/>
-                                    <Grid Margin="0,4,0,0">
-                                        <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="*"/>
-                                            <ColumnDefinition Width="14"/>
-                                            <ColumnDefinition Width="*"/>
-                                        </Grid.ColumnDefinitions>
-                                        <TextBox Grid.Column="0" x:Name="MinJitterField"
-                                                 Text="20"
-                                                 TextChanged="OnSimpleChanged"
-                                                 ToolTip="Minimum gap between fires, seconds"/>
-                                        <TextBlock Grid.Column="1" Text="–"
-                                                   Style="{StaticResource MutedText}"
-                                                   VerticalAlignment="Center"
-                                                   HorizontalAlignment="Center"/>
-                                        <TextBox Grid.Column="2" x:Name="MaxJitterField"
-                                                 Text="180"
-                                                 TextChanged="OnSimpleChanged"
-                                                 ToolTip="Maximum gap between fires, seconds"/>
-                                    </Grid>
+                                <StackPanel Grid.Column="2" VerticalAlignment="Center">
+                                    <CheckBox x:Name="UseJitterCheckbox"
+                                              IsChecked="True"
+                                              Foreground="{StaticResource Text}"
+                                              Margin="0,12,0,0"
+                                              Checked="OnSimpleChanged"
+                                              Unchecked="OnSimpleChanged">
+                                        <StackPanel>
+                                            <TextBlock Text="Use jitter (randomise gaps ±50%)"
+                                                       Foreground="{StaticResource Text}"/>
+                                            <TextBlock Style="{StaticResource DimText}" TextWrapping="Wrap"
+                                                       Text="On = human-pacing (recommended). Off = perfectly even spacing — easier to spot for anti-bot systems."/>
+                                        </StackPanel>
+                                    </CheckBox>
                                 </StackPanel>
                             </Grid>
                             <TextBlock x:Name="SimpleSummaryText"
                                        Style="{StaticResource DimText}"
-                                       Margin="0,8,0,0"
+                                       Margin="0,10,0,0"
                                        TextWrapping="Wrap"
-                                       Text="Each fire waits a random 20–180s before the next. Average gap 100s ≈ 504 fires/14h window."/>
+                                       Text="Set runs/day and active hours below — the engine spreads fires across the window."/>
                             <TextBlock Style="{StaticResource DimText}"
                                        Margin="0,4,0,0"
                                        TextWrapping="Wrap"
-                                       Text="Tip: set Active hours below to bound the firing window (e.g. 7–21 means 'between 7am and 9pm only')."/>
+                                       Text="Tip: set Active hours below to bound the firing window (e.g. 7–21 means 'between 7am and 9pm only'). Without active hours the engine assumes 24h."/>
                         </StackPanel>
                     </Border>
 

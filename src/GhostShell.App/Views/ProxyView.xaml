@@ -171,7 +171,7 @@
                                  DataGrid.SelectedItems directly, so any of the
                                  three selection mechanisms — checkbox, row
                                  click, header SelectAll — feeds the same set. -->
-                            <DataGridTemplateColumn Header="" Width="32"
+                            <DataGridTemplateColumn Header="" Width="44"
                                                     CanUserResize="False"
                                                     CanUserSort="False"
                                                     CanUserReorder="False">
@@ -190,7 +190,7 @@
                                     </DataTemplate>
                                 </DataGridTemplateColumn.CellTemplate>
                             </DataGridTemplateColumn>
-                            <DataGridTextColumn Header="NAME"     Binding="{Binding Name}"        Width="*" IsReadOnly="True"/>
+                            <DataGridTextColumn Header="NAME"     Binding="{Binding Name}"        Width="*" MinWidth="220" IsReadOnly="True"/>
                             <!-- Phase 52 — coloured status pill so user can scan the grid for
                                  failed proxies without reading text. Match the verdict-ellipse
                                  pattern from FingerprintView's external testers. Green=Healthy,

@@ -2,12 +2,14 @@
 // Copyright (c) 2026 Mykola Kovhanko <thuesdays@gmail.com>
 
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Windows;
 using GhostShell.App.Dialogs;
 using GhostShell.App.Lifecycle;
 using GhostShell.App.Logging;
 using GhostShell.App.Navigation;
+using GhostShell.App.Theming;
 using GhostShell.App.Tray;
 using GhostShell.App.ViewModels;
 using GhostShell.Core.Common;
@@ -331,6 +333,13 @@ public partial class App : Application
                 s.AddSingleton<INavigationService, NavigationService>();
                 s.AddSingleton<IDialogService, DialogService>();
 
+                // Phase 71aa — UI theme (Dark / Light). Applied at
+                // startup BEFORE the main window is parsed so all
+                // StaticResource references resolve against the
+                // saved palette. Settings → Appearance writes back
+                // to SettingsKeys.UiTheme + prompts a restart.
+                s.AddSingleton<IThemeService, ThemeService>();
+
                 // Log file tailer — fed into LogsViewModel for the
                 // live-tail page. One singleton instance feeds the
                 // single Logs page; LogTail handles day-rollover
@@ -445,6 +454,35 @@ public partial class App : Application
         splash.SetProgress(50, "Loading services…");
 
         await Host.StartAsync();
+
+        // Phase 71aa — apply the user's saved theme BEFORE the main
+        // window is parsed. We do this AFTER Host.StartAsync() so DI
+        // is fully wired (we need ISettingsService) but BEFORE we
+        // instantiate MainWindow — once XAML parses, every
+        // {StaticResource BgBase} etc. is baked to whatever palette
+        // is currently in scope. Failure here is non-fatal: the app
+        // continues with the default (Dark) palette already merged
+        // into Colors.xaml.
+        try
+        {
+            await Host.Services.GetRequiredService<IThemeService>().ApplySavedAsync();
+        }
+        catch (Exception ex)
+        {
+            bootLogger.LogWarning(ex, "Theme apply failed at startup — falling back to default Dark palette");
+        }
+
+        // Phase 71n — verify Inter font shipped + apply global text-
+        // rendering hints. Diagnoses the "fonts look pixelated" bug:
+        // Colors.xaml references /Assets/Fonts/#Inter, but if the
+        // .ttf isn't actually packaged (CopyInterFont MSBuild target
+        // skipped because F:\projects\inter_font\ doesn't exist on
+        // this machine), WPF silently falls back to Segoe UI. The
+        // log line tells the developer exactly which family the
+        // FontFamily resource resolved to so the fallback is no
+        // longer invisible.
+        VerifyInterFont();
+        ApplyGlobalTextRenderingHints();
 
         // Update splash: host started, building UI.
         splash.SetProgress(70, "Initializing UI…");
@@ -859,5 +897,151 @@ public partial class App : Application
         Serilog.Log.CloseAndFlush();
 
         base.OnExit(e);
+    }
+
+    /// <summary>
+    /// Phase 71n — verify the Inter font is actually packaged with
+    /// this build and log which family WPF resolved the FontUi
+    /// resource to. The user's complaint of "fonts look pixelated"
+    /// usually means the embedded .ttf is missing and WPF silently
+    /// fell back to Segoe UI; this log line makes that visible.
+    ///
+    /// Ships three diagnostics:
+    ///   • whether the pack-URI font asset can be enumerated
+    ///   • the FontFamily Source string from the resource
+    ///   • the typeface that GlyphTypeface actually resolved to
+    ///
+    /// Non-fatal — the app keeps booting either way.
+    /// </summary>
+    private void VerifyInterFont()
+    {
+        var logger = Host?.Services.GetService(typeof(ILoggerFactory)) as ILoggerFactory;
+        var log = logger?.CreateLogger("FontDiagnostics");
+        try
+        {
+            // Resolve the FontFamily resource the theme uses everywhere.
+            var fontUi = (System.Windows.Media.FontFamily?)Current.Resources["FontUi"];
+            if (fontUi is null)
+            {
+                log?.LogWarning("FontUi resource missing from App.Resources.");
+                return;
+            }
+
+            log?.LogInformation(
+                "FontUi.Source = '{Source}'",
+                fontUi.Source ?? "(null)");
+
+            // Enumerate the typefaces the family actually exposes.
+            // If Inter packaged correctly, you'll see entries like
+            // "Inter Regular", "Inter Bold", etc. If the embedded
+            // .ttf is missing, the family falls through to whatever
+            // OS font the fallback chain matched (Segoe UI Variable
+            // Text → Segoe UI → Arial).
+            var typefaces = fontUi.GetTypefaces();
+            log?.LogInformation(
+                "FontUi resolved to {Count} typeface(s):", typefaces.Count);
+            foreach (var tf in typefaces)
+            {
+                tf.TryGetGlyphTypeface(out var gtf);
+                var familyName = gtf?.FamilyNames.Values.FirstOrDefault() ?? "(no glyph typeface)";
+                log?.LogInformation(
+                    "  • style={Style} weight={Weight} stretch={Stretch}  family='{Family}'",
+                    tf.Style, tf.Weight, tf.Stretch, familyName);
+            }
+
+            // Direct check — try to load /Assets/Fonts/#Inter and see
+            // if it lights up. If the .ttf is in the assembly, this
+            // works; otherwise it returns the fallback chain's match.
+            var probe = new System.Windows.Media.FontFamily(
+                new Uri("pack://application:,,,/"), "/Assets/Fonts/#Inter");
+            var probeFaces = probe.GetTypefaces();
+            var hasInter = probeFaces.Any(t =>
+            {
+                t.TryGetGlyphTypeface(out var g);
+                return g is not null
+                    && (g.FamilyNames.Values.Any(v => v.Contains("Inter", StringComparison.OrdinalIgnoreCase)));
+            });
+            if (hasInter)
+                log?.LogInformation("✓ Inter is embedded and loadable from pack URI.");
+            else
+                log?.LogWarning(
+                    "✗ Inter is NOT embedded. The CopyInterFont MSBuild target needs " +
+                    "Inter-VariableFont_opsz,wght.ttf at F:\\projects\\inter_font\\ to bundle " +
+                    "the font. Run download_inter.bat in the project root, then rebuild. " +
+                    "Until then text falls back to Segoe UI which renders less crisply at " +
+                    "the small sizes used across the UI.");
+        }
+        catch (Exception ex)
+        {
+            log?.LogWarning(ex, "Font verification threw — non-fatal.");
+        }
+    }
+
+    /// <summary>
+    /// Phase 71n — apply global text-rendering hints. Sets implicit
+    /// styles on TextBlock, TextBox, ContentControl, and Window so:
+    ///
+    ///   • <c>TextOptions.TextFormattingMode = Ideal</c>
+    ///       Glyph metrics use sub-pixel positioning. Best for
+    ///       variable-size text + non-default scaling. The default
+    ///       (Display) snaps each glyph to whole pixels which looks
+    ///       chunky in the 11–14 px range we use everywhere.
+    ///
+    ///   • <c>TextOptions.TextRenderingMode = ClearType</c>
+    ///       Sub-pixel anti-aliasing on LCD displays. The default
+    ///       (Auto) often picks Aliased on small fonts.
+    ///
+    ///   • <c>TextOptions.TextHintingMode = Animated</c>
+    ///       Disables expensive grid-fitting that distorts glyph
+    ///       outlines for static text. We render lots of small
+    ///       labels; the perf gain is minor but the visual gain
+    ///       is real.
+    ///
+    ///   • <c>UseLayoutRounding = true</c>
+    ///       Rounds layout positions to whole device pixels so
+    ///       single-pixel borders / dividers don't end up
+    ///       half-rendered across two rows of pixels.
+    ///
+    /// All four are applied as implicit Window styles so every
+    /// child inherits via the visual tree (Window's RenderOptions
+    /// + TextOptions cascade to all descendants).
+    /// </summary>
+    private void ApplyGlobalTextRenderingHints()
+    {
+        try
+        {
+            // Set defaults at the application level — these become
+            // the inherited values for the entire visual tree.
+            // Window-level setters work because TextOptions /
+            // RenderOptions are inherited dependency properties.
+
+            // Implicit Window style (every Window in the app picks it up).
+            var winStyle = new Style(typeof(Window));
+            winStyle.Setters.Add(new Setter(
+                System.Windows.Media.TextOptions.TextFormattingModeProperty,
+                System.Windows.Media.TextFormattingMode.Ideal));
+            winStyle.Setters.Add(new Setter(
+                System.Windows.Media.TextOptions.TextRenderingModeProperty,
+                System.Windows.Media.TextRenderingMode.ClearType));
+            winStyle.Setters.Add(new Setter(
+                System.Windows.Media.TextOptions.TextHintingModeProperty,
+                System.Windows.Media.TextHintingMode.Animated));
+            winStyle.Setters.Add(new Setter(
+                Window.UseLayoutRoundingProperty, true));
+            winStyle.Setters.Add(new Setter(
+                Window.SnapsToDevicePixelsProperty, true));
+
+            // Don't overwrite existing explicit Window styles — if
+            // App.xaml or a child Window registered its own implicit
+            // style, we'd shadow it here.
+            if (!Resources.Contains(typeof(Window)))
+                Resources.Add(typeof(Window), winStyle);
+        }
+        catch (Exception ex)
+        {
+            (Host?.Services.GetService(typeof(ILoggerFactory)) as ILoggerFactory)
+                ?.CreateLogger("FontDiagnostics")
+                .LogWarning(ex, "Couldn't install global text-rendering hints — non-fatal.");
+        }
     }
 }

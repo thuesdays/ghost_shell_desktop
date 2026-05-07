@@ -65,20 +65,13 @@ public sealed class RunnerHost : IHostedService, IDisposable
     private CancellationTokenSource? _cts;
     private Task? _tickLoop;
 
-    /// <summary>
-    /// In-memory daily-fire counters for Simple-trigger schedules
-    /// with a runs_per_day cap. Keyed by schedule id; the tuple is
-    /// (LocalDate, FiresToday). When the LocalDate changes, the
-    /// counter is reset on next access.
-    ///
-    /// Lives in memory only — across app restarts the cap effectively
-    /// resets, which is fine because the schedule's next_fire_at is
-    /// computed fresh anyway. Accurate enforcement across restarts
-    /// would need a per-schedule "fires_today" column we don't have
-    /// yet (Phase 8).
-    /// </summary>
-    private readonly Dictionary<long, (DateOnly Day, int Count)> _dailyFires = new();
-    private readonly object _dailyFiresLock = new();
+    // Phase 71cc — daily-fire counters now live in the schedules table
+    // (fires_today + last_fire_day columns). The in-memory cache here
+    // is just a small write-through optimisation: each tick reads
+    // fires_today via IScheduleService.GetFiresTodayAsync (which
+    // self-resets when the day rolls). Removed the old in-memory
+    // _dailyFires dict because it lost state on every app restart and
+    // let the user blow past the runs_per_day cap by relaunching.
 
     public RunnerHost(
         IScheduleService schedules,
@@ -203,30 +196,32 @@ public sealed class RunnerHost : IHostedService, IDisposable
     /// </summary>
     private async Task FireAsync(Schedule s, DateTime utcNow, DateTime localNow, CancellationToken ct)
     {
-        // Active-window guard. Outside the schedule's active hours /
-        // days → push next_fire_at to a minute later and skip. The
-        // next tick will re-evaluate. NOT a failure → no fail_count
-        // bump (was a CRITICAL bug pre-fix: 9-5 schedules looked like
-        // they were failing all night).
+        // Phase 71cc — outside-active-window: defer to the START of
+        // the next active window (today if the window hasn't begun
+        // yet, tomorrow's start if we've passed today's end). Old
+        // code pushed +1 minute, which produced thousands of
+        // overnight DB updates and made the activity log unreadable.
         if (!IsInActiveWindow(s, localNow))
         {
-            var nextWindow = ComputeNextFire(s, utcNow.AddMinutes(1));
-            await _schedules.RecordDeferralAsync(s.Id, nextWindow, ct);
-            _log.LogDebug(
+            var nextWindowLocal = ComputeNextWindowStart(s, localNow);
+            var nextWindowUtc = DateTime.SpecifyKind(nextWindowLocal, DateTimeKind.Local).ToUniversalTime();
+            await _schedules.RecordDeferralAsync(s.Id, nextWindowUtc, ct);
+            _log.LogInformation(
                 "Schedule #{Id} '{Name}' outside active window — defer to {Next}",
-                s.Id, s.Name, nextWindow);
+                s.Id, s.Name, nextWindowUtc);
             return;
         }
 
-        // Daily-fire cap (Simple trigger only). When runs_per_day is
-        // set and we've already hit the count for today, defer to the
-        // start of tomorrow's active window. The counter is local-time
-        // keyed because that's how users think about "150 fires today"
-        // — the natural reset is local midnight or active-from hour.
+        // Phase 71cc — persistent daily-fire cap (Simple trigger).
+        // The counter lives in the schedules.fires_today column so it
+        // survives app restarts. Pre-fix: in-memory counter reset to
+        // zero on every relaunch and the user could blow past the cap
+        // by relaunching mid-day.
         if (s.TriggerKind == ScheduleTriggerKind.Simple
             && s.RunsPerDay is { } cap and > 0)
         {
-            var todayCount = ReadOrResetDailyFires(s.Id, DateOnly.FromDateTime(localNow));
+            var todayCount = await _schedules.GetFiresTodayAsync(
+                s.Id, DateOnly.FromDateTime(localNow), ct);
             if (todayCount >= cap)
             {
                 var tomorrow = ComputeTomorrowStart(s, localNow);
@@ -274,23 +269,27 @@ public sealed class RunnerHost : IHostedService, IDisposable
 
         if (outcome == FireOutcome.Deferred)
         {
-            // Cap raced between outer check and StartAsync. Healthy
-            // schedule, just bad timing — defer to next tick without
-            // touching fail_count.
-            var nextSlot = utcNow.Add(TickInterval);
-            await _schedules.RecordDeferralAsync(s.Id, nextSlot, ct);
-            _log.LogInformation(
-                "Schedule #{Id} '{Name}' deferred — cap raced inside fire path",
-                s.Id, s.Name);
+            // Cap raced between outer check and StartAsync, OR profile
+            // is already running (manual launch). Healthy schedule,
+            // just bad timing — push next_fire_at forward but DON'T
+            // bump fire_count or fail_count. Pre-fix: hitting an
+            // already-running profile incremented fire_count which
+            // inflated stats and spammed the activity log.
+            await _schedules.RecordDeferralAsync(s.Id, nextFire, ct);
+            _log.LogDebug(
+                "Schedule #{Id} '{Name}' deferred — target busy, retry at {Next}",
+                s.Id, s.Name, nextFire);
             return;
         }
 
         if (outcome == FireOutcome.Launched)
         {
-            // Bump the daily counter for Simple schedules — same
-            // local-day key as the cap check so they stay consistent.
+            // Phase 71cc — persistent counter bump for Simple schedules.
+            // Atomic UPSERT in the SQL — handles the day-rollover case
+            // (yesterday's row → today gets reset to 1 instead of N+1).
             if (s.TriggerKind == ScheduleTriggerKind.Simple)
-                IncrementDailyFires(s.Id, DateOnly.FromDateTime(localNow));
+                await _schedules.IncrementFiresTodayAsync(
+                    s.Id, DateOnly.FromDateTime(localNow), ct);
 
             await _schedules.RecordFiredAsync(s.Id, utcNow, nextFire, ct);
             _log.LogInformation(
@@ -323,12 +322,17 @@ public sealed class RunnerHost : IHostedService, IDisposable
     {
         if (_runner.ActiveProfileNames.Contains(profileName))
         {
-            // Already running — treat as a no-op success so we don't
-            // spam fail_count for a long-running session.
+            // Phase 71cc — already running (e.g. user clicked Start
+            // manually, or previous run is still in flight). Old
+            // code returned Launched which bumped fire_count + spammed
+            // "Schedule fired …" in the log every 30s while the
+            // run-in-progress chugged through its script. Return
+            // Deferred instead: scheduler simply pushes next_fire_at
+            // forward without altering counters or noise.
             _log.LogDebug(
                 "Schedule fire skipped: profile '{Name}' already active",
                 profileName);
-            return FireOutcome.Launched;
+            return FireOutcome.Deferred;
         }
         var profile = await _profiles.GetAsync(profileName, ct);
         if (profile is null)
@@ -423,6 +427,12 @@ public sealed class RunnerHost : IHostedService, IDisposable
     /// Compute the next fire time for a schedule given the current
     /// reference moment. Public so tests can lock the schedule's
     /// invariants.
+    ///
+    /// Phase 71cc — Simple trigger now derives the gap from the active
+    /// window length and runs_per_day. <see cref="Schedule.UseJitter"/>
+    /// either jitters ±50% around the mean or fires uniformly. The
+    /// legacy MinJitterSec / MaxJitterSec fields are honoured ONLY if
+    /// runs_per_day is null (back-compat for very old rows).
     /// </summary>
     public static DateTime ComputeNextFire(Schedule s, DateTime referenceUtc)
     {
@@ -441,21 +451,52 @@ public sealed class RunnerHost : IHostedService, IDisposable
 
             case ScheduleTriggerKind.Simple:
             {
-                // Simple = uniform-random gap inside [MinJitterSec, MaxJitterSec].
-                // Defaults if the editor saved nulls (shouldn't happen with the
-                // current dialog but be defensive): 60s..120s.
-                var min = s.MinJitterSec is > 0 ? s.MinJitterSec.Value : 60;
-                var max = s.MaxJitterSec is > 0 && s.MaxJitterSec.Value >= min
-                    ? s.MaxJitterSec.Value
-                    : Math.Max(min, 120);
-                var gap = Random.Shared.Next(min, max + 1);
-                return referenceUtc.AddSeconds(gap);
+                // Phase 71cc — auto-compute gap from window/runs.
+                // Window length in seconds. If both ActiveFromHour
+                // and ActiveToHour are set, use that span; else the
+                // full 24h day. Wrap-around windows (e.g. 22..6) are
+                // counted as the inverted span.
+                var windowSec = ComputeWindowSeconds(s);
+                var runs = s.RunsPerDay is > 0 ? s.RunsPerDay.Value : 24;
 
-                // Note: the runs_per_day cap is enforced at fire-time
-                // by the runner loop (count today's fire_count delta
-                // since midnight). Computing it here would be wrong —
-                // we want the row's next_fire_at to keep advancing so
-                // the loop can re-evaluate the cap on each tick.
+                // Legacy back-compat: if runs_per_day is null/0 but
+                // the row carries a manual MinJitter/MaxJitter pair,
+                // honour it. Lets pre-V28 rows keep working until
+                // they get re-edited.
+                if ((s.RunsPerDay is null or 0)
+                    && s.MinJitterSec is > 0
+                    && s.MaxJitterSec is > 0
+                    && s.MaxJitterSec.Value >= s.MinJitterSec.Value)
+                {
+                    var legacyGap = Random.Shared.Next(
+                        s.MinJitterSec.Value, s.MaxJitterSec.Value + 1);
+                    return referenceUtc.AddSeconds(legacyGap);
+                }
+
+                // Mean gap = window / runs. e.g. 14h × 150 → 336 sec.
+                var meanGap = (double)windowSec / runs;
+                // Sanity floor + ceiling so a misconfigured row (1
+                // run / 24h or 10000 runs / 1h) doesn't produce a 0s
+                // or hour-long gap. Floor 5s — runner can't physically
+                // cycle Chromium any faster. Ceiling 6h — past that,
+                // a Cron rule is what the user actually wants.
+                meanGap = Math.Clamp(meanGap, 5.0, 6 * 3600.0);
+
+                double gapSec;
+                if (s.UseJitter)
+                {
+                    // Random ±50% around the mean. NextDouble() is
+                    // [0..1) so this gives [0.5*mean .. 1.5*mean).
+                    var factor = 0.5 + Random.Shared.NextDouble();
+                    gapSec = meanGap * factor;
+                }
+                else
+                {
+                    // Uniform spacing — every fire exactly meanGap
+                    // seconds apart.
+                    gapSec = meanGap;
+                }
+                return referenceUtc.AddSeconds(gapSec);
             }
 
             // Interval — fire N seconds from the reference moment. We use
@@ -468,6 +509,22 @@ public sealed class RunnerHost : IHostedService, IDisposable
                 return referenceUtc.AddSeconds(seconds);
             }
         }
+    }
+
+    /// <summary>Phase 71cc — compute the active-window length in
+    /// seconds. ActiveFromHour/ActiveToHour are inclusive whole hours
+    /// (e.g. 7..21 = "between 7:00 and 21:59"). Empty window = 24h.
+    /// Wrap-around windows (22..6) are correctly inverted.</summary>
+    public static int ComputeWindowSeconds(Schedule s)
+    {
+        if (s.ActiveFromHour is { } from && s.ActiveToHour is { } to)
+        {
+            int hours = to >= from
+                ? (to - from + 1)
+                : (24 - from) + (to + 1);
+            return hours * 3600;
+        }
+        return 24 * 3600;
     }
 
     /// <summary>
@@ -500,33 +557,6 @@ public sealed class RunnerHost : IHostedService, IDisposable
         return true;
     }
 
-    // ─── Daily-fire counter helpers ───────────────────────────────
-
-    private int ReadOrResetDailyFires(long scheduleId, DateOnly today)
-    {
-        lock (_dailyFiresLock)
-        {
-            if (_dailyFires.TryGetValue(scheduleId, out var entry))
-            {
-                if (entry.Day == today) return entry.Count;
-                // Day rolled over — drop the old counter.
-                _dailyFires.Remove(scheduleId);
-            }
-            return 0;
-        }
-    }
-
-    private void IncrementDailyFires(long scheduleId, DateOnly today)
-    {
-        lock (_dailyFiresLock)
-        {
-            if (_dailyFires.TryGetValue(scheduleId, out var entry) && entry.Day == today)
-                _dailyFires[scheduleId] = (today, entry.Count + 1);
-            else
-                _dailyFires[scheduleId] = (today, 1);
-        }
-    }
-
     /// <summary>
     /// Compute "tomorrow's window start" in local time for a schedule
     /// that hit its daily cap. Uses ActiveFromHour if set, else 00:00.
@@ -534,10 +564,48 @@ public sealed class RunnerHost : IHostedService, IDisposable
     /// UTC explicitly — we don't tag here because mixing UTC/Local
     /// with TimeZoneInfo is a known footgun across DST transitions.
     /// </summary>
-    private static DateTime ComputeTomorrowStart(Schedule s, DateTime localNow)
+    public static DateTime ComputeTomorrowStart(Schedule s, DateTime localNow)
     {
         var fromHour = s.ActiveFromHour ?? 0;
         var tomorrow = localNow.Date.AddDays(1).AddHours(fromHour);
         return tomorrow;
+    }
+
+    /// <summary>
+    /// Phase 71cc — given a schedule that's currently outside its
+    /// active window, compute when the next active window starts
+    /// (today's window-start if we haven't reached it yet, otherwise
+    /// tomorrow's). This replaces the old "+1 minute" deferral that
+    /// produced thousands of overnight DB writes.
+    /// </summary>
+    public static DateTime ComputeNextWindowStart(Schedule s, DateTime localNow)
+    {
+        var fromHour = s.ActiveFromHour ?? 0;
+        // If both day and hour guards say "wait until Xh today" and we
+        // haven't reached that hour yet, use today's window start.
+        var todayWindow = localNow.Date.AddHours(fromHour);
+        if (todayWindow > localNow && IsActiveDay(s, todayWindow))
+            return todayWindow;
+        // Otherwise scan forward day-by-day until we find an active day
+        // — handles the case where the user restricted to e.g. weekdays
+        // and we're firing late on a Friday → next active is Monday's
+        // window-start.
+        for (int i = 1; i <= 7; i++)
+        {
+            var candidate = localNow.Date.AddDays(i).AddHours(fromHour);
+            if (IsActiveDay(s, candidate)) return candidate;
+        }
+        // No active day in the next 7 days — schedule is dead. Push
+        // far enough forward that the runner doesn't burn cycles on
+        // it; an explicit user re-enable can re-arm it.
+        return localNow.Date.AddDays(7).AddHours(fromHour);
+    }
+
+    private static bool IsActiveDay(Schedule s, DateTime localDay)
+    {
+        if (s.ActiveDays.Count == 0) return true;
+        var iso = (int)localDay.DayOfWeek;
+        iso = iso == 0 ? 7 : iso;
+        return s.ActiveDays.Contains(iso);
     }
 }

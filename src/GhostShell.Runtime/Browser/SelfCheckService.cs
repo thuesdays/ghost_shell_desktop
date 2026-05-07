@@ -650,6 +650,12 @@ public sealed class SelfCheckService : ISelfCheckService
             // alias of the configured TZ.
             var expectedTzId = SafeGetAs<string>(tzPayload, "id");
             var actualTzId = SafeGetAs<string>(tzProbe, "timeZone");
+            // Phase 71cc — surface the captured TZ to the row-level
+            // log + DB column. Pre-fix the probe captured this value
+            // for the test result but the function-top tzActual was
+            // never assigned, so every Self-check row logged "tz=?"
+            // and the DB column was null.
+            tzActual = actualTzId;
             var tzOk = TimezoneMatch(expectedTzId, actualTzId);
             if (!tzOk)
             {

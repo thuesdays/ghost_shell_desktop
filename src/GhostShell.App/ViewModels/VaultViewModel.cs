@@ -55,16 +55,106 @@ public sealed partial class VaultViewModel : BaseViewModel
 
     private readonly DispatcherTimer _totpTimer;
 
+    /// <summary>
+    /// Phase 71c audit fix — track per-row PropertyChanged handlers
+    /// so we can explicitly unsubscribe on each reload. Without this,
+    /// every ReloadAsync installed a fresh closure that the previous
+    /// reload couldn't match in -=, slowly leaking handlers (and the
+    /// captured row/collection refs) across the session.
+    /// </summary>
+    private readonly List<(VaultItemRow Row, System.ComponentModel.PropertyChangedEventHandler Handler)>
+        _rowHandlers = new();
+
     [ObservableProperty] private bool _isInitialized;
     [ObservableProperty] private bool _isUnlocked;
     [ObservableProperty] private string? _searchText;
-    [ObservableProperty] private string  _kindFilter = "All";
     [ObservableProperty] private bool    _isEmpty = true;
     [ObservableProperty] private int     _autoLockMinutes = 15;
 
-    /// <summary>"All" + every kind — drives the kind filter dropdown.</summary>
-    public IReadOnlyList<string> KindFilters
-        => new[] { "All" }.Concat(VaultKinds.All).ToList();
+    /// <summary>
+    /// Phase 71i — the page filter dropdown switched from
+    /// kind-based ("All / account / social / …") to tag-based now
+    /// that every new item is "universal". The list is dynamic:
+    /// rebuilt from <see cref="Items"/>' Tags strings on every reload.
+    /// "All" is always first; the rest are distinct tag names sorted
+    /// alphabetically. Selecting a tag filters Items in-memory.
+    /// </summary>
+    [ObservableProperty] private string _tagFilter = "All";
+
+    /// <summary>Distinct tag list for the filter dropdown.
+    /// Recomputed by <see cref="ReloadAsync"/> after Items is
+    /// repopulated.</summary>
+    public ObservableCollection<string> TagFilters { get; } = new() { "All" };
+
+    partial void OnTagFilterChanged(string value)
+    {
+        // Re-apply filter without re-querying the DB — _allItems holds
+        // the unfiltered snapshot from the latest ReloadAsync.
+        ApplyTagFilter();
+    }
+
+    /// <summary>
+    /// Phase 71 — count of currently-selected rows for the multiselect
+    /// delete UI. Exposes a bool flag derived view (HasSelection) so
+    /// the View can bind the red "Delete N" button's visibility +
+    /// enabled state without a converter.
+    /// </summary>
+    [ObservableProperty] private int _selectedCount;
+    public bool HasSelection => SelectedCount > 0;
+    partial void OnSelectedCountChanged(int value)
+    {
+        OnPropertyChanged(nameof(HasSelection));
+        OnPropertyChanged(nameof(IsAllSelected));
+    }
+
+    /// <summary>
+    /// Phase 71d — header-checkbox state for "select all" in the
+    /// Vault grid. Three-state binding:
+    ///   • <c>true</c>  → every row is checked.
+    ///   • <c>false</c> → no row is checked.
+    ///   • <c>null</c>  → some-but-not-all rows are checked
+    ///                    (indeterminate visual).
+    /// Setter is invoked when the user clicks the header checkbox;
+    /// it propagates the new value to every row's
+    /// <see cref="VaultItemRow.IsSelected"/>. <see cref="_suppressBubble"/>
+    /// guards against the per-row PropertyChanged handlers re-entering
+    /// IsAllSelected midway through the bulk-set loop, which would
+    /// otherwise keep flipping the value to indeterminate as each
+    /// row updated.
+    /// </summary>
+    private bool _suppressBubble;
+    public bool? IsAllSelected
+    {
+        get
+        {
+            if (Items.Count == 0) return false;
+            if (SelectedCount == 0) return false;
+            if (SelectedCount == Items.Count) return true;
+            return null;
+        }
+        set
+        {
+            // Indeterminate clicks come from the user cycling through
+            // the third state; treat that as "select none" for ergonomics.
+            var target = value == true;
+            _suppressBubble = true;
+            try
+            {
+                foreach (var r in Items) r.IsSelected = target;
+            }
+            finally { _suppressBubble = false; }
+            SelectedCount = Items.Count(i => i.IsSelected);
+            OnPropertyChanged(nameof(IsAllSelected));
+        }
+    }
+
+    /// <summary>
+    /// Phase 71i — full unfiltered snapshot from the most recent
+    /// <see cref="ReloadAsync"/>. <see cref="ApplyTagFilter"/> rebuilds
+    /// <see cref="Items"/> from this list when the user changes
+    /// <see cref="TagFilter"/>, avoiding a DB round-trip.
+    /// </summary>
+    private List<VaultItemRow> _allItems = new();
 
     public override async Task OnNavigatedToAsync()
     {
@@ -98,14 +188,48 @@ public sealed partial class VaultViewModel : BaseViewModel
             await _vault.RefreshStateAsync();
             IsInitialized = _vault.IsInitialized;
             IsUnlocked    = _vault.IsUnlocked;
+            // Phase 71c audit fix — explicitly unsubscribe each row's
+            // PropertyChanged handler before clearing. Without this,
+            // every reload installed a fresh closure capturing the row
+            // + Items collection without releasing the previous one,
+            // leaking handler delegates across reloads. We track the
+            // installed delegates in _rowHandlers so we can detach
+            // them precisely.
+            foreach (var (row, handler) in _rowHandlers)
+                row.PropertyChanged -= handler;
+            _rowHandlers.Clear();
             Items.Clear();
             if (!IsUnlocked) { IsEmpty = true; _totpTimer.Stop(); return; }
+            // Phase 71i — kind filter dropped (everything is universal).
+            // Pull all matching rows; tag filter is applied in-memory by
+            // ApplyTagFilter() after we build the row VMs.
             var rows = await _vault.ListAsync(
-                kind:    KindFilter == "All" ? null : KindFilter,
+                kind:    null,
                 search:  string.IsNullOrWhiteSpace(SearchText) ? null : SearchText);
+            // Phase 71 — reset selection-count snapshot. ReloadAsync
+            // wipes Items, so the count goes to 0 and stays there
+            // until the user re-checks rows in the rebuilt grid.
+            SelectedCount = 0;
+            _allItems = new List<VaultItemRow>(rows.Count);
             foreach (var r in rows)
             {
                 var row = new VaultItemRow(r);
+                // Phase 71 — bubble per-row IsSelected changes into
+                // the page-level SelectedCount so the bulk-delete
+                // button toggles visibility correctly. Track the
+                // delegate in _rowHandlers so the next ReloadAsync
+                // can detach it cleanly (Phase 71c audit fix).
+                System.ComponentModel.PropertyChangedEventHandler handler = (_, args) =>
+                {
+                    // Phase 71d — skip the recount during bulk select-all
+                    // (the IsAllSelected setter does the count once after
+                    // the loop). Saves O(N²) work when toggling 500 rows.
+                    if (_suppressBubble) return;
+                    if (args.PropertyName == nameof(VaultItemRow.IsSelected))
+                        SelectedCount = Items.Count(i => i.IsSelected);
+                };
+                row.PropertyChanged += handler;
+                _rowHandlers.Add((row, handler));
                 // For TOTP-capable kinds, fetch + cache the secret seed
                 // so the per-second timer can compute codes locally
                 // without hitting the DB on every tick.
@@ -124,8 +248,13 @@ public sealed partial class VaultViewModel : BaseViewModel
                     }
                 }
                 row.RefreshTotp();
-                Items.Add(row);
+                _allItems.Add(row);
             }
+            // Phase 71i — rebuild the tag filter dropdown + apply current
+            // selection. ApplyTagFilter populates Items from _allItems
+            // honouring TagFilter (defaults to "All" on first load).
+            RebuildTagFilters();
+            ApplyTagFilter();
             IsEmpty = Items.Count == 0;
             // Restart the timer only if there is at least one TOTP row
             // — otherwise we'd burn a Dispatcher tick every second for
@@ -143,7 +272,9 @@ public sealed partial class VaultViewModel : BaseViewModel
     }
 
     partial void OnSearchTextChanged(string? value) => _ = ReloadAsync();
-    partial void OnKindFilterChanged(string value) => _ = ReloadAsync();
+    // Phase 71i — kind filter removed; OnTagFilterChanged is declared
+    // alongside the [ObservableProperty] above and triggers an
+    // in-memory re-filter via ApplyTagFilter (no DB round-trip needed).
 
     [RelayCommand]
     private async Task UnlockAsync()
@@ -189,13 +320,19 @@ public sealed partial class VaultViewModel : BaseViewModel
         if (!IsUnlocked) { await UnlockAsync(); if (!IsUnlocked) return; }
         var owner = System.Windows.Application.Current?.MainWindow;
         var profiles = await _profiles.ListAsync();
-        var dlg = new VaultBulkImportDialog(_vault, profiles) { Owner = owner };
+        var dlg = new VaultBulkImportDialog(_vault, profiles, _profiles) { Owner = owner };
         if (dlg.ShowDialog() == true && dlg.CreatedCount > 0)
         {
+            // Phase 70 — also mention auto-created profiles when present
+            // so the user knows new rows landed on the Profiles page.
+            var profileSuffix = dlg.CreatedProfilesCount > 0
+                ? $" + {dlg.CreatedProfilesCount} new profile(s) auto-created"
+                : "";
             await _dialogs.ConfirmAsync(
                 "Bulk import done",
-                $"Created {dlg.CreatedCount} vault item(s). They'll resolve through " +
-                "{{vault.SEED}}, {{vault.PASSWORD}} etc. for the profiles they're bound to.",
+                $"Created {dlg.CreatedCount} vault item(s){profileSuffix}. " +
+                "They'll resolve through {{vault.SEED}}, {{vault.PASSWORD}}, " +
+                "{{vault.<custom_field>}} etc. for the profiles they're bound to.",
                 "OK", ConfirmSeverity.Success);
             await ReloadAsync();
         }
@@ -229,6 +366,64 @@ public sealed partial class VaultViewModel : BaseViewModel
             await ReloadAsync();
     }
 
+    /// <summary>
+    /// Phase 71i — recompute the distinct tag list from the latest
+    /// snapshot. Preserves the user's current selection when possible
+    /// (so re-selecting "twitter" survives a reload as long as
+    /// at least one item still carries that tag); otherwise falls
+    /// back to "All".
+    /// </summary>
+    private void RebuildTagFilters()
+    {
+        var tags = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var r in _allItems)
+        {
+            if (string.IsNullOrWhiteSpace(r.Tags)) continue;
+            foreach (var t in r.Tags.Split(',', StringSplitOptions.RemoveEmptyEntries
+                                                | StringSplitOptions.TrimEntries))
+            {
+                if (!string.IsNullOrEmpty(t)) tags.Add(t);
+            }
+        }
+
+        var prev = TagFilter;
+        TagFilters.Clear();
+        TagFilters.Add("All");
+        foreach (var t in tags.OrderBy(s => s, StringComparer.OrdinalIgnoreCase))
+            TagFilters.Add(t);
+
+        // Restore prior selection if still available; otherwise reset
+        // to "All" so the dropdown isn't stuck on an invisible value.
+        if (!string.IsNullOrEmpty(prev) && TagFilters.Contains(prev))
+            TagFilter = prev;
+        else
+            TagFilter = "All";
+    }
+
+    /// <summary>
+    /// Phase 71i — rebuild <see cref="Items"/> from <see cref="_allItems"/>
+    /// honouring the current <see cref="TagFilter"/>. "All" passes
+    /// every row; a specific tag matches when the row's
+    /// <see cref="VaultItemRow.Tags"/> string contains that tag as a
+    /// comma-separated entry (case-insensitive).
+    /// </summary>
+    private void ApplyTagFilter()
+    {
+        Items.Clear();
+        var sel = TagFilter;
+        var allTags = string.IsNullOrEmpty(sel) || string.Equals(sel, "All", StringComparison.OrdinalIgnoreCase);
+        foreach (var r in _allItems)
+        {
+            if (allTags) { Items.Add(r); continue; }
+            var tagSet = (r.Tags ?? "")
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            if (tagSet.Any(t => string.Equals(t, sel, StringComparison.OrdinalIgnoreCase)))
+                Items.Add(r);
+        }
+        IsEmpty = Items.Count == 0;
+        SelectedCount = Items.Count(i => i.IsSelected);
+    }
+
     [RelayCommand]
     private async Task DeleteAsync(VaultItemRow? row)
     {
@@ -240,6 +435,38 @@ public sealed partial class VaultViewModel : BaseViewModel
             "Delete", ConfirmSeverity.Warning);
         if (!ok) return;
         await _vault.DeleteAsync(item.Id);
+        await ReloadAsync();
+    }
+
+    /// <summary>
+    /// Phase 71 — bulk delete every row whose <see cref="VaultItemRow.IsSelected"/>
+    /// is true. Mirrors the proxies grid's "Delete N selected" UX:
+    /// red button visible only when at least one row is checked,
+    /// confirms with the count, deletes serially through
+    /// <see cref="IVaultService.DeleteAsync"/>.
+    /// </summary>
+    [RelayCommand]
+    private async Task BulkDeleteAsync()
+    {
+        var picked = Items.Where(r => r.IsSelected).ToList();
+        if (picked.Count == 0) return;
+
+        var ok = await _dialogs.ConfirmAsync(
+            "Delete selected vault items",
+            $"Permanently delete {picked.Count} vault item(s)? This cannot be undone.\n\n" +
+            string.Join("\n", picked.Take(5).Select(r => "  · " + r.Name))
+            + (picked.Count > 5 ? $"\n  · …and {picked.Count - 5} more" : ""),
+            "Delete", ConfirmSeverity.Warning);
+        if (!ok) return;
+
+        foreach (var r in picked)
+        {
+            try { await _vault.DeleteAsync(r.Item.Id); }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "Bulk-delete vault item #{Id} failed", r.Item.Id);
+            }
+        }
         await ReloadAsync();
     }
 

@@ -24,7 +24,12 @@
              Removed MaxWidth entirely; HorizontalAlignment="Stretch" makes
              the StackPanel fill the ScrollViewer's full client area.
              Vertical Margin=20 stays for breathing room from title bar. -->
-        <StackPanel Margin="0,20" HorizontalAlignment="Stretch">
+        <!-- Phase 71o — horizontal padding so the content cards
+             don't sit flush against the (collapsed) sidebar. Other
+             pages already set Margin="24,20" on their root grid;
+             OverviewView was the only one missing horizontal
+             breathing room. -->
+        <StackPanel Margin="20,20,20,20" HorizontalAlignment="Stretch">
 
             <!-- ─── Page header ─── -->
             <StackPanel Margin="0,0,0,16">
@@ -47,6 +52,23 @@
             </StackPanel>
 
             <!-- ─── Stat tiles ─── -->
+            <!-- Phase 71u — hero tile redesign.
+                 Each tile is a layered Border:
+                   1) Outer  HeroTile style (rounded 8, faint border,
+                      hover lift via drop-shadow).
+                   2) Top accent bar (3 px) tinted by category hue —
+                      the visual cue that ties tile to its sidebar
+                      colour.
+                   3) Soft tinted background fill (Hue*Soft, ~8% alpha)
+                      so each tile reads as "the green / amber / blue
+                      one" without going neon.
+                   4) Big MDL2 glyph in the top-right corner at low
+                      opacity — extra visual identity, doesn't fight
+                      the number.
+                   5) Header (uppercase 10 px), big number, sublabel.
+                 Padding tightened from 16,14 → 14,12 so cards are a
+                 touch shorter; height now naturally caps around
+                 ~108 px vs the ~120 of the previous design. -->
             <Border Visibility="{Binding ShowHeroStats, Converter={StaticResource BoolToVis}}" Margin="0,0,0,16">
             <Grid>
                 <Grid.ColumnDefinitions>
@@ -57,113 +79,154 @@
                     <ColumnDefinition Width="*"/>
                 </Grid.ColumnDefinitions>
 
-                <!-- Runs -->
-                <Border Grid.Column="0" Style="{StaticResource Card}" Padding="16,14" Margin="0,0,8,0"
-                        BorderBrush="{StaticResource Border}" BorderThickness="1"
-                        Cursor="Hand">
+                <!-- Runs — accent blue -->
+                <Border Grid.Column="0" Style="{StaticResource HeroTile}" Margin="0,0,6,0" Cursor="Hand">
                     <Border.InputBindings>
-                        <MouseBinding MouseAction="LeftClick" Command="{Binding GoProfilesCommand}"/>
+                        <MouseBinding MouseAction="LeftClick" Command="{Binding GoRunsCommand}"/>
                     </Border.InputBindings>
-                    <StackPanel>
-                        <TextBlock Text="🚀  TOTAL RUNS" Style="{StaticResource MutedText}" FontSize="10"/>
-                        <TextBlock Text="{Binding TotalRuns}"
-                                   FontSize="26" FontWeight="SemiBold"
+                    <Grid>
+                        <Border CornerRadius="8" Background="{StaticResource AccentSoft}"/>
+                        <Border CornerRadius="8,8,0,0" Height="3" VerticalAlignment="Top"
+                                Background="{StaticResource Accent}"/>
+                        <TextBlock Text="&#xE945;" FontFamily="Segoe MDL2 Assets"
+                                   FontSize="44" Opacity="0.10"
                                    Foreground="{StaticResource Accent}"
-                                   Margin="0,6,0,0"/>
-                        <Grid Margin="0,8,0,0">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="*"/>
-                            </Grid.ColumnDefinitions>
-                            <StackPanel Grid.Column="0">
-                                <TextBlock Text="{Binding SuccessfulRuns}"
-                                           FontSize="13" FontWeight="SemiBold"
-                                           Foreground="{StaticResource OkBrush}"/>
-                                <TextBlock Text="ok" Style="{StaticResource MutedText}" FontSize="10"/>
-                            </StackPanel>
-                            <StackPanel Grid.Column="1">
-                                <TextBlock Text="{Binding FailedRuns}"
-                                           FontSize="13" FontWeight="SemiBold"
-                                           Foreground="{StaticResource ErrBrush}"/>
-                                <TextBlock Text="fail" Style="{StaticResource MutedText}" FontSize="10"/>
-                            </StackPanel>
-                            <StackPanel Grid.Column="2">
-                                <TextBlock Text="{Binding RunningRuns}"
-                                           FontSize="13" FontWeight="SemiBold"
-                                           Foreground="{StaticResource Accent}"/>
-                                <TextBlock Text="run" Style="{StaticResource MutedText}" FontSize="10"/>
-                            </StackPanel>
-                        </Grid>
-                    </StackPanel>
+                                   HorizontalAlignment="Right" VerticalAlignment="Bottom"
+                                   Margin="0,0,8,2"/>
+                        <StackPanel Margin="14,12,14,12">
+                            <TextBlock Text="🚀  TOTAL RUNS" Style="{StaticResource MutedText}" FontSize="10"/>
+                            <TextBlock Text="{Binding TotalRuns}"
+                                       FontSize="26" FontWeight="SemiBold"
+                                       Foreground="{StaticResource Accent}"
+                                       Margin="0,4,0,0"/>
+                            <Grid Margin="0,6,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0">
+                                    <TextBlock Text="{Binding SuccessfulRuns}"
+                                               FontSize="13" FontWeight="SemiBold"
+                                               Foreground="{StaticResource OkBrush}"/>
+                                    <TextBlock Text="ok" Style="{StaticResource MutedText}" FontSize="10"/>
+                                </StackPanel>
+                                <StackPanel Grid.Column="1">
+                                    <TextBlock Text="{Binding FailedRuns}"
+                                               FontSize="13" FontWeight="SemiBold"
+                                               Foreground="{StaticResource ErrBrush}"/>
+                                    <TextBlock Text="fail" Style="{StaticResource MutedText}" FontSize="10"/>
+                                </StackPanel>
+                                <StackPanel Grid.Column="2">
+                                    <TextBlock Text="{Binding RunningRuns}"
+                                               FontSize="13" FontWeight="SemiBold"
+                                               Foreground="{StaticResource Accent}"/>
+                                    <TextBlock Text="run" Style="{StaticResource MutedText}" FontSize="10"/>
+                                </StackPanel>
+                            </Grid>
+                        </StackPanel>
+                    </Grid>
                 </Border>
 
-                <!-- Success rate -->
-                <Border Grid.Column="1" Style="{StaticResource Card}" Padding="16,14" Margin="4,0,4,0"
-                        BorderBrush="{StaticResource Border}" BorderThickness="1">
-                    <StackPanel>
-                        <TextBlock Text="✅  SUCCESS RATE" Style="{StaticResource MutedText}" FontSize="10"/>
-                        <TextBlock Text="{Binding SuccessRateLabel}"
-                                   FontSize="26" FontWeight="SemiBold"
-                                   Foreground="{Binding SuccessRateBrushKey, Converter={StaticResource ResourceKeyToBrush}}"
-                                   Margin="0,6,0,0"/>
-                        <TextBlock Text="last completed runs"
-                                   Style="{StaticResource MutedText}" FontSize="10" Margin="0,8,0,0"/>
-                    </StackPanel>
+                <!-- Success rate — orange -->
+                <Border Grid.Column="1" Style="{StaticResource HeroTile}" Margin="3,0,3,0">
+                    <Grid>
+                        <Border CornerRadius="8" Background="{StaticResource HueOrangeSoft}"/>
+                        <Border CornerRadius="8,8,0,0" Height="3" VerticalAlignment="Top"
+                                Background="{StaticResource HueOrange}"/>
+                        <TextBlock Text="&#xE73E;" FontFamily="Segoe MDL2 Assets"
+                                   FontSize="44" Opacity="0.10"
+                                   Foreground="{StaticResource HueOrange}"
+                                   HorizontalAlignment="Right" VerticalAlignment="Bottom"
+                                   Margin="0,0,8,2"/>
+                        <StackPanel Margin="14,12,14,12">
+                            <TextBlock Text="✅  SUCCESS RATE" Style="{StaticResource MutedText}" FontSize="10"/>
+                            <TextBlock Text="{Binding SuccessRateLabel}"
+                                       FontSize="26" FontWeight="SemiBold"
+                                       Foreground="{Binding SuccessRateBrushKey, Converter={StaticResource ResourceKeyToBrush}}"
+                                       Margin="0,4,0,0"/>
+                            <TextBlock Text="last completed runs"
+                                       Style="{StaticResource MutedText}" FontSize="10" Margin="0,6,0,0"/>
+                        </StackPanel>
+                    </Grid>
                 </Border>
 
-                <!-- Profiles -->
-                <Border Grid.Column="2" Style="{StaticResource Card}" Padding="16,14" Margin="4,0,4,0"
-                        BorderBrush="{StaticResource Border}" BorderThickness="1"
-                        Cursor="Hand">
+                <!-- Profiles — green -->
+                <Border Grid.Column="2" Style="{StaticResource HeroTile}" Margin="3,0,3,0" Cursor="Hand">
                     <Border.InputBindings>
                         <MouseBinding MouseAction="LeftClick" Command="{Binding GoProfilesCommand}"/>
                     </Border.InputBindings>
-                    <StackPanel>
-                        <TextBlock Text="👤  PROFILES" Style="{StaticResource MutedText}" FontSize="10"/>
-                        <TextBlock Text="{Binding ProfileCount}"
-                                   FontSize="26" FontWeight="SemiBold"
+                    <Grid>
+                        <Border CornerRadius="8" Background="{StaticResource HueGreenSoft}"/>
+                        <Border CornerRadius="8,8,0,0" Height="3" VerticalAlignment="Top"
+                                Background="{StaticResource HueGreen}"/>
+                        <TextBlock Text="&#xE77B;" FontFamily="Segoe MDL2 Assets"
+                                   FontSize="44" Opacity="0.10"
                                    Foreground="{StaticResource HueGreen}"
-                                   Margin="0,6,0,0"/>
-                        <TextBlock Text="installed identities"
-                                   Style="{StaticResource MutedText}" FontSize="10" Margin="0,8,0,0"/>
-                    </StackPanel>
+                                   HorizontalAlignment="Right" VerticalAlignment="Bottom"
+                                   Margin="0,0,8,2"/>
+                        <StackPanel Margin="14,12,14,12">
+                            <TextBlock Text="👤  PROFILES" Style="{StaticResource MutedText}" FontSize="10"/>
+                            <TextBlock Text="{Binding ProfileCount}"
+                                       FontSize="26" FontWeight="SemiBold"
+                                       Foreground="{StaticResource HueGreen}"
+                                       Margin="0,4,0,0"/>
+                            <TextBlock Text="installed identities"
+                                       Style="{StaticResource MutedText}" FontSize="10" Margin="0,6,0,0"/>
+                        </StackPanel>
+                    </Grid>
                 </Border>
 
-                <!-- Vault -->
-                <Border Grid.Column="3" Style="{StaticResource Card}" Padding="16,14" Margin="4,0,4,0"
-                        BorderBrush="{StaticResource Border}" BorderThickness="1"
-                        Cursor="Hand">
+                <!-- Vault — amber -->
+                <Border Grid.Column="3" Style="{StaticResource HeroTile}" Margin="3,0,3,0" Cursor="Hand">
                     <Border.InputBindings>
                         <MouseBinding MouseAction="LeftClick" Command="{Binding GoVaultCommand}"/>
                     </Border.InputBindings>
-                    <StackPanel>
-                        <TextBlock Text="🔐  VAULT" Style="{StaticResource MutedText}" FontSize="10"/>
-                        <TextBlock Text="{Binding VaultStatusText}"
-                                   FontSize="18" FontWeight="SemiBold"
-                                   Foreground="{Binding VaultStatusBrushKey, Converter={StaticResource ResourceKeyToBrush}}"
-                                   Margin="0,8,0,0"/>
-                        <TextBlock Text="encrypted credentials"
-                                   Style="{StaticResource MutedText}" FontSize="10" Margin="0,8,0,0"/>
-                    </StackPanel>
+                    <Grid>
+                        <Border CornerRadius="8" Background="{StaticResource HueAmberSoft}"/>
+                        <Border CornerRadius="8,8,0,0" Height="3" VerticalAlignment="Top"
+                                Background="{StaticResource HueAmber}"/>
+                        <TextBlock Text="&#xE192;" FontFamily="Segoe MDL2 Assets"
+                                   FontSize="44" Opacity="0.10"
+                                   Foreground="{StaticResource HueAmber}"
+                                   HorizontalAlignment="Right" VerticalAlignment="Bottom"
+                                   Margin="0,0,8,2"/>
+                        <StackPanel Margin="14,12,14,12">
+                            <TextBlock Text="🔐  VAULT" Style="{StaticResource MutedText}" FontSize="10"/>
+                            <TextBlock Text="{Binding VaultStatusText}"
+                                       FontSize="18" FontWeight="SemiBold"
+                                       Foreground="{Binding VaultStatusBrushKey, Converter={StaticResource ResourceKeyToBrush}}"
+                                       Margin="0,6,0,0"/>
+                            <TextBlock Text="encrypted credentials"
+                                       Style="{StaticResource MutedText}" FontSize="10" Margin="0,6,0,0"/>
+                        </StackPanel>
+                    </Grid>
                 </Border>
 
-                <!-- Traffic 24h -->
-                <Border Grid.Column="4" Style="{StaticResource Card}" Padding="16,14" Margin="8,0,0,0"
-                        BorderBrush="{StaticResource Border}" BorderThickness="1"
-                        Cursor="Hand">
+                <!-- Traffic 24h — violet -->
+                <Border Grid.Column="4" Style="{StaticResource HeroTile}" Margin="6,0,0,0" Cursor="Hand">
                     <Border.InputBindings>
                         <MouseBinding MouseAction="LeftClick" Command="{Binding GoTrafficCommand}"/>
                     </Border.InputBindings>
-                    <StackPanel>
-                        <TextBlock Text="📈  TRAFFIC · 24H" Style="{StaticResource MutedText}" FontSize="10"/>
-                        <TextBlock Text="{Binding Traffic24hText}"
-                                   FontSize="22" FontWeight="SemiBold"
-                                   Foreground="{StaticResource HueBlue}"
-                                   Margin="0,6,0,0"/>
-                        <TextBlock Text="{Binding TrafficRequestsText, StringFormat='{}{0} requests'}"
-                                   Style="{StaticResource MutedText}" FontSize="10" Margin="0,8,0,0"/>
-                    </StackPanel>
+                    <Grid>
+                        <Border CornerRadius="8" Background="{StaticResource HueVioletSoft}"/>
+                        <Border CornerRadius="8,8,0,0" Height="3" VerticalAlignment="Top"
+                                Background="{StaticResource HueViolet}"/>
+                        <TextBlock Text="&#xE9D9;" FontFamily="Segoe MDL2 Assets"
+                                   FontSize="44" Opacity="0.10"
+                                   Foreground="{StaticResource HueViolet}"
+                                   HorizontalAlignment="Right" VerticalAlignment="Bottom"
+                                   Margin="0,0,8,2"/>
+                        <StackPanel Margin="14,12,14,12">
+                            <TextBlock Text="📈  TRAFFIC · 24H" Style="{StaticResource MutedText}" FontSize="10"/>
+                            <TextBlock Text="{Binding Traffic24hText}"
+                                       FontSize="22" FontWeight="SemiBold"
+                                       Foreground="{StaticResource HueViolet}"
+                                       Margin="0,4,0,0"/>
+                            <TextBlock Text="{Binding TrafficRequestsText, StringFormat='{}{0} requests'}"
+                                       Style="{StaticResource MutedText}" FontSize="10" Margin="0,6,0,0"/>
+                        </StackPanel>
+                    </Grid>
                 </Border>
             </Grid>
             </Border>
@@ -217,8 +280,9 @@
                                    FontSize="11" FontWeight="SemiBold"
                                    Foreground="{StaticResource Text}"/>
                         <Button Grid.Column="1" Content="View all runs"
-                                Command="{Binding GoLogsCommand}"
-                                Padding="10,4"/>
+                                Command="{Binding GoRunsCommand}"
+                                Padding="10,4"
+                                ToolTip="Open the Runs history grid"/>
                     </Grid>
                     <!-- ─── Compact run rows ─────────────────────────
                          Each run is a single-line card with a coloured
@@ -347,31 +411,58 @@
             </Border>
             </Border>
 
-            <!-- ─── Footer counters (proxy summary + traffic today) ─── -->
+            <!-- ─── Footer counters (proxy summary + traffic today) ───
+                 Phase 71u — same hero treatment as the top stat row,
+                 just shorter (no body row, single big value). Keeps
+                 visual consistency: every "tile" on the page reads
+                 the same way (top accent bar + tinted bg + glyph). -->
             <Border Visibility="{Binding ShowProxySummary, Converter={StaticResource BoolToVis}}" Margin="0,0,0,8">
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="*"/>
                 </Grid.ColumnDefinitions>
-                <Border Grid.Column="0" Style="{StaticResource Card}" Padding="14,10" Margin="0,0,8,0">
-                    <StackPanel>
-                        <TextBlock Text="🌐  PROXIES" Style="{StaticResource MutedText}" FontSize="10"/>
-                        <TextBlock Text="{Binding ProxyCount}"
-                                   FontSize="20" FontWeight="SemiBold"
+                <Border Grid.Column="0" Style="{StaticResource HeroTile}" Margin="0,0,6,0" Cursor="Hand">
+                    <Border.InputBindings>
+                        <MouseBinding MouseAction="LeftClick" Command="{Binding GoProxyCommand}"/>
+                    </Border.InputBindings>
+                    <Grid>
+                        <Border CornerRadius="8" Background="{StaticResource HueTealSoft}"/>
+                        <Border CornerRadius="8,8,0,0" Height="3" VerticalAlignment="Top"
+                                Background="{StaticResource HueTeal}"/>
+                        <TextBlock Text="&#xE968;" FontFamily="Segoe MDL2 Assets"
+                                   FontSize="40" Opacity="0.10"
                                    Foreground="{StaticResource HueTeal}"
-                                   Margin="0,4,0,0"/>
-                    </StackPanel>
+                                   HorizontalAlignment="Right" VerticalAlignment="Bottom"
+                                   Margin="0,0,10,4"/>
+                        <StackPanel Margin="14,10,14,10">
+                            <TextBlock Text="🌐  PROXIES" Style="{StaticResource MutedText}" FontSize="10"/>
+                            <TextBlock Text="{Binding ProxyCount}"
+                                       FontSize="20" FontWeight="SemiBold"
+                                       Foreground="{StaticResource HueTeal}"
+                                       Margin="0,4,0,0"/>
+                        </StackPanel>
+                    </Grid>
                 </Border>
-                <Border Grid.Column="1" Style="{StaticResource Card}" Padding="14,10" Margin="8,0,0,0"
+                <Border Grid.Column="1" Style="{StaticResource HeroTile}" Margin="6,0,0,0"
                         Visibility="{Binding ShowTrafficToday, Converter={StaticResource BoolToVis}}">
-                    <StackPanel>
-                        <TextBlock Text="🌐  UNIQUE DOMAINS · 24H" Style="{StaticResource MutedText}" FontSize="10"/>
-                        <TextBlock Text="{Binding TrafficUniqueDomains}"
-                                   FontSize="20" FontWeight="SemiBold"
+                    <Grid>
+                        <Border CornerRadius="8" Background="{StaticResource HueVioletSoft}"/>
+                        <Border CornerRadius="8,8,0,0" Height="3" VerticalAlignment="Top"
+                                Background="{StaticResource HueViolet}"/>
+                        <TextBlock Text="&#xE774;" FontFamily="Segoe MDL2 Assets"
+                                   FontSize="40" Opacity="0.10"
                                    Foreground="{StaticResource HueViolet}"
-                                   Margin="0,4,0,0"/>
-                    </StackPanel>
+                                   HorizontalAlignment="Right" VerticalAlignment="Bottom"
+                                   Margin="0,0,10,4"/>
+                        <StackPanel Margin="14,10,14,10">
+                            <TextBlock Text="🌐  UNIQUE DOMAINS · 24H" Style="{StaticResource MutedText}" FontSize="10"/>
+                            <TextBlock Text="{Binding TrafficUniqueDomains}"
+                                       FontSize="20" FontWeight="SemiBold"
+                                       Foreground="{StaticResource HueViolet}"
+                                       Margin="0,4,0,0"/>
+                        </StackPanel>
+                    </Grid>
                 </Border>
             </Grid>
             </Border>

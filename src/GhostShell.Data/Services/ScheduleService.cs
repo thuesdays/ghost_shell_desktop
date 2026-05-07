@@ -41,6 +41,9 @@ public sealed class ScheduleService : IScheduleService
         next_fire_at    AS NextFireAt,
         fire_count      AS FireCount,
         fail_count      AS FailCount,
+        use_jitter      AS UseJitter,
+        fires_today     AS FiresToday,
+        last_fire_day   AS LastFireDay,
         created_at      AS CreatedAt,
         updated_at      AS UpdatedAt
     """;
@@ -81,7 +84,9 @@ public sealed class ScheduleService : IScheduleService
                  active_days,
                  active_from_hour, active_to_hour,
                  enabled, last_fired_at, next_fire_at,
-                 fire_count, fail_count, created_at, updated_at)
+                 fire_count, fail_count,
+                 use_jitter, fires_today, last_fire_day,
+                 created_at, updated_at)
             VALUES
                 (@Name, @TargetKind, @TargetName, @TriggerKind,
                  @CronExpr, @IntervalSec,
@@ -89,7 +94,9 @@ public sealed class ScheduleService : IScheduleService
                  @ActiveDays,
                  @ActiveFromHour, @ActiveToHour,
                  @Enabled, @LastFiredAt, @NextFireAt,
-                 @FireCount, @FailCount, @CreatedAt, @UpdatedAt);
+                 @FireCount, @FailCount,
+                 @UseJitter, @FiresToday, @LastFireDay,
+                 @CreatedAt, @UpdatedAt);
             SELECT last_insert_rowid();
         """;
         var id = await _db.QueueAsync(c => c.ExecuteScalarAsync<long>(sql, row), ct);
@@ -121,6 +128,9 @@ public sealed class ScheduleService : IScheduleService
                    next_fire_at     = @NextFireAt,
                    fire_count       = @FireCount,
                    fail_count       = @FailCount,
+                   use_jitter       = @UseJitter,
+                   fires_today      = @FiresToday,
+                   last_fire_day    = @LastFireDay,
                    updated_at       = @UpdatedAt
              WHERE id               = @Id;
         """;
@@ -220,6 +230,64 @@ public sealed class ScheduleService : IScheduleService
         }), ct);
     }
 
+    public async Task<int> IncrementFiresTodayAsync(
+        long id, DateOnly localDay, CancellationToken ct = default)
+    {
+        // Phase 71cc — atomic upsert of the daily counter. The CASE
+        // expression reads the existing last_fire_day:
+        //   • matches today → +1
+        //   • doesn't match (yesterday or null) → reset to 1
+        // Same UPDATE either way so we don't need a separate read +
+        // conditional write round-trip.
+        var dayStr = localDay.ToString("yyyy-MM-dd");
+        const string sql = """
+            UPDATE schedules
+               SET fires_today = CASE
+                                   WHEN last_fire_day = @day THEN fires_today + 1
+                                   ELSE 1
+                                 END,
+                   last_fire_day = @day,
+                   updated_at    = @now
+             WHERE id = @id;
+            SELECT fires_today FROM schedules WHERE id = @id;
+        """;
+        return await _db.QueueAsync(c => c.ExecuteScalarAsync<int>(sql, new
+        {
+            id,
+            day = dayStr,
+            now = DateTime.UtcNow,
+        }), ct);
+    }
+
+    public async Task<int> GetFiresTodayAsync(
+        long id, DateOnly localDay, CancellationToken ct = default)
+    {
+        // Phase 71cc — read-or-reset. A single SELECT tells us whether
+        // last_fire_day matches today; if it doesn't, we zero the
+        // counter in the same call. Avoids a no-op write on the hot
+        // path where the day hasn't rolled.
+        var dayStr = localDay.ToString("yyyy-MM-dd");
+        const string sql = """
+            SELECT fires_today, last_fire_day FROM schedules WHERE id = @id;
+        """;
+        var row = await _db.QueueAsync(c => c.QuerySingleOrDefaultAsync<(int FiresToday, string? LastFireDay)>(
+            sql, new { id }), ct);
+        if (row.LastFireDay == dayStr) return row.FiresToday;
+        // Stale or null — reset.
+        const string reset = """
+            UPDATE schedules
+               SET fires_today = 0,
+                   last_fire_day = @day,
+                   updated_at = @now
+             WHERE id = @id;
+        """;
+        await _db.QueueAsync(c => c.ExecuteAsync(reset, new
+        {
+            id, day = dayStr, now = DateTime.UtcNow,
+        }), ct);
+        return 0;
+    }
+
     /// <summary>Force-tag a DateTime as UTC. Inputs from the runner
     /// host are constructed via DateTime.UtcNow / .ToUniversalTime(),
     /// but a value with Kind=Unspecified would round-trip through
@@ -254,6 +322,9 @@ public sealed class ScheduleService : IScheduleService
         public DateTime? NextFireAt { get; init; }
         public int FireCount { get; init; }
         public int FailCount { get; init; }
+        public int UseJitter { get; init; } = 1;
+        public int FiresToday { get; init; }
+        public string? LastFireDay { get; init; }
         public DateTime CreatedAt { get; init; }
         public DateTime UpdatedAt { get; init; }
     }
@@ -283,6 +354,9 @@ public sealed class ScheduleService : IScheduleService
         NextFireAt  = ForceUtc(r.NextFireAt),
         FireCount   = r.FireCount,
         FailCount   = r.FailCount,
+        UseJitter   = r.UseJitter == 1,
+        FiresToday  = r.FiresToday,
+        LastFireDay = r.LastFireDay,
         CreatedAt   = ForceUtc(r.CreatedAt) ?? default,
         UpdatedAt   = ForceUtc(r.UpdatedAt) ?? default,
     };
@@ -310,6 +384,9 @@ public sealed class ScheduleService : IScheduleService
         NextFireAt  = s.NextFireAt,
         FireCount   = s.FireCount,
         FailCount   = s.FailCount,
+        UseJitter   = s.UseJitter ? 1 : 0,
+        FiresToday  = s.FiresToday,
+        LastFireDay = s.LastFireDay,
         CreatedAt   = s.CreatedAt,
         UpdatedAt   = s.UpdatedAt,
     };

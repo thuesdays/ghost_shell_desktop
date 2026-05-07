@@ -10,11 +10,11 @@ This is a **clean rewrite**. The legacy Flask + browser dashboard
 behavior, schema, and UX patterns — we read from it, we don't depend
 on it.
 
-## Status — Phase 71 (graceful self-update with active-runs drain)
+## Status — Phase 71cc (UI redesign + scheduler rewrite + theming)
 
 - [x] Solution + 4 projects scaffolded
 - [x] Core domain models (Profile, Run, Proxy, DeviceTemplate, ProxyHealthEvent…)
-- [x] SQLite persistence + migrations V1-V25
+- [x] SQLite persistence + migrations V1-V28
 - [x] WPF window, dense theme, custom chrome, app icon
 - [x] Profiles + Proxy + Runs pages with full CRUD
 - [x] Profile editor: name, device template (~25 presets), language, proxy, enrich
@@ -43,9 +43,45 @@ on it.
 - [x] **Profile-scoped vault aliases** — `{{vault.SEED}}`, `{{vault.PASSWORD}}`, `{{vault.TOTP}}` resolve through profile-bound credentials, no numeric IDs (Phase 69)
 - [x] **Bulk vault import** — paste CSV / load file / fetch Google Sheet, map columns to fields, auto-bind rows to profiles by name (Phase 69)
 - [x] **Auto-rotate IP on launch** — per-profile checkbox, triggers proxy rotation URL pre-launch (Phase 71)
+- [x] **Theming** — Dark (Linear/Vercel) + Light (Solar) palettes, Settings → Appearance picker (Phase 71aa)
+- [x] **Scheduler rewrite** — auto-jitter from window/runs_per_day, persistent daily counter, no more "150 fires in 4 hours" bug (Phase 71cc)
+- [x] **Run History counters** — REQ / ADS / CAPTCHA columns now reflect real per-run numbers (Phase 71dd)
+- [x] **Navigation back-stack** — deep-link clicks (Overview tiles) leave a Back chip; sidebar resets it (Phase 71v)
 - [ ] Auto-update — Velopack (deferred)
 
-### v0.0.2.8 — auto-rotate IP per profile (this release)
+### v0.0.3.0 — UI redesign + scheduler rewrite + theming + Run History fixes (this release)
+
+A wide-front polish pass touching nearly every page plus two correctness fixes that meaningfully change runtime behaviour. Six broad areas:
+
+**1. Scheduler rewrite (correctness — biggest user-facing fix).**
+The "Simple" trigger no longer takes independent min/max-jitter pairs. The runner now derives the gap automatically from `(active_window_seconds / runs_per_day)`, with a single new `UseJitter` checkbox that either uniformly spaces fires or randomises ±50% around the computed mean. Old behaviour: 150 runs in a 7am-9pm window with default 20-180s jitter fired the entire daily quota in the first ~4 hours then went silent. New behaviour: 14h × 150 → 336s mean (~5.6 min between fires), spread evenly across the window. Migration V28 adds three columns to `schedules`: `use_jitter`, `fires_today`, `last_fire_day`. Daily counter is now persistent (survives app restarts — pre-fix, relaunching at noon let the user blow past the cap and fire another 150 runs the same day). Outside-active-window deferrals jump straight to next-window-start instead of writing +1-minute updates every 30 seconds overnight. Profile-already-running fires return `Deferred` (no fire_count bump, no log spam) instead of `Launched`. Legacy MinJitter/MaxJitter columns kept for back-compat — pre-V28 rows still work until they're re-edited, after which jitter goes auto-computed.
+
+**2. Theming infrastructure (Settings → Appearance).**
+Two themes shipped: **Dark — Linear/Vercel** (high-contrast inkblot, near-black canvas, big delta between BgBase and BgRaised so cards lift visibly) and **Light — Solar** (near-white canvas, pure-white cards, soft gray sidebar, hue palette punched up to tailwind-500 weights for legibility on white). Picker is a new tab in Settings with two click-to-select tiles showing colour-swatch previews. Selection persists via `SettingsKeys.UiTheme`; runtime applies the saved theme at startup BEFORE MainWindow's XAML parses (StaticResource brushes bake at parse time, so live-swap isn't possible without a full DynamicResource migration). Theme change prompts a restart; the restart is wrapped in `cmd /c timeout /t 1 && start "" "exe"` so the singleton mutex can release before the new instance starts.
+
+**3. Profiles redesign.**
+Card action strip rebuilt: Start button is right-aligned, lime-green (`ButtonOk`), MinWidth ≈ 92px (was full-width primary blue). Stop slot uses `ButtonDanger` red. Edit icon stays compact at 36px. Status pill is a real chip with coloured dot + text ("idle" / "ready" / "starting" / "running") instead of the previous em-dash that read as a stretched-icon glitch. Bulk-action strip cleaned: Test-proxies and Self-check moved to the row context menu; the strip now shows only Delete (muted-red `ButtonDangerSoft` so the user doesn't reflexively click) and Start (lime green). Table view gets a tri-state header checkbox for select-all/none with `IsAllSelected` on the VM and a `_suppressSelectionBubble` guard so 500-row bulk selects aren't O(N²).
+
+**4. Overview dashboard redesign.**
+Five hero stat tiles redrawn as a layered template: top-of-card 3px accent bar in the category hue, soft-tinted Hue*Soft background (~8% alpha), large faded MDL2 watermark glyph in the bottom-right corner, and a 14×12px-padded body. Per-tile colours: Total Runs (Accent blue), Success Rate (orange), Profiles (green), Vault (amber), Traffic 24h (violet). Hover lifts via DropShadow. Bottom Proxies / Unique Domains tiles get the same treatment. **"View all runs"** button on Recent Activity card now navigates to the **Runs** page (not Logs — that was the previous binding, an obvious bug). Total Runs tile is now clickable and routes to Runs.
+
+**5. Navigation back-stack + Back chip.**
+`INavigationService` gains `pushHistory: bool` parameter, `CanGoBack`, `GoBack()`. Sidebar/footer clicks pass `pushHistory=false` (clears the stack — sidebar is "root nav"); Overview tile clicks pass `pushHistory=true` (pushes current onto stack). MainWindow's title bar shows a small **"⟨ Back"** chip when `CanGoBack=true`. Click → returns to whichever page the user came from. Sidebar nav from a deep-linked page resets the stack so the chip disappears — sidebar should never leave a Back arrow pointing at wherever you happened to be.
+
+**6. Window-level loading overlay.**
+`LoadingOverlay` moved out of individual pages (ProfilesView, GroupsView) into MainWindow at the body-Grid level. `MainViewModel.IsBusy` bubbles `Current?.IsBusy` via `INotifyPropertyChanged` subscription (with `partial void OnCurrentChanged(old, new)` to swap subscriptions without leaking). Body Grid gets a `Style.Trigger`-driven `BlurEffect` (Radius=8 Gaussian) when IsBusy=true, so the sidebar gets dimmed alongside the content. The overlay sibling sits on top and shows the spinner + "Loading data…" caption.
+
+**Run History counters fix.** Columns REQ / ADS / CAPTCHA in the Runs page were always 0 because nothing ever wrote to `runs.total_queries / total_ads / captchas` — `RunService.UpdateCountersAsync` simply didn't exist. Added it; `ScriptRunner.RunCounters` now also tracks `QueriesExecuted` (incremented on `search_query`, +N on `commercial_inflate`) and `CaptchasSolved` (on `solve_captcha` detect). RealProfileRunner stamps the totals onto the runs row right after `ExecuteAsync` returns. Historical runs stay 0; new runs surface real numbers.
+
+**Bonus fixes**:
+- Self-check `tz=?` everywhere — variable was never assigned from probe results despite the JS capturing it. Fixed: now logs `tz=Europe/Kyiv` (or wherever) and persists to DB column.
+- `[RAW]` log lines with `[00:00:00]` timestamp — `LogParser` regex expected `WAR` but Serilog emits `WRN` for warnings. Every WARN line silently fell to the RAW path. Fixed regex + added secondary embedded-timestamp extraction so partial RAW lines still get a usable time.
+- Cancellation wording: `"Script ... cancelled (0/2 steps failed)"` (which read as "everything succeeded") replaced with `"cancelled after N step(s) (browser closed externally or user stopped)"`.
+- Status badge on profile cards: idle state now reads "idle" instead of em-dash; `Run History` exit-130 / external_close runs render with proper status pills.
+
+Schema bump: **Migration V28** (schedules: `use_jitter`, `fires_today`, `last_fire_day`).
+
+### v0.0.2.8 — auto-rotate IP per profile
 
 Single focused feature: **Per-profile "Auto-rotate IP on launch" toggle.** When enabled AND the assigned proxy has `IsRotating=true` + a non-empty rotation URL, the runtime hits that rotation URL with a simple HTTP GET right BEFORE launching the browser, getting a fresh IP for each session. Best-effort design: if the rotation request times out or fails, the runner logs a warning and proceeds with the existing IP (launch isn't aborted). Default OFF for existing profiles (preserves behaviour). 
 

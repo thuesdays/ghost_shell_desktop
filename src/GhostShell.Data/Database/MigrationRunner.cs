@@ -42,7 +42,7 @@ public sealed class MigrationRunner
 
     // Phase 37 audit fix #4: All known migration versions including tolerant ones (11, 13-23).
     // Used to detect downgrade scenario where DB schema is newer than binary's knowledge.
-    private static readonly int[] KnownVersions = new[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26 };
+    private static readonly int[] KnownVersions = new[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28 };
 
     public void Run()
     {
@@ -191,6 +191,24 @@ public sealed class MigrationRunner
         if (!applied.Contains(26))
         {
             ApplyTolerantStatements(conn, 26, Migrations_V26.Statements);
+        }
+
+        // V27 — Unified vault model (Phase 71). Adds email, field_meta_json,
+        // extras_json columns to vault_items so a single item can hold
+        // arbitrary user-defined fields with per-field encrypted / is_totp
+        // flags. Tolerant: ALTERs throw "duplicate column" on re-run.
+        if (!applied.Contains(27))
+        {
+            ApplyTolerantStatements(conn, 27, Migrations_V27.Statements);
+        }
+
+        // V28 — Scheduler simplification (Phase 71cc). Adds use_jitter,
+        // fires_today, last_fire_day columns to schedules so the runner
+        // can compute the gap automatically from window/runs_per_day +
+        // persist the daily counter across app restarts. Tolerant.
+        if (!applied.Contains(28))
+        {
+            ApplyTolerantStatements(conn, 28, Migrations_V28.Statements);
         }
     }
 

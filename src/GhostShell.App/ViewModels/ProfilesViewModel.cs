@@ -83,7 +83,43 @@ public sealed partial class ProfilesViewModel : BaseViewModel
     [ObservableProperty] private int _selectedCount;
     public bool HasSelection => SelectedCount > 0;
     partial void OnSelectedCountChanged(int value)
-        => OnPropertyChanged(nameof(HasSelection));
+    {
+        OnPropertyChanged(nameof(HasSelection));
+        OnPropertyChanged(nameof(IsAllSelected));
+    }
+
+    /// <summary>Phase 71t — header-checkbox tri-state for the
+    /// Profiles table. Mirrors VaultViewModel.IsAllSelected:
+    ///   true  → every row checked
+    ///   false → none checked
+    ///   null  → some-but-not-all (indeterminate visual)
+    /// Setter propagates to all rows in one pass; the
+    /// <see cref="_suppressSelectionBubble"/> guard prevents the
+    /// per-row PropertyChanged handler from quadratically recounting
+    /// while the loop is mid-flight.</summary>
+    private bool _suppressSelectionBubble;
+    public bool? IsAllSelected
+    {
+        get
+        {
+            if (Items.Count == 0) return false;
+            if (SelectedCount == 0) return false;
+            if (SelectedCount == Items.Count) return true;
+            return null;
+        }
+        set
+        {
+            var target = value == true;
+            _suppressSelectionBubble = true;
+            try
+            {
+                foreach (var r in Items) r.IsSelected = target;
+            }
+            finally { _suppressSelectionBubble = false; }
+            SelectedCount = Items.Count(i => i.IsSelected);
+            OnPropertyChanged(nameof(IsAllSelected));
+        }
+    }
 
     public override async Task OnNavigatedToAsync() => await ReloadAsync();
 
@@ -118,6 +154,9 @@ public sealed partial class ProfilesViewModel : BaseViewModel
 
     private void OnRowPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
     {
+        // Phase 71t — IsAllSelected setter does the count once after
+        // its bulk-set loop; skip the per-row recount while it runs.
+        if (_suppressSelectionBubble) return;
         if (e.PropertyName == nameof(ProfileRowVm.IsSelected))
             RecountSelected();
     }
@@ -635,12 +674,16 @@ public sealed partial class ProfileRowVm : ObservableObject
 
     // ─── Card-only display helpers ──────────────────────────────
     /// <summary>Status label shown on cards: "running" / "ready" /
-    /// "starting" / "—". Mirrors the legacy web's pill text.</summary>
+    /// "starting" / "idle". Phase 71w — replaced the em-dash idle
+    /// state with the literal word "idle" so the pill reads as a
+    /// proper status chip ("idle"/"ready"/"running") instead of
+    /// rendering a single dash that looked like a stretched
+    /// icon glitch.</summary>
     public string StatusText
         => IsStarting ? "starting"
          : IsRunning  ? "running"
          : Profile.IsReady ? "ready"
-         : "—";
+         : "idle";
 
     /// <summary>
     /// Compact "last run" age for card footers — "12m ago",

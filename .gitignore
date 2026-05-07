@@ -45,3 +45,4 @@ _ReSharper*/
 *.DotSettings.user
 chrome_win64/
 dist/
+mcp-server/

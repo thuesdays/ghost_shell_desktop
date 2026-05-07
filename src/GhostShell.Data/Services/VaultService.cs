@@ -220,6 +220,9 @@ internal sealed class VaultService : IVaultService, IDisposable
         status,
         tags_json         AS TagsJson,
         notes,
+        email,
+        field_meta_json   AS FieldMetaJson,
+        extras_json       AS ExtrasJson,
         last_used_at      AS LastUsedAt,
         last_login_at     AS LastLoginAt,
         last_login_status AS LastLoginStatus,
@@ -243,7 +246,12 @@ internal sealed class VaultService : IVaultService, IDisposable
             // Cheap LIKE across the metadata-only fields. Notes/tags
             // are also included so users can find stuff by free-form
             // labels without unlocking the vault.
-            where.Add("(name LIKE @q OR identifier LIKE @q OR notes LIKE @q OR tags_json LIKE @q)");
+            // Phase 71 — also search by email + extras_json so the
+            // unified item's plaintext custom fields show up in
+            // free-text filtering. SecretsEnc + encrypted custom fields
+            // remain unsearchable (they're ciphertext at rest).
+            where.Add("(name LIKE @q OR identifier LIKE @q OR email LIKE @q OR " +
+                      "notes LIKE @q OR tags_json LIKE @q OR extras_json LIKE @q)");
             args.Add("q", $"%{search}%");
         }
         // Phase 24 audit fix — bounded result set so a vault with
@@ -281,9 +289,53 @@ internal sealed class VaultService : IVaultService, IDisposable
         {
             EnsureUnlockedInternal();
             var clear = DecryptSecrets(item.SecretsEnc);
-            return (item, clear);
+            // Phase 71 — merge plaintext extras into the cleartext bag
+            // so callers see a single uniform view of the item's fields,
+            // regardless of which storage column each value lives in.
+            // Encrypted keys take precedence over extras on collision —
+            // a key marked encrypted should never read from plaintext.
+            var merged = MergeWithExtras(clear, item.ExtrasJson);
+            return (item, merged);
         }
         finally { _gate.Release(); }
+    }
+
+    /// <summary>
+    /// Phase 71 — merge plaintext extras_json values onto the
+    /// decrypted secrets bag. Encrypted-bag entries take precedence
+    /// on key collision so a secret never reads from a plaintext
+    /// shadow. Returns a NEW dictionary (callers may mutate without
+    /// affecting the cached ciphertext).
+    /// </summary>
+    internal static IReadOnlyDictionary<string, string> MergeWithExtras(
+        IReadOnlyDictionary<string, string> encryptedClear, string? extrasJson)
+    {
+        var merged = new Dictionary<string, string>(encryptedClear, StringComparer.Ordinal);
+        if (string.IsNullOrWhiteSpace(extrasJson)) return merged;
+        try
+        {
+            using var doc = JsonDocument.Parse(extrasJson);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return merged;
+            foreach (var prop in doc.RootElement.EnumerateObject())
+            {
+                if (merged.ContainsKey(prop.Name)) continue;   // encrypted wins
+                var v = prop.Value.ValueKind switch
+                {
+                    JsonValueKind.String => prop.Value.GetString() ?? "",
+                    JsonValueKind.Number => prop.Value.GetRawText(),
+                    JsonValueKind.True   => "true",
+                    JsonValueKind.False  => "false",
+                    JsonValueKind.Null   => "",
+                    _                    => prop.Value.GetRawText(),
+                };
+                merged[prop.Name] = v;
+            }
+        }
+        catch (JsonException)
+        {
+            // Corrupt extras_json — ignore, return what we have.
+        }
+        return merged;
     }
 
     public async Task<VaultItem> CreateAsync(
@@ -325,10 +377,12 @@ internal sealed class VaultService : IVaultService, IDisposable
             INSERT INTO vault_items
               (name, kind, service, identifier, secrets_enc,
                profile_name, status, tags_json, notes,
+               email, field_meta_json, extras_json,
                created_at, updated_at)
             VALUES
               (@Name, @Kind, @Service, @Identifier, @SecretsEnc,
                @ProfileName, @Status, @TagsJson, @Notes,
+               @Email, @FieldMetaJson, @ExtrasJson,
                @CreatedAt, @UpdatedAt)
             RETURNING id;
         """;
@@ -337,6 +391,10 @@ internal sealed class VaultService : IVaultService, IDisposable
             item.Name, item.Kind, item.Service, item.Identifier,
             SecretsEnc  = encrypted,
             item.ProfileName, item.Status, item.TagsJson, item.Notes,
+            // Phase 71 — universal-vault columns. All nullable; null on
+            // legacy items and on universal items that haven't added
+            // custom fields yet.
+            item.Email, item.FieldMetaJson, item.ExtrasJson,
             CreatedAt = nowIso, UpdatedAt = nowIso,
         }), ct);
         _log.LogInformation("Vault item #{Id} '{Name}' created (kind={Kind})",
@@ -378,16 +436,19 @@ internal sealed class VaultService : IVaultService, IDisposable
         }
         const string sql = """
             UPDATE vault_items SET
-              name        = @Name,
-              kind        = @Kind,
-              service     = @Service,
-              identifier  = @Identifier,
-              secrets_enc = @SecretsEnc,
-              profile_name= @ProfileName,
-              status      = @Status,
-              tags_json   = @TagsJson,
-              notes       = @Notes,
-              updated_at  = @UpdatedAt
+              name            = @Name,
+              kind            = @Kind,
+              service         = @Service,
+              identifier      = @Identifier,
+              secrets_enc     = @SecretsEnc,
+              profile_name    = @ProfileName,
+              status          = @Status,
+              tags_json       = @TagsJson,
+              notes           = @Notes,
+              email           = @Email,
+              field_meta_json = @FieldMetaJson,
+              extras_json     = @ExtrasJson,
+              updated_at      = @UpdatedAt
             WHERE id = @Id;
         """;
         await _db.QueueAsync(c => c.ExecuteAsync(sql, new
@@ -395,6 +456,8 @@ internal sealed class VaultService : IVaultService, IDisposable
             item.Id, item.Name, item.Kind, item.Service, item.Identifier,
             SecretsEnc  = encrypted,
             item.ProfileName, item.Status, item.TagsJson, item.Notes,
+            // Phase 71 — universal-vault columns.
+            item.Email, item.FieldMetaJson, item.ExtrasJson,
             // Phase 24 audit fix #4 — ISO 8601 string for TEXT column.
             UpdatedAt = DateTime.UtcNow.ToString("O"),
         }), ct);
@@ -465,12 +528,19 @@ internal sealed class VaultService : IVaultService, IDisposable
         // ListAsync per kind. The "" kind (TOTP — any kind that has a
         // totp_secret field) gets a separate pass that walks every
         // profile-bound item.
+        //
+        // Phase 70b — split aliases into two buckets:
+        //   • known: in VaultAliases catalog → bucket by spec.Kind.
+        //   • unknown: free-form identifier → lookup as raw secret
+        //     key on ANY profile-bound item. This is the path that
+        //     makes user-defined custom fields work transparently.
         var byKind = new Dictionary<string, List<VaultAliases.AliasSpec>>(
             StringComparer.OrdinalIgnoreCase);
+        var unknownAliases = new List<string>();
         foreach (var a in distinct)
         {
             var spec = VaultAliases.Get(a);
-            if (spec is null) continue;
+            if (spec is null) { unknownAliases.Add(a); continue; }
             if (!byKind.TryGetValue(spec.Kind, out var bucket))
                 byKind[spec.Kind] = bucket = new List<VaultAliases.AliasSpec>();
             bucket.Add(spec);
@@ -512,6 +582,96 @@ internal sealed class VaultService : IVaultService, IDisposable
             }
             try { await TouchUsedAsync(item.Id, ct); } catch { /* non-fatal */ }
         }
+
+        // Phase 70b — unknown-alias fallback. For aliases not in the
+        // VaultAliases catalog (e.g. user-defined custom keys like
+        // "discord_token", "wallet_email_pin"), walk every profile-
+        // bound item once, decrypt, and pick the first non-empty
+        // value matching the alias as a secret key. Case-insensitive
+        // match because users type aliases inconsistently in scripts.
+        // Newest item wins on collision (UpdatedAt desc).
+        //
+        // Phase 71 — also consult VaultItem.FieldMetaJson: if the
+        // matched field has IsTotp=true the stored value is a Base32
+        // seed and we return a freshly computed 6-digit code instead
+        // of the raw seed. This is the dynamic equivalent of the
+        // catalog's hardcoded "TOTP" alias.
+        if (unknownAliases.Count > 0)
+        {
+            var allItems = await ListAsync(kind: null, profileName: profileName, ct: ct);
+            if (allItems.Count > 0)
+            {
+                foreach (var it in allItems.OrderByDescending(i => i.UpdatedAt))
+                {
+                    (VaultItem item, IReadOnlyDictionary<string, string> clear)? pair;
+                    try { pair = await GetClearAsync(it.Id, ct); }
+                    catch (InvalidOperationException) { return result; } // locked mid-flight
+                    catch (CryptographicException)    { continue; }
+                    if (pair is null) continue;
+
+                    // Parse the item's per-field meta once per item so
+                    // we don't deserialise per alias.
+                    Dictionary<string, VaultFieldMeta>? meta = null;
+                    if (!string.IsNullOrWhiteSpace(it.FieldMetaJson))
+                    {
+                        try
+                        {
+                            meta = JsonSerializer.Deserialize<
+                                Dictionary<string, VaultFieldMeta>>(it.FieldMetaJson!);
+                        }
+                        catch (JsonException) { /* ignore corrupt meta */ }
+                    }
+
+                    foreach (var alias in unknownAliases)
+                    {
+                        if (result.ContainsKey(alias)) continue;
+
+                        // Resolve the actual storage key (case-insensitive
+                        // match against the cleartext bag).
+                        string? matchedKey = null;
+                        string? value = null;
+                        if (pair.Value.clear.TryGetValue(alias, out var v0) && !string.IsNullOrEmpty(v0))
+                        { matchedKey = alias; value = v0; }
+                        else
+                        {
+                            foreach (var kv in pair.Value.clear)
+                            {
+                                if (string.Equals(kv.Key, alias, StringComparison.OrdinalIgnoreCase)
+                                    && !string.IsNullOrEmpty(kv.Value))
+                                {
+                                    matchedKey = kv.Key;
+                                    value = kv.Value;
+                                    break;
+                                }
+                            }
+                        }
+                        if (matchedKey is null || value is null) continue;
+
+                        // Phase 71 — TOTP seed → live code conversion.
+                        if (meta is not null
+                            && meta.TryGetValue(matchedKey, out var fm)
+                            && fm.IsTotp)
+                        {
+                            try
+                            {
+                                var (code, _) = Totp.Compute(value);
+                                value = code;
+                            }
+                            catch
+                            {
+                                // Bad seed — fall back to raw value so
+                                // the user at least sees the placeholder
+                                // resolved (and can fix it).
+                            }
+                        }
+
+                        result[alias] = value;
+                    }
+                    if (unknownAliases.All(a => result.ContainsKey(a))) break;
+                }
+            }
+        }
+
         return result;
     }
 

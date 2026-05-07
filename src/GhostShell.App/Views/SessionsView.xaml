@@ -141,7 +141,13 @@
 
     <Grid Margin="20">
         <Grid.ColumnDefinitions>
-            <ColumnDefinition Width="220"/>
+            <!-- Phase 71ff — profile column widened from 220 → 290.
+                 Real Hotmail-style emails (e.g.
+                 "shaggavendji@hotmail.com" = 25 chars) were getting
+                 truncated as "shaggavendji@hotmail.cc" with the
+                 ellipsis squashed into the @ char. 290 fits a 28-30
+                 char address comfortably. -->
+            <ColumnDefinition Width="290"/>
             <ColumnDefinition Width="*"/>
         </Grid.ColumnDefinitions>
 

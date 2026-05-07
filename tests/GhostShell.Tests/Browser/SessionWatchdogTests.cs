@@ -300,5 +300,13 @@ public class SessionWatchdogTests
         // this stub returns false (no row removed) and never throws.
         public Task<bool>                 DeleteAsync(long runId, CancellationToken ct = default) =>
             Task.FromResult(false);
+        // Phase 71dd — UpdateCountersAsync added to IRunService so
+        // the script runner can stamp REQ/ADS/CAPTCHA totals onto
+        // the runs row at finish time. Watchdog tests never call
+        // this path; stub is a silent no-op so the contract compiles.
+        public Task                       UpdateCountersAsync(
+            long runId, int totalQueries, int totalAds, int captchas,
+            CancellationToken ct = default) =>
+            Task.CompletedTask;
     }
 }

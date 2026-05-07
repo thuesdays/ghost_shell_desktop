@@ -195,6 +195,15 @@ public sealed record ScriptRun
     public int StepsFailed   { get; init; }
     public int AdsClicked    { get; init; }
 
+    /// <summary>Phase 71dd — search-query / search-style step count
+    /// for this run. Stamped onto runs.total_queries at finish time
+    /// so the Run History grid surfaces real numbers instead of zeros.</summary>
+    public int QueriesExecuted { get; init; }
+
+    /// <summary>Phase 71dd — captcha-solver invocation count.
+    /// Stamped onto runs.captchas at finish time.</summary>
+    public int CaptchasSolved  { get; init; }
+
     public double? DurationSec { get; init; }
     public string? LastError   { get; init; }
 

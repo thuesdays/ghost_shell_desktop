@@ -26,9 +26,45 @@ public sealed partial class VaultItemRow : ObservableObject
     public string Kind      => Item.Kind;
     public string? Service  => Item.Service;
     public string? Identifier => Item.Identifier;
+    public string? Email    => Item.Email;
     public string? ProfileName => Item.ProfileName;
     public string Status    => Item.Status;
     public DateTime UpdatedAt => Item.UpdatedAt;
+
+    /// <summary>
+    /// Phase 71 — decoded tags column for the Vault grid. The
+    /// underlying <see cref="VaultItem.TagsJson"/> is a JSON array
+    /// (["work", "client-acme"]); the grid wants a friendly
+    /// "work, client-acme" string. Returns empty string when no
+    /// tags so the cell renders blank instead of "[]".
+    /// </summary>
+    public string Tags
+    {
+        get
+        {
+            if (string.IsNullOrWhiteSpace(Item.TagsJson)) return "";
+            try
+            {
+                var arr = System.Text.Json.JsonSerializer.Deserialize<string[]>(Item.TagsJson);
+                if (arr is null || arr.Length == 0) return "";
+                return string.Join(", ", arr);
+            }
+            catch
+            {
+                // Corrupt JSON — surface raw payload so the user can
+                // see + fix it rather than getting silent blank.
+                return Item.TagsJson!;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Phase 71 — selection flag for multiselect-delete on the Vault
+    /// page. Mirrors the proxies grid's checkbox column. Bound TwoWay
+    /// to a checkbox in the row template; the page-level "Delete N
+    /// selected" command counts <see cref="IsSelected"/>=true rows.
+    /// </summary>
+    [ObservableProperty] private bool _isSelected;
 
     /// <summary>True when this row's kind is TOTP-only OR the row's
     /// secrets contain a totp_secret field. The page surfaces a live
