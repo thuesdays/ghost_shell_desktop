@@ -916,13 +916,28 @@
         <Setter Property="BorderThickness" Value="0"/>
         <Setter Property="Padding" Value="12,5"/>
         <Setter Property="FontSize" Value="{DynamicResource FontSizeSm}"/>
+        <!-- Phase 71kk fix — clear the FocusVisualStyle. WPF draws a
+             dotted/solid focus rectangle on the keyboard-focused
+             MenuItem on top of our Template, which manifests as a
+             thin white line on the left edge of the highlighted row.
+             The highlight + hover state already provides clear visual
+             feedback; the focus rectangle is redundant noise here. -->
+        <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+        <!-- Phase 71kk fix — own the visual tree fully. Without this
+             WPF can fall back to system role-specific MenuItem
+             templates (TopLevelHeader / SubmenuHeader / SubmenuItem)
+             which carry their own Icon/Check columns and chrome —
+             another source of the stray-line artifact some users
+             reported. Our single template covers every Role. -->
+        <Setter Property="OverridesDefaultStyle" Value="True"/>
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="{x:Type MenuItem}">
                     <Border x:Name="Bd"
                             Background="{TemplateBinding Background}"
                             Padding="{TemplateBinding Padding}"
-                            CornerRadius="3">
+                            CornerRadius="3"
+                            SnapsToDevicePixels="True">
                         <ContentPresenter ContentSource="Header"
                                           VerticalAlignment="Center"
                                           RecognizesAccessKey="True"/>

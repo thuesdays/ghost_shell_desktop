@@ -27,6 +27,16 @@
                       Command="{Binding StartCommand}"
                       CommandParameter="{Binding RelativeSource={RelativeSource AncestorType=ContextMenu},
                                                   Path=PlacementTarget.DataContext}"/>
+            <!-- Phase 71kk — manual skip-restore. Mirrors the
+                 captcha-recovery flow but driven by the user when
+                 they know the snapshot is bad. The flag is one-shot
+                 (consumed by the very next StartAsync) so a typo or
+                 second-thought-then-cancel doesn't leave the profile
+                 stuck without restore. -->
+            <MenuItem Header="Start without restoring snapshot"
+                      Command="{Binding StartFreshCommand}"
+                      CommandParameter="{Binding RelativeSource={RelativeSource AncestorType=ContextMenu},
+                                                  Path=PlacementTarget.DataContext}"/>
             <MenuItem Header="Stop"
                       Command="{Binding StopCommand}"
                       CommandParameter="{Binding RelativeSource={RelativeSource AncestorType=ContextMenu},
@@ -514,26 +524,39 @@
                               ItemTemplate="{StaticResource ProfileCardTemplate}">
                     <ItemsControl.ItemsPanel>
                         <ItemsPanelTemplate>
-                            <!-- Phase 71f — UniformGrid with fixed 3
-                                 columns instead of WrapPanel. The old
-                                 WrapPanel sized each card to its
-                                 content, so a long email pushed the
-                                 card wider than its neighbours and the
-                                 grid looked ragged. UniformGrid gives
-                                 each cell the same width so all cards
-                                 in a row are aligned + cards stretch
-                                 to fill the available row width. -->
-                            <UniformGrid Columns="3"/>
+                            <!-- Phase 71jj — responsive flow.
+                                 Pre-Phase-71jj this was a UniformGrid
+                                 hard-wired to 3 columns: the cards were
+                                 evenly sized but no matter how wide the
+                                 user dragged the window we'd still only
+                                 ever show 3 per row, and cards on a
+                                 wide monitor blew out to 500+px each.
+                                 WrapPanel with ItemWidth gives both
+                                 properties we want:
+                                   • Uniform per-card width — every
+                                     card is exactly ItemWidth, so a
+                                     long email no longer shoves its
+                                     neighbours around.
+                                   • Auto-fit columns — the panel
+                                     packs as many cards per row as
+                                     the available width allows, so
+                                     widening the window flips 3→4→5.
+                                 ItemWidth=305 is a further -20% trim
+                                 over the 380 we landed on first time
+                                 (user wanted denser cards still). On
+                                 a 1620px window that's now 4 cards
+                                 per row instead of 3, and on a
+                                 ~1900px window 5 per row — the
+                                 cards finally read as a glanceable
+                                 grid rather than fat tiles. -->
+                            <WrapPanel ItemWidth="305"/>
                         </ItemsPanelTemplate>
                     </ItemsControl.ItemsPanel>
-                    <!-- Phase 71f — stretch each card container to its
-                         UniformGrid cell. Without this each ContentPresenter
-                         hugs its content's MinWidth and leaves gaps. -->
-                    <ItemsControl.ItemContainerStyle>
-                        <Style TargetType="ContentPresenter">
-                            <Setter Property="HorizontalAlignment" Value="Stretch"/>
-                        </Style>
-                    </ItemsControl.ItemContainerStyle>
+                    <!-- Phase 71jj — clear the stretched alignment we
+                         needed for UniformGrid. WrapPanel honours
+                         ItemWidth on its children directly; an extra
+                         HorizontalAlignment=Stretch wrapper just
+                         forces a relayout pass for no benefit. -->
                 </ItemsControl>
             </ScrollViewer>
 

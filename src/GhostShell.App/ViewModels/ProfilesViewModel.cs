@@ -351,6 +351,48 @@ public sealed partial class ProfilesViewModel : BaseViewModel
         }
     }
 
+    /// <summary>
+    /// Phase 71kk — manual "Start without restoring snapshot". Mirrors
+    /// what the captcha-recovery service does automatically: flips the
+    /// skip-restore-once flag so the next launch starts with empty
+    /// cookies / localStorage instead of replaying the latest snapshot.
+    /// Useful when the user knows the saved cookies are poisoned (Google
+    /// caught up, target rate-limited the session) but they don't want
+    /// to wait for the recovery cycle to detect it.
+    ///
+    /// <para>Implementation reuses the regular StartAsync — the skip
+    /// flag is one-shot and consumed by the very next StartAsync call,
+    /// so there's no risk of "stuck on no-restore forever". If the
+    /// launch fails before the flag is consumed, a subsequent manual
+    /// Start will still see it (idempotent until the next successful
+    /// launch lands).</para>
+    /// </summary>
+    [RelayCommand]
+    private async Task StartFreshAsync(ProfileRowVm? selected)
+    {
+        if (selected is null) return;
+        if (selected.IsRunning) return;
+        if (selected.IsStarting) return;
+
+        try
+        {
+            _runner.MarkSkipRestoreOnce(selected.Profile.Name);
+            _log.LogInformation(
+                "Profile '{Name}' — manual skip-restore flagged for next launch",
+                selected.Profile.Name);
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex,
+                "Profile '{Name}' — MarkSkipRestoreOnce threw, continuing with default Start",
+                selected.Profile.Name);
+        }
+
+        // Defer to the regular Start path — same spinner / error
+        // handling / ActiveChanged plumbing.
+        await StartAsync(selected);
+    }
+
     [RelayCommand]
     private async Task StopAsync(ProfileRowVm? selected)
     {

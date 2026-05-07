@@ -369,23 +369,57 @@ public sealed partial class ProxyViewModel : BaseViewModel
     {
         if (selected is null) return;
 
-        // Wire "Rotate IP now" — Phase 2 ships a stub that just logs
-        // a health event so the timeline gets a fresh dot. Real HTTP
-        // call to the rotation URL lands in Phase 3 with the runtime.
+        // Phase 71hh — REAL "Rotate IP now". Pre-fix this was a stub
+        // that only wrote a fake health-timeline event without
+        // actually hitting the rotation URL. The button in the
+        // editor was therefore lying to the user — the asocks /
+        // smartproxy / etc. dashboard kept the same exit IP and
+        // Google captcha state persisted. Now we mirror what
+        // RealProfileRunner does at auto-rotate-on-launch time:
+        // fire a simple HTTP GET against the rotation URL, wait a
+        // 2-second settle, return human-readable status. Failures
+        // are surfaced verbatim so the user can see WHY rotation
+        // didn't take (timeout / 401 / 5xx / unreachable).
         var edited = await _dialogs.ShowProxyEditorAsync(selected,
             onRotateNow: async (slug, rotateUrl) =>
             {
                 _log.LogInformation(
-                    "Manual rotation requested for '{Slug}' → {Url} (stub)",
+                    "Manual rotation requested for '{Slug}' → {Url}",
                     slug, rotateUrl);
+                string detail;
+                bool ok;
+                try
+                {
+                    using var http = new System.Net.Http.HttpClient
+                    {
+                        Timeout = TimeSpan.FromSeconds(15),
+                    };
+                    var response = await http.GetAsync(rotateUrl);
+                    response.EnsureSuccessStatusCode();
+                    // 2-second settle so the upstream proxy registers
+                    // the new exit IP before the next launch picks it
+                    // up (matches the auto-rotate-on-launch path).
+                    await Task.Delay(TimeSpan.FromSeconds(2));
+                    ok = true;
+                    detail = $"Manual rotation OK ({(int)response.StatusCode} {response.ReasonPhrase})";
+                }
+                catch (Exception ex)
+                {
+                    ok = false;
+                    detail = $"Manual rotation FAILED: {ex.GetType().Name} — {ex.Message}";
+                    _log.LogWarning(ex,
+                        "Manual rotation failed for '{Slug}' → {Url}", slug, rotateUrl);
+                }
                 await _health.RecordAsync(new ProxyHealthEvent
                 {
                     ProxySlug = slug,
-                    Kind      = ProxyHealthEventKind.Rotation,
+                    Kind      = ok ? ProxyHealthEventKind.Rotation : ProxyHealthEventKind.Burn,
                     At        = DateTime.UtcNow,
-                    Detail    = "Manual rotation (stub)",
+                    Detail    = detail,
                 });
-                return "Rotation triggered. Real HTTP call lands in Phase 3.";
+                return ok
+                    ? "✓ Rotation triggered. New exit IP should be live in ~2s."
+                    : detail;
             });
         if (edited is null) return;
 

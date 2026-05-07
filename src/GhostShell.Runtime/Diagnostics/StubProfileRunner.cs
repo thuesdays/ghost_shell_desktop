@@ -110,4 +110,16 @@ public sealed class StubProfileRunner : IProfileRunner
     /// <summary>Stub never produces a live IBrowserSession (it doesn't
     /// own one) — return null so callers fall back gracefully.</summary>
     public IBrowserSession? TryGetActiveSession(string profileName) => null;
+
+    /// <summary>Phase 71ii — stub honours the contract but the flag has
+    /// no effect (this runner doesn't restore snapshots either way).
+    /// Implemented as a no-op log so test/diagnostic harnesses see the
+    /// call land somewhere instead of throwing NotImplementedException.</summary>
+    public void MarkSkipRestoreOnce(string profileName)
+    {
+        if (string.IsNullOrWhiteSpace(profileName)) return;
+        _log.LogInformation(
+            "[stub] MarkSkipRestoreOnce('{Name}') — no-op (stub doesn't restore snapshots)",
+            profileName);
+    }
 }

@@ -136,25 +136,32 @@
                     <ColumnDefinition Width="Auto"/>  <!-- autoscr. -->
                 </Grid.ColumnDefinitions>
 
-                <ComboBox Grid.Column="0" Margin="0,0,6,0" MinWidth="110" Height="26"
+                <!-- Phase 71kk — Height 26→30. The 26 we had before
+                     squeezed the line-box so descenders on letters
+                     like 'p' and 'g' got clipped at the bottom edge
+                     ("profile_48" was rendering with the 'p' tail
+                     cut off). 30px gives the same compact toolbar
+                     density but leaves enough vertical room for
+                     proper text rendering. -->
+                <ComboBox Grid.Column="0" Margin="0,0,6,0" MinWidth="110" Height="30"
                           ItemsSource="{Binding LevelOptions}"
                           DisplayMemberPath="Label"
                           SelectedValuePath="Value"
                           SelectedValue="{Binding LevelFilter, Mode=TwoWay}"
                           ToolTip="Minimum level"/>
 
-                <ComboBox Grid.Column="1" Margin="0,0,6,0" MinWidth="100" Height="26"
+                <ComboBox Grid.Column="1" Margin="0,0,6,0" MinWidth="100" Height="30"
                           ItemsSource="{Binding TimeRangeOptions}"
                           DisplayMemberPath="Label"
                           SelectedValuePath="Range"
                           SelectedValue="{Binding TimeRange, Mode=TwoWay}"
                           ToolTip="Time range"/>
 
-                <TextBox  Grid.Column="2" Margin="0,0,6,0" MinWidth="130" Height="26"
+                <TextBox  Grid.Column="2" Margin="0,0,6,0" MinWidth="130" Height="30"
                           Text="{Binding SourceFilter, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                           ToolTip="Filter by source (e.g. 'Browser', 'Proxy')"/>
 
-                <TextBox  Grid.Column="3" Margin="0,0,6,0" MinWidth="130" Height="26"
+                <TextBox  Grid.Column="3" Margin="0,0,6,0" MinWidth="160" Height="30"
                           Text="{Binding ProfileFilter, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                           ToolTip="Filter by profile name (matched in message body)"/>
 
@@ -166,7 +173,7 @@
                      background). BasedOn pulls the dark-theme style
                      in as the parent so only the BorderBrush trigger
                      overrides. -->
-                <TextBox Grid.Column="4" Margin="0,0,6,0" Height="26"
+                <TextBox Grid.Column="4" Margin="0,0,6,0" Height="30"
                          Text="{Binding SearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                          ToolTip="Search in message text. Toggle 'regex' for pattern matching.">
                     <TextBox.Style>

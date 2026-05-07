@@ -120,7 +120,17 @@
                 <ItemsControl ItemsSource="{Binding Items}">
                     <ItemsControl.ItemsPanel>
                         <ItemsPanelTemplate>
-                            <WrapPanel Orientation="Horizontal"/>
+                            <!-- Phase 71jj — same responsive sizing
+                                 we landed on for the Profiles page.
+                                 ItemWidth=305 gives uniform cards +
+                                 auto-fit columns: 4 per row at
+                                 ~1300px usable width, 5 at ~1620px,
+                                 6 at ~1940px. Without ItemWidth the
+                                 WrapPanel sized cards to their
+                                 MinWidth=300 floor and the row was
+                                 ragged when names varied in length. -->
+                            <WrapPanel Orientation="Horizontal"
+                                       ItemWidth="305"/>
                         </ItemsPanelTemplate>
                     </ItemsControl.ItemsPanel>
                     <ItemsControl.ItemTemplate>
@@ -130,13 +140,19 @@
                                  padding (12 instead of 16) and tighter
                                  MinHeight (124 instead of 160) so the cards
                                  read as quick-access tiles, not panels. -->
+                            <!-- Phase 71jj — MinWidth dropped: the
+                                 WrapPanel's ItemWidth governs slot
+                                 size now, and a card-level MinWidth
+                                 fights with that (forces cells wider
+                                 than the slot, breaking the auto-fit
+                                 column count). MinHeight stays so
+                                 short cards don't dance in height. -->
                             <Border Margin="0,0,12,12"
                                     Background="{StaticResource BgRaised}"
                                     BorderBrush="{StaticResource HueIndigo}"
                                     BorderThickness="2,1,1,1"
                                     CornerRadius="8"
                                     Padding="12"
-                                    MinWidth="300"
                                     MinHeight="124"
                                     ContextMenu="{StaticResource GroupRowMenu}">
                                 <Border.Effect>

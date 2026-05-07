@@ -203,8 +203,14 @@
                                BasedOn="{StaticResource {x:Type DataGridRow}}">
                             <Setter Property="ContextMenu" Value="{StaticResource RunRowMenu}"/>
                             <!-- Phase 53 — tighten row height to compact the table.
-                                 5px vertical padding + smaller font size = denser layout. -->
-                            <Setter Property="Height" Value="32"/>
+                                 5px vertical padding + smaller font size = denser layout.
+                                 Phase 71kk — 32→36. The 30px RowActionButton in the
+                                 action column had no breathing room (cell padding
+                                 eats 2-3px top + bottom), which clipped the bottom of
+                                 the View-logs glyph. 4 extra px is the smallest bump
+                                 that lets the icon render fully without making the
+                                 grid feel padded. -->
+                            <Setter Property="Height" Value="36"/>
                         </Style>
                     </DataGrid.RowStyle>
                     <DataGrid.Columns>

@@ -74,6 +74,16 @@ public sealed class RealProfileRunner : IProfileRunner, IAsyncDisposable
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _scriptCts =
         new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>Phase 71ii — profile names whose NEXT launch should
+    /// skip auto-restore. Populated by ScriptRunner via
+    /// <see cref="MarkSkipRestoreOnce"/> when captcha is detected
+    /// (poisoned cookies in latest snapshot). Consumed (cleared) in
+    /// the auto-restore branch of StartAsync. ConcurrentDictionary
+    /// instead of HashSet because StartAsync runs on the dispatcher
+    /// while the mark can fire from any script thread.</summary>
+    private readonly ConcurrentDictionary<string, byte> _skipRestoreOnce =
+        new(StringComparer.OrdinalIgnoreCase);
+
     private bool _disposed;
 
     private readonly ISelfCheckService? _selfCheck;
@@ -126,6 +136,19 @@ public sealed class RealProfileRunner : IProfileRunner, IAsyncDisposable
 
     public IReadOnlySet<string> ActiveProfileNames =>
         _sessions.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+    public void MarkSkipRestoreOnce(string profileName)
+    {
+        if (string.IsNullOrWhiteSpace(profileName)) return;
+        // Idempotent: if already marked, value stays the same.
+        // Cleared on consume by the next StartAsync.
+        if (_skipRestoreOnce.TryAdd(profileName, 1))
+        {
+            _log.LogInformation(
+                "Captcha-recovery: profile '{Name}' will skip auto-restore on next launch",
+                profileName);
+        }
+    }
 
     public IBrowserSession? TryGetActiveSession(string profileName)
     {
@@ -300,7 +323,25 @@ public sealed class RealProfileRunner : IProfileRunner, IAsyncDisposable
         // so we schedule them after the navigate-to-about:blank that
         // chromedriver does at startup has settled (~3s). Fire-and-
         // forget; failures only affect the panel, not the run itself.
-        if (_selfCheck is not null)
+        //
+        // Phase 71kk fix — gate on runAssignedScript=false. The 3s-delayed
+        // probe navigates the live IBrowserSession to pixelscan / ipapi /
+        // browserleaks etc. — which RACES the assigned script's own
+        // navigation (search_query → google.com). Two concurrent
+        // NavigateAsync calls on a single Selenium session = chromedriver
+        // crashes the tab → watchdog reports "browser session closed
+        // mid-run" → script aborts with exit code 2. That's exactly the
+        // bug the user just reported (4 consecutive runs aborted with
+        // ADS=0 because search_query never got past the SERP-load wait).
+        //
+        // The Fingerprint-page self-check panel is fed by:
+        //   • probe-only launches (runAssignedScript=false) — explicit
+        //     "launch a clean browser to grade the FP".
+        //   • The Self-check button on the Fingerprint page itself.
+        // Both still work after this gate. What stops working is the
+        // implicit "every scripted launch also self-tests in parallel",
+        // which is exactly the source of the race.
+        if (_selfCheck is not null && !runAssignedScript)
         {
             // Capture the CancellationToken VALUE (struct) before the
             // Task.Run closure starts, NOT the CancellationTokenSource
@@ -352,7 +393,20 @@ public sealed class RealProfileRunner : IProfileRunner, IAsyncDisposable
             // because canvas / audio / WebGL fingerprint signals are
             // independent of cookie state. The snapshot stays in DB
             // for the next REAL run that flips restoreSession=true.
-            if (restoreSession)
+            // Phase 71ii — consume the skip-once flag if it's set.
+            // Captcha-recovery cycle marks a profile when its saved
+            // cookies are poisoned (Google decided this session is a
+            // bot). Skipping restore for ONE launch lets the browser
+            // start fresh; subsequent launches restore as usual.
+            var poisonedCookies = _skipRestoreOnce.TryRemove(profile.Name, out _);
+            if (poisonedCookies)
+            {
+                _log.LogInformation(
+                    "Skipping snapshot auto-restore for '{Name}' " +
+                    "(captcha-recovery: poisoned cookies flag was set)",
+                    profile.Name);
+            }
+            else if (restoreSession)
             {
                 try { await _sessionLifecycle.RestoreLatestAsync(session); }
                 catch (Exception ex)
@@ -601,6 +655,95 @@ public sealed class RealProfileRunner : IProfileRunner, IAsyncDisposable
         catch (OperationCanceledException)
         {
             _log.LogInformation("Script for '{P}' cancelled (profile stopping)", profile.Name);
+        }
+        catch (GhostShell.Runtime.Scripts.ScriptRunner.CaptchaRecoveryAbortException recoveryEx)
+        {
+            // Phase 71ii — captcha-recovery abort. The recovery service
+            // already rotated proxy / flagged skip-restore / regen'd
+            // FP / posted notification. Tear down the current run, then
+            // — if the plan said AutoRelaunch and at least one recovery
+            // action succeeded — schedule a fresh launch after the
+            // cooldown. The whole cycle is fire-and-forget from this
+            // catch's perspective (we don't await the relaunch); the
+            // current task wraps up cleanly so the run row finalises.
+            var result = recoveryEx.Result;
+            _log.LogWarning(
+                "Script '{Name}' for '{P}' captcha-recovery abort: {Summary}",
+                script?.Name ?? "—", profile.Name, result.Summary);
+
+            // The recovery service plans the skip-restore flag but
+            // can't set it itself without creating a DI cycle (it'd
+            // need IProfileRunner, which depends on IScriptRunner,
+            // which depends on the recovery service). Apply the flag
+            // here — we ARE the IProfileRunner — so the next launch
+            // honours it. Idempotent + cheap; safe to call before
+            // teardown so the auto-relaunch path picks it up.
+            if (result.Plan.SkipRestoreOnNextLaunch)
+            {
+                MarkSkipRestoreOnce(profile.Name);
+                _log.LogInformation(
+                    "Captcha-recovery: marked '{P}' to skip auto-restore on next launch",
+                    profile.Name);
+            }
+
+            try
+            {
+                await StopInternalAsync(
+                    profile.Name, "captcha_recovery",
+                    // Distinct exit code so the Run History grid can
+                    // tell "captcha aborted, recovering" from a hard
+                    // crash. Anything in the 0..127 range is fine; 7
+                    // happens to be free.
+                    exitCode: 7, ct: CancellationToken.None);
+            }
+            catch { /* swallow — teardown best-effort */ }
+
+            if (result.AutoRelaunchRequested)
+            {
+                var cooldown = result.Plan.Cooldown;
+                _log.LogInformation(
+                    "Captcha-recovery: scheduling auto-relaunch of '{P}' in {S}s",
+                    profile.Name, cooldown.TotalSeconds.ToString("0"));
+                // Fire-and-forget. The relaunch grabs a fresh CT (the
+                // current one is being unwound) and runs through the
+                // normal StartAsync path, which will consume the
+                // skip-restore-once flag set during recovery.
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await Task.Delay(cooldown);
+                        if (_disposed) return;
+                        // Re-fetch the profile to pick up any
+                        // mid-flight changes (FP regen bumps the
+                        // salt column and we want the live record).
+                        // _profiles is nullable in tests / minimal DI;
+                        // fall back to the captured profile reference
+                        // so a test environment can still exercise the
+                        // relaunch path without an IProfileService stub.
+                        var fresh = _profiles is null
+                            ? profile
+                            : (await _profiles.GetAsync(profile.Name) ?? profile);
+                        await StartAsync(fresh, CancellationToken.None,
+                            runAssignedScript: true,
+                            restoreSession: true);
+                    }
+                    catch (Exception relaunchEx)
+                    {
+                        _log.LogError(relaunchEx,
+                            "Captcha-recovery auto-relaunch for '{P}' failed",
+                            profile.Name);
+                    }
+                });
+            }
+            else
+            {
+                _log.LogInformation(
+                    "Captcha-recovery: no auto-relaunch ({Why})",
+                    result.Plan.Severity == GhostShell.Core.Services.RecoverySeverity.Exhausted
+                        ? "exhausted — manual attention requested"
+                        : "no recovery action succeeded");
+            }
         }
         catch (GhostShell.Runtime.Scripts.ScriptRunner.ScriptAbortException abortEx)
         {

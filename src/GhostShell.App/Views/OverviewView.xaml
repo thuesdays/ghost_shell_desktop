@@ -363,28 +363,61 @@
                                                      Foreground="{StaticResource Text}"/>
                                             </TextBlock>
 
-                                            <!-- Status label · duration —
-                                                 monospace + right-aligned so
-                                                 ALL rows' last char (last
-                                                 sec/min/hr digit) lines up
-                                                 vertically against the col
-                                                 boundary. Long durations
-                                                 ("11 hr 6 min 39 sec") get
-                                                 the same right-edge as short
-                                                 ones ("18 sec"). -->
-                                            <TextBlock Grid.Column="2"
-                                                       VerticalAlignment="Center"
-                                                       HorizontalAlignment="Right"
-                                                       TextAlignment="Right"
-                                                       FontFamily="{StaticResource FontMono}"
-                                                       FontSize="10.5"
-                                                       Margin="10,0,16,0">
-                                                <Run Text="{Binding Status, Mode=OneWay}"
-                                                     Foreground="{Binding StatusBrushKey, Converter={StaticResource ResourceKeyToBrush}}"/>
-                                                <Run Text=" · " Foreground="{StaticResource TextDim}"/>
-                                                <Run Text="{Binding DurationLabel, Mode=OneWay}"
-                                                     Foreground="{StaticResource TextMuted}"/>
-                                            </TextBlock>
+                                            <!-- Phase 71kk — split into 3
+                                                 sub-columns so the exit code
+                                                 itself aligns vertically.
+                                                 Pre-71kk this was ONE
+                                                 right-aligned TextBlock with
+                                                 "Status · Duration", which
+                                                 right-aligned the COMBINED
+                                                 string — so "OK" and "exit
+                                                 130" started at different
+                                                 x-positions because their
+                                                 trailing duration parts had
+                                                 different widths. The user
+                                                 wanted the exit codes
+                                                 themselves to line up.
+                                                   • Code col (90px,
+                                                     right-aligned) — the
+                                                     RIGHT edge of "OK" /
+                                                     "exit 130" sits at the
+                                                     same X across all rows.
+                                                   • Middle-dot (Auto, 10px
+                                                     of breathing room).
+                                                   • Duration col (fills
+                                                     remainder, left-aligned)
+                                                     — durations all start
+                                                     at the same X. -->
+                                            <Grid Grid.Column="2" Margin="10,0,16,0">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="90"/>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                    <ColumnDefinition Width="*"/>
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock Grid.Column="0"
+                                                           Text="{Binding Status, Mode=OneWay}"
+                                                           Foreground="{Binding StatusBrushKey, Converter={StaticResource ResourceKeyToBrush}}"
+                                                           VerticalAlignment="Center"
+                                                           HorizontalAlignment="Right"
+                                                           TextAlignment="Right"
+                                                           FontFamily="{StaticResource FontMono}"
+                                                           FontSize="10.5"/>
+                                                <TextBlock Grid.Column="1"
+                                                           Text=" · "
+                                                           Foreground="{StaticResource TextDim}"
+                                                           VerticalAlignment="Center"
+                                                           FontFamily="{StaticResource FontMono}"
+                                                           FontSize="10.5"
+                                                           Margin="6,0"/>
+                                                <TextBlock Grid.Column="2"
+                                                           Text="{Binding DurationLabel, Mode=OneWay}"
+                                                           Foreground="{StaticResource TextMuted}"
+                                                           VerticalAlignment="Center"
+                                                           HorizontalAlignment="Left"
+                                                           TextAlignment="Left"
+                                                           FontFamily="{StaticResource FontMono}"
+                                                           FontSize="10.5"/>
+                                            </Grid>
 
                                             <!-- Relative time — right-edge of
                                                  its fixed-width column. Same

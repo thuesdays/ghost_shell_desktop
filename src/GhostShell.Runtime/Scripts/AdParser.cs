@@ -30,8 +30,29 @@ public static class AdParser
         // div[role="region"][aria-label*="Sponsored"], the
         // shopping carousel, and the "Sponsored" pill text.
         // Returns an array of {id, href, title, displayUrl}.
+        //
+        // Phase 71kk fix — STRIP existing data-gs-ad-id stamps at the
+        // start of every parse, then re-stamp from scratch. Pre-fix
+        // the stamper had `if (el.hasAttribute('data-gs-ad-id')) return;`
+        // which skipped any element already stamped by a PRIOR parse.
+        // Effect: search_query's parse stamped 4 ads → foreach_ad's
+        // re-parse returned 0 (all 4 were already stamped from the
+        // previous call) → "no ads on SERP, ending loop" → ZERO
+        // click_ad invocations across every run, even when ads were
+        // visible on the SERP. That's the literal cause of the user's
+        // "ADS=0 across the entire history" report. Stripping stamps
+        // first makes every parse return the full current ad set,
+        // and click_ad's stamped-selector path keeps working because
+        // we re-stamp with the same id scheme right after.
         const string Js = """
             return (function() {
+              // Clear any stale stamps from prior parses on this DOM.
+              // Cheap — querySelectorAll('[data-gs-ad-id]') is fast
+              // and the loop only touches elements we previously
+              // stamped (typically <10 per SERP).
+              document.querySelectorAll('[data-gs-ad-id]').forEach(function(e){
+                e.removeAttribute('data-gs-ad-id');
+              });
               var out = [];
               var i = 0;
               function stamp(el) {

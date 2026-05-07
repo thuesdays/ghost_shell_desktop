@@ -393,7 +393,12 @@ public sealed partial class RunsViewModel : BaseViewModel
     {
         if (run is null) return;
         _logs.FilterForRun(run);
-        _nav.NavigateTo("logs");
+        // Phase 71kk — pushHistory:true so the title-bar Back chip
+        // appears on the Logs page and returns the user to Runs.
+        // Without the push the chip stays hidden (sidebar-style
+        // "root nav" semantics) and the user has to re-find Runs in
+        // the sidebar to get back.
+        _nav.NavigateTo("logs", pushHistory: true);
         _log.LogDebug("Runs: navigated to logs filtered for run #{Run} ({Profile})",
             run.Id, run.ProfileName);
     }

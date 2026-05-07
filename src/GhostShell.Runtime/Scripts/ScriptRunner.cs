@@ -29,6 +29,13 @@ public sealed class ScriptRunner : IScriptRunner
     private readonly IAdDensityService _adDensity;
     private readonly ICompetitorService _competitors;
     private readonly ICaptchaSolver? _captcha;
+    // Phase 71ii — single point of contact for the captcha-recovery
+    // brain. ScriptRunner just detects the page is a captcha + tells
+    // the service "handle it"; severity decisions / proxy rotation /
+    // FP regen / notifications all live behind that boundary now.
+    // Optional so existing test wiring keeps compiling; production DI
+    // wires the real implementation.
+    private readonly ICaptchaRecoveryService? _captchaRecovery;
     private readonly ILogger<ScriptRunner> _log;
     private readonly ConditionEvaluator _conditions = new();
 
@@ -44,13 +51,15 @@ public sealed class ScriptRunner : IScriptRunner
         IAdDensityService adDensity,
         ICompetitorService competitors,
         ILogger<ScriptRunner> log,
-        ICaptchaSolver? captcha = null)
+        ICaptchaSolver? captcha = null,
+        ICaptchaRecoveryService? captchaRecovery = null)
     {
         _scripts = scripts;
         _domainLists = domainLists;
         _adDensity = adDensity;
         _competitors = competitors;
         _captcha = captcha;
+        _captchaRecovery = captchaRecovery;
         _log     = log;
     }
 
@@ -1134,10 +1143,55 @@ public sealed class ScriptRunner : IScriptRunner
                         await Task.Delay(250, ct);
                     }
 
+                    // Phase 71ii — captcha detection + smart recovery.
+                    // Before parsing ads (which would just return 0 on
+                    // a captcha page), run a JS probe via the recovery
+                    // service that sniffs for known Google bot-wall
+                    // signatures: /sorry/index URL, recaptcha iframe,
+                    // captcha-form id, "unusual traffic" body text.
+                    // Detection short-circuits the retry loop and hands
+                    // off to the recovery brain — there's no point
+                    // retrying 4 more times on the same poisoned
+                    // cookies. The brain decides severity (rotate-only
+                    // vs. rotate + skip-restore vs. + FP regen vs.
+                    // pause-and-notify) based on captcha frequency for
+                    // this proxy/profile + proxy rotation availability.
+                    if (_captchaRecovery is not null &&
+                        await _captchaRecovery.IsCaptchaPageAsync(s, ct))
+                    {
+                        _log.LogWarning(
+                            "search_query: '{Q}' hit captcha wall for '{P}' — invoking recovery",
+                            query, profileName);
+                        var result = await _captchaRecovery.HandleAsync(new CaptchaIncident
+                        {
+                            ProfileName = profileName,
+                            Query       = query,
+                            RunId       = runId,
+                        }, ct);
+                        // The recovery service has already applied
+                        // skip-restore / rotated the proxy / regen'd
+                        // the FP / posted a notification. Throw an
+                        // abort that carries the AutoRelaunchRequested
+                        // hint — RealProfileRunner picks it up and
+                        // re-kicks the profile after the cooldown.
+                        throw new CaptchaRecoveryAbortException(result);
+                    }
+
                     // Parse ads now so foreach_ad inside the same
                     // script body gets a populated list.
                     ctx.Ads.Clear();
                     ctx.Ads.AddRange(await AdParser.ParseAsync(s, ct));
+                    // Phase 71kk — always log the parse result so the
+                    // user can see "AdParser ran and found 0" vs
+                    // "AdParser never ran". Pre-fix the only log line
+                    // was the success branch ("returned N ad(s)") and
+                    // a retry-info line; on the FINAL attempt with 0
+                    // ads no log fired at all, which the user reported
+                    // as "I never see ads being clicked" — they had
+                    // no diagnostic surface to tell why.
+                    _log.LogInformation(
+                        "search_query: '{Q}' attempt {A}/{Max} parsed {N} ad(s) from SERP",
+                        query, attempt, maxAttempts, ctx.Ads.Count);
                     if (ctx.Ads.Count > 0)
                     {
                         _log.LogInformation("search_query: '{Q}' returned {N} ad(s)", query, ctx.Ads.Count);
@@ -3181,8 +3235,34 @@ public sealed class ScriptRunner : IScriptRunner
     /// "script ran cleanly" from "script aborted because the browser
     /// died" — both reached the same successful-completion code path.
     /// </summary>
-    public sealed class ScriptAbortException : Exception
+    public class ScriptAbortException : Exception
     {
         public ScriptAbortException(string m) : base(m) { }
+    }
+
+    /// <summary>
+    /// Phase 71ii — captcha-recovery abort. Thrown by the captcha
+    /// detector after the recovery service has done its work
+    /// (rotated proxy / flagged skip-restore / regenerated FP /
+    /// posted notification). Carries the
+    /// <see cref="CaptchaRecoveryResult"/> so the launcher tier
+    /// (<c>RealProfileRunner</c>) can decide whether to auto-relaunch
+    /// the profile after the recovery cooldown.
+    ///
+    /// <para>Subclassing <see cref="ScriptAbortException"/> means the
+    /// ExecuteAsync top-level catch already finalises the run row /
+    /// closes the browser the same way it does for any other hard
+    /// abort — only the launcher's exception-type check picks up the
+    /// recovery hint.</para>
+    /// </summary>
+    public sealed class CaptchaRecoveryAbortException : ScriptAbortException
+    {
+        public CaptchaRecoveryResult Result { get; }
+
+        public CaptchaRecoveryAbortException(CaptchaRecoveryResult result)
+            : base($"captcha detected — recovery applied: {result.Summary}")
+        {
+            Result = result;
+        }
     }
 }

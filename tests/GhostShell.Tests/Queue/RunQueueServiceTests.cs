@@ -184,6 +184,11 @@ public sealed class RunQueueServiceTests
             => Task.FromResult(true);
         public Task StopAllAsync(CancellationToken ct = default) => Task.CompletedTask;
         public event EventHandler? ActiveChanged { add { } remove { } }
+        // Phase 71ii — IProfileRunner gained MarkSkipRestoreOnce so
+        // the captcha recovery service can flag a profile's NEXT
+        // launch to skip snapshot auto-restore. Fake runs nothing →
+        // no-op stub keeps the queue tests compiling.
+        public void MarkSkipRestoreOnce(string profileName) { }
     }
 
     private sealed class FakeProfileService : IProfileService

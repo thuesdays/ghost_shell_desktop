@@ -94,4 +94,18 @@ public static class SettingsKeys
     /// so the saved choice applies on the first frame; persisted by
     /// the Settings → Appearance tab.</summary>
     public const string UiTheme               = "ui.theme";
+
+    // ─── Phase 71jj — Window geometry persistence ────────────────────
+    // MainWindow saves these on every Closing event (whether the user
+    // is actually quitting via the tray or just hiding to taskbar);
+    // restored once at construction time. Persisting Top/Left as well
+    // as Width/Height so a multi-monitor user keeps the window where
+    // they left it. Maximized state stored separately because
+    // Width/Height under WindowState=Maximized report the maximized
+    // bounds, not the user's preferred restore size.
+    public const string UiWindowWidth         = "ui.window_width";
+    public const string UiWindowHeight        = "ui.window_height";
+    public const string UiWindowTop           = "ui.window_top";
+    public const string UiWindowLeft          = "ui.window_left";
+    public const string UiWindowMaximized     = "ui.window_maximized";
 }

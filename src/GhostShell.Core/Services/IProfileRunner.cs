@@ -69,4 +69,18 @@ public interface IProfileRunner
     /// browser without spawning another. Implementation should NEVER
     /// expose the session if the runner is mid-teardown.</summary>
     IBrowserSession? TryGetActiveSession(string profileName);
+
+    /// <summary>
+    /// Phase 71ii — flag a profile so its NEXT launch skips the
+    /// snapshot auto-restore. Used by the captcha-recovery cycle:
+    /// when ScriptRunner detects a Google captcha (sorry/index
+    /// redirect, recaptcha iframe, "unusual traffic" body) it
+    /// reasonably concludes the saved cookies are poisoned and
+    /// flags the profile so the next launch starts with fresh
+    /// cookies. Flag is consumed (cleared) by the next StartAsync
+    /// for that profile name; subsequent launches restore as
+    /// usual unless the flag is set again. Idempotent — multiple
+    /// calls collapse to one.
+    /// </summary>
+    void MarkSkipRestoreOnce(string profileName);
 }

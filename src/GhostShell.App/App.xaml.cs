@@ -299,6 +299,15 @@ public partial class App : Application
                 s.AddSingleton<ISelfCheckService, SelfCheckService>();
                 s.AddHostedService<GhostShell.Runtime.Fingerprint.FingerprintQualityMonitor>();
 
+                // ─── Phase 71ii: Smart captcha recovery ─────────
+                // Registered before ScriptRunner so DI resolves the
+                // ICaptchaRecoveryService dependency first. The service
+                // owns the multi-level decision tree (rotate IP only /
+                // rotate + skip-restore / rotate + skip-restore + FP
+                // regen / pause + notify) plus the JS captcha probe.
+                s.AddSingleton<ICaptchaRecoveryService,
+                    GhostShell.Runtime.Recovery.CaptchaRecoveryService>();
+
                 // ─── Phase 12: Scripts (model + runner) ─────────
                 s.AddSingleton<IScriptRunner, GhostShell.Runtime.Scripts.ScriptRunner>();
 
