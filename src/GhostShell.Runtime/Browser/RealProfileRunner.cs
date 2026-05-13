@@ -84,6 +84,20 @@ public sealed class RealProfileRunner : IProfileRunner, IAsyncDisposable
     private readonly ConcurrentDictionary<string, byte> _skipRestoreOnce =
         new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>Phase 71ll — per-profile launch counter, throttles the
+    /// auto self-check probe to 1 in every <c>SelfCheckEveryNLaunches</c>
+    /// launches. Pre-throttle every launch fired the probe, which: (a)
+    /// raced the assigned script and crashed the session, (b) wasted
+    /// 5-10s of every run on probes the user doesn't read 99% of the
+    /// time. ConcurrentDictionary because StartAsync can be called from
+    /// any thread (UI, RunnerHost, RunQueueService).</summary>
+    private readonly ConcurrentDictionary<string, int> _launchCounter =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Phase 71ll — self-check runs every Nth launch per
+    /// profile. 5 = "first launch fires it, then every 5th".</summary>
+    private const int SelfCheckEveryNLaunches = 5;
+
     private bool _disposed;
 
     private readonly ISelfCheckService? _selfCheck;
@@ -341,7 +355,17 @@ public sealed class RealProfileRunner : IProfileRunner, IAsyncDisposable
         // Both still work after this gate. What stops working is the
         // implicit "every scripted launch also self-tests in parallel",
         // which is exactly the source of the race.
-        if (_selfCheck is not null && !runAssignedScript)
+        //
+        // Phase 71ll throttle — even on probe-only launches, only run
+        // the self-check probe every Nth launch. The user reported
+        // the probe was being triggered too often; cutting to 1-in-5
+        // matches their requested cadence. First launch (count=1)
+        // also runs so a brand-new profile gets its first FP grade
+        // without a 5-launch warm-up.
+        var launchCount = _launchCounter.AddOrUpdate(profile.Name, 1, (_, n) => n + 1);
+        var shouldSelfCheck = launchCount == 1
+            || (launchCount % SelfCheckEveryNLaunches) == 0;
+        if (_selfCheck is not null && !runAssignedScript && shouldSelfCheck)
         {
             // Capture the CancellationToken VALUE (struct) before the
             // Task.Run closure starts, NOT the CancellationTokenSource

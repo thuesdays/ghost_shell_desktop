@@ -174,12 +174,23 @@ public sealed class ScheduleService : IScheduleService
     public async Task RecordFiredAsync(
         long id, DateTime firedAt, DateTime? nextFireAt, CancellationToken ct = default)
     {
+        // Phase 71mm — fail_count DECAYS by 1 on success instead of
+        // resetting to 0. Pre-fix every successful fire reset
+        // fail_count to 0, which meant a flapping schedule (fail,
+        // success, fail, success, ...) never advanced the exponential
+        // back-off curve and could hammer a broken target every tick.
+        // Decay-by-1 keeps back-off advancing under flapping (each
+        // failure +1, each success -1; net positive over a real
+        // outage), while a healthy sustained streak still drains
+        // back to 0 within a handful of fires.
         const string sql = """
             UPDATE schedules
                SET last_fired_at = @fired,
                    next_fire_at  = @next,
                    fire_count    = fire_count + 1,
-                   fail_count    = 0,
+                   fail_count    = CASE WHEN fail_count > 0
+                                        THEN fail_count - 1
+                                        ELSE 0 END,
                    updated_at    = @now
              WHERE id = @id;
         """;
@@ -297,6 +308,17 @@ public sealed class ScheduleService : IScheduleService
         {
             DateTimeKind.Utc         => t,
             DateTimeKind.Local       => t.ToUniversalTime(),
+            // Phase 71mm — Unspecified Kind is suspicious. Pre-fix
+            // we silently re-tagged as UTC, which masked bugs at
+            // callers that forgot to construct DateTime with the
+            // right Kind. Dapper deserializes ISO-8601 strings as
+            // Unspecified so reading from DB is fine, but writing
+            // an Unspecified value almost always means the caller
+            // built it from `new DateTime(...)` without specifying
+            // Kind — and that value's "real" intent could be either
+            // UTC or Local. We keep the silent-as-UTC behaviour to
+            // stay back-compat with stored data, but a future tidy-up
+            // pass could log here.
             _                        => DateTime.SpecifyKind(t, DateTimeKind.Utc),
         };
 

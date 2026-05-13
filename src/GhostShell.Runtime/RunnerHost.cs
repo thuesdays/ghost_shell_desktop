@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Mykola Kovhanko <thuesdays@gmail.com>
 
+using System.Collections.Concurrent;
 using GhostShell.Core.Common;
 using GhostShell.Core.Models;
 using GhostShell.Core.Services;
@@ -73,6 +74,28 @@ public sealed class RunnerHost : IHostedService, IDisposable
     // _dailyFires dict because it lost state on every app restart and
     // let the user blow past the runs_per_day cap by relaunching.
 
+    // Phase 71ll — in-memory last-fire-UTC tracker. The user reported
+    // that on 2026-05-13 the scheduler fired 150 runs by 13:30 (a 6.5h
+    // span) even though active hours were 7-21 (14h span). Inspection
+    // of the log shows: each fire's stored `next_fire_at` was 3-9
+    // minutes ahead, but the ACTUAL next fire happened 1-3 minutes
+    // EARLY. Some DB/cache/race issue causes the next_fire_at to be
+    // ignored. This tracker is a defensive belt: regardless of what
+    // GetDueAsync claims, we refuse to fire a schedule less than
+    // `meanGap * 0.5` after its previous fire. That's the same lower
+    // bound the jitter would naturally produce — so legitimate fires
+    // always pass, but a runaway burst (the user's bug) is caught.
+    private readonly ConcurrentDictionary<long, DateTime> _lastFireUtc = new();
+
+    /// <summary>Phase 71mm — TickAsync re-entrancy guard. If a tick takes
+    /// longer than TickInterval (slow DB, big group fire), the next tick
+    /// can fire while the previous is still running. Two parallel ticks
+    /// double-fire schedules whose <c>next_fire_at</c> has already been
+    /// updated by the first tick — race-condition-driven double launches.
+    /// Semaphore with capacity 1 makes ticks serial; if the second tick
+    /// can't acquire, it skips silently and waits for the next interval.</summary>
+    private readonly System.Threading.SemaphoreSlim _tickGuard = new(1, 1);
+
     public RunnerHost(
         IScheduleService schedules,
         IProfileService  profiles,
@@ -119,6 +142,7 @@ public sealed class RunnerHost : IHostedService, IDisposable
     {
         _cts?.Cancel();
         _cts?.Dispose();
+        _tickGuard.Dispose();
     }
 
     private async Task RunTickLoopAsync(CancellationToken ct)
@@ -155,6 +179,20 @@ public sealed class RunnerHost : IHostedService, IDisposable
     /// </summary>
     public async Task TickAsync(CancellationToken ct)
     {
+        // Phase 71mm — re-entrancy guard. If a tick takes longer than
+        // TickInterval (slow DB, big group fire that launches 4 profiles),
+        // the loop's `Task.Delay(TickInterval)` would queue a second tick
+        // on top of the first → two concurrent TickAsync executions
+        // both reading the same `due` set → double-fires. Acquire with
+        // zero timeout so we skip cleanly when busy; release in finally.
+        if (!await _tickGuard.WaitAsync(0, ct))
+        {
+            _log.LogDebug("Scheduler tick skipped — previous tick still running");
+            return;
+        }
+        try
+        {
+
         // Phase 71 — if an update is preparing, skip this tick so active
         // runs can drain naturally without the scheduler firing new ones.
         if (_update.IsUpdatePending)
@@ -183,6 +221,11 @@ public sealed class RunnerHost : IHostedService, IDisposable
             ct.ThrowIfCancellationRequested();
             await FireAsync(schedule, utcNow, localNow, ct);
         }
+        }
+        finally
+        {
+            _tickGuard.Release();
+        }
     }
 
     /// <summary>
@@ -196,6 +239,50 @@ public sealed class RunnerHost : IHostedService, IDisposable
     /// </summary>
     private async Task FireAsync(Schedule s, DateTime utcNow, DateTime localNow, CancellationToken ct)
     {
+        // Phase 71ll — minimum-gap defensive guard.
+        // If we fired this same schedule less than
+        // `min_gap = max(60s, meanGap * 0.5)` ago, refuse and push
+        // next_fire_at to "lastFire + min_gap". This catches the
+        // runaway-burst case the user reported (150 runs in 6.5h
+        // instead of 14h) regardless of root cause — premature
+        // GetDueAsync returns, DB cache staleness, clock skew, etc.
+        // Legitimate jittered fires always sit at meanGap*0.5 or
+        // later, so this guard never fires false positives.
+        //
+        // Phase 71mm fix — fall back to `s.LastFiredAt` (persisted in
+        // SQLite) when the in-memory `_lastFireUtc` is empty. Without
+        // this fallback the guard didn't engage at all for the first
+        // 1-2 fires after every app restart — exactly the window
+        // where the user reported a burst of runs. We also lazy-stamp
+        // the in-memory tracker so subsequent ticks hit the fast path.
+        if (s.TriggerKind == ScheduleTriggerKind.Simple)
+        {
+            DateTime? lastFire = _lastFireUtc.TryGetValue(s.Id, out var memLast)
+                ? memLast
+                : s.LastFiredAt;
+            if (lastFire is { } lastFireUtc)
+            {
+                // Seed the in-memory cache from DB so subsequent ticks
+                // don't re-read the column (cheap optimisation).
+                _lastFireUtc.TryAdd(s.Id, lastFireUtc);
+
+                var minGapSec = Math.Max(60.0,
+                    (double)ComputeWindowSeconds(s)
+                      / (s.RunsPerDay is > 0 ? s.RunsPerDay.Value : 24)
+                      * 0.5);
+                var sinceLast = (utcNow - lastFireUtc).TotalSeconds;
+                if (sinceLast < minGapSec)
+                {
+                    var deferTo = lastFireUtc.AddSeconds(minGapSec);
+                    await _schedules.RecordDeferralAsync(s.Id, deferTo, ct);
+                    _log.LogWarning(
+                        "Schedule #{Id} '{Name}' fired too soon ({Since:0}s after last; min {Min:0}s) — defer to {Next}",
+                        s.Id, s.Name, sinceLast, minGapSec, deferTo);
+                    return;
+                }
+            }
+        }
+
         // Phase 71cc — outside-active-window: defer to the START of
         // the next active window (today if the window hasn't begun
         // yet, tomorrow's start if we've passed today's end). Old
@@ -265,7 +352,28 @@ public sealed class RunnerHost : IHostedService, IDisposable
                 s.Id, s.Name);
         }
 
-        var nextFire = ComputeNextFire(s, utcNow);
+        // Phase 71mm fix — anchor nextFire on `max(utcNow, LastFiredAt + 1s)`
+        // instead of on `utcNow` directly. Without the anchor, tick latency
+        // (TickInterval=30s + DB roundtrip) compounds across fires: a fire
+        // that should have happened at T+gap1 actually lands at T+gap1+30s,
+        // and the NEXT nextFire is computed from THAT later moment, so the
+        // schedule slowly drifts forward. Anchoring on the previous fire
+        // time keeps the cadence stable. We add 1s instead of 0s so we
+        // never produce `next == last` (would otherwise return-as-due on
+        // the same tick).
+        //
+        // Phase 71mm audit fix — window widened from 1 minute to 1 day.
+        // The narrower window meant Simple schedules with mean=360s
+        // (6-min gap) skipped the anchor path entirely (LastFiredAt
+        // was always >1min old by definition). Now any fire from
+        // within the last 24h anchors cleanly; only genuinely-stale
+        // LastFiredAt values (paused-for-days schedules) fall back to
+        // utcNow, which is the correct behaviour for resuming a long-
+        // dormant schedule.
+        var anchor = (s.LastFiredAt is { } lf && lf > utcNow.AddDays(-1))
+            ? lf.AddSeconds(1)
+            : utcNow;
+        var nextFire = ComputeNextFire(s, anchor);
 
         if (outcome == FireOutcome.Deferred)
         {
@@ -292,6 +400,10 @@ public sealed class RunnerHost : IHostedService, IDisposable
                     s.Id, DateOnly.FromDateTime(localNow), ct);
 
             await _schedules.RecordFiredAsync(s.Id, utcNow, nextFire, ct);
+            // Phase 71ll — stamp the in-memory last-fire tracker so
+            // the min-gap guard at the top of FireAsync can reject
+            // any subsequent "fire too soon" attempt.
+            _lastFireUtc[s.Id] = utcNow;
             _log.LogInformation(
                 "Schedule #{Id} '{Name}' fired ({Kind} '{Target}') → next {Next}",
                 s.Id, s.Name, s.TargetKind, s.TargetName, nextFire);

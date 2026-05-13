@@ -125,10 +125,50 @@ public sealed partial class SchedulerViewModel : BaseViewModel, IDisposable
         if (selected is null) return;
         var profiles = (await _profiles.ListAsync()).Select(p => p.Name).ToList();
         var groups   = (await _groups.ListAsync()).Select(g => g.Name).ToList();
-        var saved = await _dialogs.ShowScheduleEditorAsync(selected.Schedule, profiles, groups);
+        var before = selected.Schedule;
+        var saved = await _dialogs.ShowScheduleEditorAsync(before, profiles, groups);
         if (!saved) return;
+
+        // Phase 71mm fix — if the user changed any cadence-affecting
+        // field (TriggerKind, RunsPerDay, IntervalSec, ActiveFromHour,
+        // ActiveToHour, CronExpr, UseJitter), recompute next_fire_at
+        // so the new config takes effect right away. Without this the
+        // stale next_fire_at survives the edit and the schedule keeps
+        // running on the OLD cadence until the next natural fire —
+        // confusing UX ("I set runs_per_day=300 but I see the old
+        // gap pattern for another 30 minutes").
+        var fresh = (await _schedules.ListAsync()).FirstOrDefault(x => x.Id == before.Id);
+        if (fresh is not null && CadenceChanged(before, fresh))
+        {
+            var nextFire = RunnerHostNextFireGuess(fresh);
+            await _schedules.RecordDeferralAsync(fresh.Id, nextFire);
+            _log.LogInformation(
+                "Schedule #{Id} '{Name}' edited — cadence changed, next_fire_at recomputed to {Next}",
+                fresh.Id, fresh.Name, nextFire);
+        }
+
         await ReloadAsync();
     }
+
+    /// <summary>True if any field that affects the next-fire computation
+    /// differs between the two schedule snapshots.</summary>
+    private static bool CadenceChanged(Schedule a, Schedule b) =>
+        a.TriggerKind     != b.TriggerKind
+     || a.RunsPerDay      != b.RunsPerDay
+     || a.IntervalSec     != b.IntervalSec
+     || a.ActiveFromHour  != b.ActiveFromHour
+     || a.ActiveToHour    != b.ActiveToHour
+     || a.CronExpr        != b.CronExpr
+     || a.UseJitter       != b.UseJitter
+     || a.MinJitterSec    != b.MinJitterSec
+     || a.MaxJitterSec    != b.MaxJitterSec
+     // Phase 71mm audit fix — ActiveDays change affects which days
+     // the schedule fires on (via IsInActiveWindow). Pre-fix the
+     // helper ignored ActiveDays so editing Mon-Fri → all-days
+     // didn't recompute next_fire_at. SequenceEqual instead of
+     // reference equality so identical-content lists compare equal
+     // even when they're separate List<int> instances from Dapper.
+     || !a.ActiveDays.SequenceEqual(b.ActiveDays);
 
     [RelayCommand]
     private async Task DeleteAsync(ScheduleRowVm? selected)
@@ -157,15 +197,33 @@ public sealed partial class SchedulerViewModel : BaseViewModel, IDisposable
     private async Task ToggleEnabledAsync(ScheduleRowVm? selected)
     {
         if (selected is null) return;
-        var newState = !selected.Schedule.Enabled;
+        var s = selected.Schedule;
+        var newState = !s.Enabled;
         try
         {
-            await _schedules.SetEnabledAsync(selected.Schedule.Id, newState);
+            await _schedules.SetEnabledAsync(s.Id, newState);
+
+            // Phase 71mm fix — when re-enabling a paused schedule we
+            // MUST recompute next_fire_at. Pre-fix it kept the stale
+            // value from before the pause, which was almost always in
+            // the past by the time the user re-enabled → next tick
+            // would fire immediately, blowing through any pacing.
+            // Recompute on every enable (cheap) so the schedule
+            // resumes naturally with a fresh cadence anchor.
+            if (newState)
+            {
+                var nextFire = RunnerHostNextFireGuess(s);
+                await _schedules.RecordDeferralAsync(s.Id, nextFire);
+                _log.LogInformation(
+                    "Schedule #{Id} '{Name}' resumed — next_fire_at recomputed to {Next}",
+                    s.Id, s.Name, nextFire);
+            }
+
             await ReloadAsync();
         }
         catch (Exception ex)
         {
-            _log.LogError(ex, "Toggle enabled #{Id} failed", selected.Schedule.Id);
+            _log.LogError(ex, "Toggle enabled #{Id} failed", s.Id);
         }
     }
 
@@ -251,7 +309,15 @@ public sealed partial class SchedulerViewModel : BaseViewModel, IDisposable
     /// <summary>Guess at the next fire time for run-now bookkeeping.
     /// Mirrors <c>RunnerHost.ComputeNextFire</c> without referencing
     /// the Runtime project (the App project doesn't depend on Runtime
-    /// directly — that's a Phase-3 layering rule).</summary>
+    /// directly — that's a Phase-3 layering rule).
+    ///
+    /// <para>Phase 71mm fix — pre-fix the Simple branch fell through to
+    /// `IntervalSec ?? 60s`, which made every "Run Now" on a Simple
+    /// schedule re-fire 60 seconds later regardless of the configured
+    /// runs_per_day. That bypassed the entire jitter+window pacing.
+    /// Now we compute the Simple cadence the same way RunnerHost does:
+    /// gap = (window / runs_per_day), jittered ±50% if UseJitter is on.</para>
+    /// </summary>
     private static DateTime RunnerHostNextFireGuess(Schedule s)
     {
         var nowUtc = DateTime.UtcNow;
@@ -262,8 +328,41 @@ public sealed partial class SchedulerViewModel : BaseViewModel, IDisposable
             var nextLocal = cron.NextAfter(nowUtc.ToLocalTime());
             return nextLocal?.ToUniversalTime() ?? nowUtc.AddDays(1);
         }
+        if (s.TriggerKind == ScheduleTriggerKind.Simple)
+        {
+            var windowSec = ComputeWindowSecondsLocal(s);
+            var runs = s.RunsPerDay is > 0 ? s.RunsPerDay.Value : 24;
+            // Legacy back-compat — pre-V28 rows used manual min/max.
+            if ((s.RunsPerDay is null or 0)
+                && s.MinJitterSec is > 0
+                && s.MaxJitterSec is > 0
+                && s.MaxJitterSec.Value >= s.MinJitterSec.Value)
+            {
+                var legacy = Random.Shared.Next(
+                    s.MinJitterSec.Value, s.MaxJitterSec.Value + 1);
+                return nowUtc.AddSeconds(legacy);
+            }
+            var meanGap = Math.Clamp((double)windowSec / runs, 5.0, 6 * 3600.0);
+            var gap = s.UseJitter
+                ? meanGap * (0.5 + Random.Shared.NextDouble())
+                : meanGap;
+            return nowUtc.AddSeconds(gap);
+        }
         var seconds = s.IntervalSec is > 0 ? s.IntervalSec.Value : 60;
         return nowUtc.AddSeconds(seconds);
+    }
+
+    /// <summary>Local copy of RunnerHost.ComputeWindowSeconds to keep
+    /// the App project off the Runtime reference (Phase-3 layering
+    /// rule). 7..21 inclusive = 15h. Wrap-around 22..6 = 9h.</summary>
+    private static int ComputeWindowSecondsLocal(Schedule s)
+    {
+        if (s.ActiveFromHour is { } from && s.ActiveToHour is { } to)
+        {
+            int hours = to >= from ? (to - from + 1) : (24 - from) + (to + 1);
+            return hours * 3600;
+        }
+        return 24 * 3600;
     }
 
     public void Dispose()
