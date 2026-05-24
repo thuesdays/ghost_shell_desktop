@@ -161,6 +161,18 @@ public sealed class BrowserLauncher : IBrowserLauncher
         if (OperatingSystem.IsWindows())
             LaunchPreflight.Run(userDataDir, profile.Name, _log);
 
+        // ─── Phase 71nn: heal corrupted Chrome JSON state ─────────
+        // Cheap pre-launch sweep: stat Local State + Default/Preferences
+        // + Default/Secure Preferences and quarantine any that are
+        // 0 bytes or unparseable JSON. Without this the patched Chrome
+        // exits instantly during boot and we get
+        //   "session not created — cannot parse internal JSON template:
+        //    EOF while parsing a value at line 1 column 0 (SessionNotCreated)"
+        // which retries every 30 s forever (back-off ceiling = 3600 s
+        // but RunnerHost still re-fires on the back-off cadence). Three
+        // tiny file probes per launch — negligible cost on the hot path.
+        ChromeProfileHealer.HealProfile(userDataDir, _log);
+
         // Phase 27 — gather the extensions the profile should load.
         // The service is optional so this launcher remains usable in
         // older test rigs that don't wire IExtensionService.
@@ -280,6 +292,78 @@ public sealed class BrowserLauncher : IBrowserLauncher
             driver = await Task.Run(
                 () => new ChromeDriver(service, options, TimeSpan.FromSeconds(60)),
                 ct);
+        }
+        catch (Exception ex) when (ChromeProfileHealer.LooksLikeCorruptJsonFailure(ex))
+        {
+            // Phase 71nn — the dreaded
+            //   "cannot parse internal JSON template: EOF while parsing
+            //    a value at line 1 column 0 (SessionNotCreated)"
+            // failure. The pre-launch heal sweep didn't catch this file
+            // (maybe it was clean THEN, but a previous half-aborted
+            // chrome.exe truncated it on its way out — possible because
+            // chromedriver writes Local State during the failed boot
+            // attempt itself). Try once more: re-heal, dispose the
+            // dead service, then rebuild ChromeDriverService + retry
+            // the ctor. ChromeDriverService is single-use after a
+            // failed Start so we MUST recreate it.
+            _log.LogWarning(ex,
+                "ChromeDriver ctor failed for '{Name}' with corrupt-JSON signature — " +
+                "healing profile and retrying once", profile.Name);
+
+            try { service.Dispose(); } catch { /* swallow */ }
+
+            var healed = ChromeProfileHealer.HealProfile(userDataDir, _log);
+            if (healed == 0)
+            {
+                _log.LogWarning(
+                    "ChromeProfileHealer reported nothing to heal for '{Name}' yet ctor still " +
+                    "failed with corrupt-JSON signature — Chrome install dir may be damaged. " +
+                    "Letting the original error propagate so the user sees it",
+                    profile.Name);
+                if (forwarder is not null)
+                {
+                    try { await forwarder.DisposeAsync(); } catch { /* swallow */ }
+                }
+                throw;
+            }
+
+            // Rebuild the service + log path. Same parameters as above
+            // — just a fresh ChromeDriverService instance.
+            service = ChromeDriverService.CreateDefaultService(driverDir, driverExe);
+            service.HideCommandPromptWindow      = true;
+            service.InitializationTimeout        = TimeSpan.FromSeconds(30);
+            try
+            {
+                var logsDir2 = AppPaths.LogsDir;
+                var safeName2 = string.Concat(profile.Name.Where(c =>
+                    char.IsLetterOrDigit(c) || c is '-' or '_'));
+                var stamp2    = DateTime.Now.ToString("yyyyMMdd-HHmmss");
+                service.LogPath              = Path.Combine(logsDir2, $"chromedriver-{safeName2}-{stamp2}-heal.log");
+                service.EnableVerboseLogging = true;
+            }
+            catch { /* log path is diagnostic — never fail retry on it */ }
+
+            try
+            {
+                driver = await Task.Run(
+                    () => new ChromeDriver(service, options, TimeSpan.FromSeconds(60)),
+                    ct);
+                _log.LogInformation(
+                    "ChromeDriver ctor succeeded for '{Name}' after healing {Count} corrupt file(s)",
+                    profile.Name, healed);
+            }
+            catch (Exception ex2)
+            {
+                _log.LogError(ex2,
+                    "ChromeDriver ctor STILL failed for '{Name}' after heal+retry — " +
+                    "giving up; see chromedriver-*-heal.log for details", profile.Name);
+                try { service.Dispose(); } catch { /* swallow */ }
+                if (forwarder is not null)
+                {
+                    try { await forwarder.DisposeAsync(); } catch { /* swallow */ }
+                }
+                throw;
+            }
         }
         catch (Exception ex)
         {

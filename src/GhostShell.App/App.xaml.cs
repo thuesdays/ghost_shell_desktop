@@ -459,6 +459,30 @@ public partial class App : Application
             return;
         }
 
+        // Phase 71nn — heal corrupted Chrome JSON state across every
+        // existing profile dir. Runs ONCE on startup so that after a
+        // self-update / reinstall / OS-level crash, the very next
+        // browser launch boots cleanly instead of looping on
+        //   "session not created — cannot parse internal JSON template:
+        //    EOF while parsing a value at line 1 column 0 (SessionNotCreated)"
+        // until the user notices and manually wipes the profile.
+        //
+        // Cheap (3 file stats per profile, plus a JsonDocument.Parse
+        // for non-empty files), runs BEFORE Host.StartAsync so it
+        // completes before the RunnerHost background loop starts firing
+        // schedules. Failure is non-fatal — the per-launch heal in
+        // BrowserLauncher.LaunchAsync is a second line of defence.
+        try
+        {
+            ChromeProfileHealer.HealAllProfiles(AppPaths.ProfilesDir, bootLogger);
+        }
+        catch (Exception ex)
+        {
+            bootLogger.LogWarning(ex,
+                "ChromeProfileHealer startup sweep threw — continuing; " +
+                "per-launch heal in BrowserLauncher will still catch corruption");
+        }
+
         // Update splash: services loading, about to start host.
         splash.SetProgress(50, "Loading services…");
 
