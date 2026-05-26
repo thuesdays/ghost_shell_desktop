@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Mykola Kovhanko <thuesdays@gmail.com>
 
 using System.Collections.Concurrent;
+using GhostShell.Core.Common;
 using GhostShell.Core.Models;
 using GhostShell.Core.Services;
 using Microsoft.Extensions.Hosting;
@@ -169,8 +170,14 @@ public sealed class RunQueueService : BackgroundService, IRunQueueService
         // 2) Start Pending jobs whose ScheduledAt has arrived if we
         //    have headroom under the concurrency cap.
         var runningCount = snapshot.Count(j => j.Status == QueuedRunStatus.Running);
+        // Phase 71oo — also gate on NotBefore so a ProfileBusyException
+        // catch (which flips Status back to Pending) doesn't immediately
+        // re-fire on the next 500ms tick. Without this we'd hit a 2 Hz
+        // re-throw loop until the racing launch crosses into _sessions.
         var due = snapshot
-            .Where(j => j.Status == QueuedRunStatus.Pending && j.ScheduledAt <= now)
+            .Where(j => j.Status == QueuedRunStatus.Pending
+                        && j.ScheduledAt <= now
+                        && (j.NotBefore is null || j.NotBefore <= now))
             .OrderBy(j => j.ScheduledAt)
             .ToList();
         foreach (var job in due)
@@ -213,6 +220,38 @@ public sealed class RunQueueService : BackgroundService, IRunQueueService
                             runAssignedScript: runScript,
                             restoreSession:    restoreSession);
                         job.RunId = runId;
+                    }
+                    catch (ProfileBusyException)
+                    {
+                        // Phase 71oo — profile is already being launched
+                        // by another path (manual Run-now, scheduler tick,
+                        // an earlier queue job that's still booting).
+                        // Don't mark Failed — flip back to Pending so the
+                        // next dispatcher tick retries naturally. Without
+                        // this, a single race burns the job permanently.
+                        //
+                        // Phase 71oo audit fix — push ScheduledAt forward
+                        // by 5 s. The dispatcher ticks every 500 ms and
+                        // would otherwise re-fire this job 10×/sec until
+                        // the OTHER launch crosses into _sessions (the
+                        // gate is held during chrome boot, so the active-
+                        // profile guard at line 183 doesn't see the
+                        // launch yet). The 5 s debounce keeps the log /
+                        // UI churn bounded; longer than chrome's typical
+                        // boot but short enough that legitimate retries
+                        // still feel responsive.
+                        _log.LogInformation(
+                            "RunQueue: '{Profile}' (id={Id}) deferred — already launching elsewhere; will retry in 5s",
+                            job.ProfileName, job.Id);
+                        job.Status      = QueuedRunStatus.Pending;
+                        job.StartedAt   = null;
+                        job.ErrorMessage = null;
+                        // NotBefore is init-additive (ScheduledAt is
+                        // init-only and we mustn't shift the user's
+                        // original stagger plan). Dispatcher's gate
+                        // below ANDs ScheduledAt + NotBefore.
+                        job.NotBefore   = DateTime.UtcNow.AddSeconds(5);
+                        QueueChanged?.Invoke(this, EventArgs.Empty);
                     }
                     catch (Exception startEx)
                     {

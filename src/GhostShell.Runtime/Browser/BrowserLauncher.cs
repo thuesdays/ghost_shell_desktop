@@ -36,6 +36,13 @@ public sealed class BrowserLauncher : IBrowserLauncher
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<BrowserLauncher> _log;
 
+    // Phase 71oo — per-profile launch gate. Prevents the
+    // "DevToolsActivePort file doesn't exist" failure caused by two
+    // concurrent LaunchAsync calls for the same profile killing each
+    // other's chrome in the preflight orphan-reaper. See the class doc
+    // on ProfileLaunchGate for the full story.
+    private readonly ProfileLaunchGate _launchGate = new();
+
     public BrowserLauncher(
         IChromiumLocator locator,
         IProxyService proxies,
@@ -58,6 +65,17 @@ public sealed class BrowserLauncher : IBrowserLauncher
     public async Task<IBrowserSession> LaunchAsync(
         Profile profile, CancellationToken ct = default)
     {
+        // Phase 71oo — acquire the per-profile launch gate BEFORE any
+        // real work (locator / proxy / forwarder). Throws
+        // ProfileBusyException if another LaunchAsync is mid-flight
+        // for the same profile. Released by the `using` Dispose when
+        // this method returns (success OR failure), at which point
+        // the session is fully constructed and any subsequent launch
+        // that intentionally replaces this one will preflight-kill
+        // its chrome — which is the correct behaviour for a fresh
+        // launch replacing a leftover session.
+        using var gate = _launchGate.Acquire(profile.Name);
+
         // _locator.Locate() walks the filesystem looking for chrome.exe
         // / chromedriver.exe. On a cold disk this can take 100-300ms.
         // Wrap in Task.Run so it doesn't block the UI thread when

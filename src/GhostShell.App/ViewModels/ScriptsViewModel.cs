@@ -523,6 +523,16 @@ public sealed partial class ScriptsViewModel : BaseViewModel
                     : p with { AssignedScriptId = scriptId };
                 await _runner.StartAsync(rebound);
             }
+            catch (GhostShell.Core.Common.ProfileBusyException)
+            {
+                // Phase 71oo — concurrent launch race; not a real
+                // failure. Don't add to the "failed" list — that would
+                // surface a warning dialog when the user's other
+                // launch (Run-now / scheduler / queue) will complete
+                // successfully.
+                _log.LogInformation(
+                    "Run-from-editor: '{P}' skipped — already launching elsewhere", name);
+            }
             catch (Exception ex)
             {
                 _log.LogWarning(ex, "Run-from-editor failed for profile '{P}'", name);

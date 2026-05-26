@@ -715,12 +715,30 @@ public sealed partial class FingerprintViewModel : BaseViewModel
             {
                 var profile = await _profiles.GetAsync(SelectedProfile)
                     ?? throw new InvalidOperationException($"Profile '{SelectedProfile}' not found");
-                _ = await _runner.StartAsync(profile, ct: default, runAssignedScript: false);
-                weStartedTheBrowser = true;
-                // Give the chromedriver about:blank navigate + the
-                // self-check probe (3s after launch) breathing room
-                // before we hijack the session.
-                await Task.Delay(TimeSpan.FromSeconds(4));
+                try
+                {
+                    _ = await _runner.StartAsync(profile, ct: default, runAssignedScript: false);
+                    weStartedTheBrowser = true;
+                    // Give the chromedriver about:blank navigate + the
+                    // self-check probe (3s after launch) breathing room
+                    // before we hijack the session.
+                    await Task.Delay(TimeSpan.FromSeconds(4));
+                }
+                catch (GhostShell.Core.Common.ProfileBusyException)
+                {
+                    // Phase 71oo — user clicked Probe while a parallel
+                    // launch (Run-now, scheduler, run-queue) had the
+                    // gate. Tell the user to wait and bail out cleanly
+                    // instead of bubbling the raw exception into the
+                    // global error handler.
+                    await _dialogs.ConfirmAsync(
+                        "Profile already launching",
+                        $"Profile '{SelectedProfile}' is already being launched elsewhere. " +
+                        "Wait a few seconds and click Probe again — the existing launch " +
+                        "will be ready shortly.",
+                        "OK", ConfirmSeverity.Info);
+                    return;
+                }
             }
 
             var session = _runner.TryGetActiveSession(SelectedProfile);

@@ -345,6 +345,22 @@ public sealed class RunnerHost : IHostedService, IDisposable
                 _ => FireOutcome.Failed,
             };
         }
+        catch (ProfileBusyException pbex)
+        {
+            // Phase 71oo — concurrent LaunchAsync race. Another caller
+            // (Run-now click, parallel scheduler tick after a resume,
+            // run-queue dispatcher, etc.) is already launching the
+            // same profile. NOT a failure — set outcome=Deferred so
+            // the existing path pushes next_fire_at forward without
+            // bumping fail_count / fire_count. Log at INFO so it shows
+            // up in the activity log if the user wonders why a tick
+            // didn't fire, but doesn't pollute the error stream.
+            _log.LogInformation(
+                "Schedule #{Id} '{Name}' deferred — profile '{Profile}' is already launching " +
+                "(concurrent Run-now or parallel scheduler tick); will retry next cycle",
+                s.Id, s.Name, pbex.ProfileName);
+            outcome = FireOutcome.Deferred;
+        }
         catch (Exception ex)
         {
             _log.LogError(ex,
@@ -514,6 +530,17 @@ public sealed class RunnerHost : IHostedService, IDisposable
                 // Tiny stagger so chromedriver doesn't see N parallel
                 // boot races for unique --remote-debugging-port slots.
                 await Task.Delay(TimeSpan.FromMilliseconds(150), ct);
+            }
+            catch (ProfileBusyException)
+            {
+                // Phase 71oo — another launch is already in flight for
+                // this group member (manual Run on the profile card,
+                // concurrent scheduler tick, etc.). Skip this member
+                // — it's effectively already covered. Don't log as
+                // error; it's normal back-off, not failure.
+                _log.LogInformation(
+                    "Group '{Group}' member '{Profile}' skipped — already launching elsewhere",
+                    groupName, name);
             }
             catch (Exception ex)
             {

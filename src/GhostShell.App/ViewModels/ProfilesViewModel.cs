@@ -6,6 +6,7 @@ using System.Windows;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using GhostShell.App.Dialogs;
+using GhostShell.Core.Common;
 using GhostShell.Core.Models;
 using GhostShell.Core.Services;
 using Microsoft.Extensions.Logging;
@@ -331,6 +332,21 @@ public sealed partial class ProfilesViewModel : BaseViewModel
                 selected.Profile.Name, runId);
             // ActiveChanged event will refresh IsRunning; no manual sync needed.
         }
+        catch (ProfileBusyException pbex)
+        {
+            // Phase 71oo — user double-clicked Start, or clicked Start
+            // while the scheduler / run-queue was already mid-launch
+            // for this profile. Don't surface as an error — the OTHER
+            // launch is making progress; just tell the user to wait.
+            _log.LogInformation(
+                "Start of '{Name}' deferred — already launching", pbex.ProfileName);
+            await _dialogs.ConfirmAsync(
+                "Already launching",
+                $"Profile '{pbex.ProfileName}' is already being launched. " +
+                "Wait a few seconds — the existing launch will complete shortly.",
+                "OK",
+                ConfirmSeverity.Info);
+        }
         catch (Exception ex)
         {
             _log.LogError(ex, "Failed to start profile '{Name}'", selected.Profile.Name);
@@ -464,6 +480,15 @@ public sealed partial class ProfilesViewModel : BaseViewModel
                         row.Profile.Name, runId);
                     if (opts.StaggerSeconds > 0)
                         await Task.Delay(TimeSpan.FromSeconds(opts.StaggerSeconds));
+                }
+                catch (ProfileBusyException)
+                {
+                    // Phase 71oo — bulk-start picked a profile that's
+                    // already launching. Skip silently (the stagger
+                    // means the next iteration won't race).
+                    _log.LogInformation(
+                        "Bulk-start (legacy path): '{Name}' skipped — already launching",
+                        row.Profile.Name);
                 }
                 catch (Exception ex)
                 {

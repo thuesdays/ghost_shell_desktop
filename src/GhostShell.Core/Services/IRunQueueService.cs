@@ -82,6 +82,17 @@ public sealed class QueuedRun
     public long? RunId { get; set; }
     public string? ErrorMessage { get; set; }
     public DateTime EnqueuedAt { get; init; } = DateTime.UtcNow;
+
+    /// <summary>
+    /// Phase 71oo — optional debounce timestamp. When the dispatcher
+    /// flips a job back to <see cref="QueuedRunStatus.Pending"/> after
+    /// a <c>ProfileBusyException</c>, it sets this a few seconds in
+    /// the future so the next tick (every 500 ms) doesn't immediately
+    /// re-fire and produce a hot retry loop. Effective dispatch
+    /// readiness = <c>max(ScheduledAt, NotBefore)</c>. Null = no
+    /// debounce, treat ScheduledAt as authoritative.
+    /// </summary>
+    public DateTime? NotBefore { get; set; }
 }
 
 public enum QueuedRunStatus

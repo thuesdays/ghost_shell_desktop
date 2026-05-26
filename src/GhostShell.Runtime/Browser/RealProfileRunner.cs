@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Mykola Kovhanko <thuesdays@gmail.com>
 
 using System.Collections.Concurrent;
+using GhostShell.Core.Common;
 using GhostShell.Core.Models;
 using GhostShell.Core.Services;
 using Microsoft.Extensions.Logging;
@@ -203,25 +204,11 @@ public sealed class RealProfileRunner : IProfileRunner, IAsyncDisposable
         // to the in-memory dictionary.
         var runId = await _runs.StartAsync(profile.Name, ct);
 
-        // Phase 59 — bump the per-profile run_count + last_run_at
-        // counter so the Profiles page card's "RUNS" tile shows the
-        // accumulated total (the legacy desktop never wired this and
-        // the counter sat at 0 forever, even after dozens of starts).
-        // Best-effort: a counter-bump failure shouldn't sink the run
-        // — we already have the runs row.
-        if (_profiles is not null)
-        {
-            try
-            {
-                await _profiles.RecordRunStartedAsync(profile.Name, DateTime.UtcNow, ct);
-            }
-            catch (Exception ex)
-            {
-                _log.LogWarning(ex,
-                    "Couldn't bump run_count for '{Name}' (run #{Run})",
-                    profile.Name, runId);
-            }
-        }
+        // Phase 71oo audit fix — the RecordRunStartedAsync bump that
+        // used to live here has been moved AFTER the launch succeeds.
+        // Pre-fix: a ProfileBusyException race incorrectly bumped the
+        // profile's run_count even though no browser ever started. The
+        // bump now happens once we hold a real session in hand.
 
         // Phase 71 — Auto-rotate IP when enabled on the profile AND the
         // assigned proxy has rotation configured. Best-effort: a rotation
@@ -272,6 +259,41 @@ public sealed class RealProfileRunner : IProfileRunner, IAsyncDisposable
         {
             session = await _launcher.LaunchAsync(profile, ct);
         }
+        catch (ProfileBusyException)
+        {
+            // Phase 71oo — another LaunchAsync for the same profile is
+            // already in flight (Run-now race with scheduler tick,
+            // run-queue dispatcher firing twice, etc.). NOT a launch
+            // failure — close the runs row with exit_code=0 and a
+            // distinctive stopReason so it neither bumps fail counters
+            // nor pollutes "successful runs" stats. Log at INFO so it's
+            // visible in the activity tail but doesn't pollute the
+            // error stream. Re-throw so callers can present a friendly
+            // UI message ("Profile is already launching, try again in
+            // a moment") instead of a stack trace.
+            _log.LogInformation(
+                "Skipped launch for '{Name}' (run #{Run}) — already launching elsewhere",
+                profile.Name, runId);
+            try
+            {
+                // Phase 71oo audit fix — exit_code is the sentinel -2
+                // (Run.ExitCodeDeferredBusy) instead of 0. With 0 the
+                // row would have been classified as a successful run
+                // (Run.IsSuccess => ExitCode == 0), inflating the
+                // Overview's "OK runs" tile and skewing success-rate
+                // charts. -2 is out-of-band relative to normal Chrome
+                // exit codes; paired with stop_reason it's filterable.
+                await _runs.FinishAsync(runId, exitCode: Run.ExitCodeDeferredBusy,
+                    lastError: null, stopReason: "launch_deferred_busy",
+                    ct: CancellationToken.None);
+            }
+            catch (Exception finishEx)
+            {
+                _log.LogWarning(finishEx,
+                    "Could not stamp deferred-busy stop on run #{Run}", runId);
+            }
+            throw;
+        }
         catch (Exception ex)
         {
             _log.LogError(ex, "Browser launch failed for '{Name}' (run #{Run})",
@@ -290,6 +312,27 @@ public sealed class RealProfileRunner : IProfileRunner, IAsyncDisposable
                     "Could not stamp launch failure on run #{Run}", runId);
             }
             throw;
+        }
+
+        // Phase 71oo audit fix — bump per-profile run_count + last_run_at
+        // ONLY AFTER LaunchAsync succeeded. If the launch raced and was
+        // refused with ProfileBusyException, no browser ever started, so
+        // counting it would inflate the Profile card's "RUNS" tile and
+        // overwrite a more recent "LAST RUN" timestamp. Best-effort:
+        // a counter-bump failure here doesn't sink the run — we already
+        // have the runs row AND a live session.
+        if (_profiles is not null)
+        {
+            try
+            {
+                await _profiles.RecordRunStartedAsync(profile.Name, DateTime.UtcNow, ct);
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex,
+                    "Couldn't bump run_count for '{Name}' (run #{Run})",
+                    profile.Name, runId);
+            }
         }
 
         // Build + start the watchdog. The onExternalClose callback

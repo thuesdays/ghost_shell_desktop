@@ -216,6 +216,11 @@ public sealed class WarmupService : IWarmupService, IAsyncDisposable
         var visited = 0;
         var succeeded = 0;
         string? notes = null;
+        // Phase 71oo — set when LaunchAsync was refused due to a
+        // concurrent launch race; flips the final status calculus from
+        // "failed" to "skipped" so the WARMUP STATUS card doesn't
+        // mis-count race-deferrals as broken warmups.
+        var deferredBusy = false;
 
         IBrowserSession? session = null;
         try
@@ -270,6 +275,22 @@ public sealed class WarmupService : IWarmupService, IAsyncDisposable
                 warmupId, visited, sites.Count);
             notes = "cancelled by user";
         }
+        catch (ProfileBusyException)
+        {
+            // Phase 71oo — profile is already being launched (manual
+            // start, scheduler tick, etc.). Mark the warmup as skipped
+            // rather than failed: the user-initiated launch is more
+            // important, and forcing a warmup retry would just re-race.
+            // Flip `deferredBusy` so the status calculus below writes
+            // "skipped" instead of "failed" — otherwise the WARMUP
+            // STATUS card would count this race against the warmup
+            // health metric.
+            _log.LogInformation(
+                "Warmup #{Id} skipped for '{Profile}' — profile is already launching elsewhere",
+                warmupId, profile.Name);
+            notes = "skipped: profile already launching";
+            deferredBusy = true;
+        }
         catch (Exception ex)
         {
             _log.LogError(ex, "Warmup #{Id} loop failed at site {N}/{Total}",
@@ -288,9 +309,13 @@ public sealed class WarmupService : IWarmupService, IAsyncDisposable
             }
         }
 
-        // Status calculus mirrors legacy.
+        // Status calculus mirrors legacy. Phase 71oo audit fix:
+        // ProfileBusyException sets `deferredBusy` — short-circuit to
+        // "skipped" so the WARMUP STATUS card / fail-rate aggregations
+        // don't count a concurrent-launch race as a broken warmup.
         string status;
-        if (succeeded == sites.Count)        status = "ok";
+        if (deferredBusy)                    status = "skipped";
+        else if (succeeded == sites.Count)   status = "ok";
         else if (succeeded > 0)              status = "partial";
         else                                 status = "failed";
 

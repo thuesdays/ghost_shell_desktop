@@ -182,6 +182,17 @@ public sealed partial class GroupsViewModel : BaseViewModel
                     if (_runner.ActiveProfileNames.Contains(name)) continue;
                     await _runner.StartAsync(profile);
                 }
+                catch (GhostShell.Core.Common.ProfileBusyException)
+                {
+                    // Phase 71oo — group member's launch is already in
+                    // flight on another path (scheduler tick, Run-now,
+                    // queue). Skip silently and continue with next
+                    // member; an ERROR log line would falsely flag
+                    // this as a problem.
+                    _log.LogInformation(
+                        "Group-start: '{Name}' skipped — already launching elsewhere",
+                        name);
+                }
                 catch (Exception ex)
                 {
                     _log.LogError(ex, "Group-start: '{Name}' failed", name);

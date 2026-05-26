@@ -38,17 +38,42 @@ public sealed class Run
     /// <summary>
     /// Short tag describing how the run ended. One of: <c>clean</c>,
     /// <c>external_close</c>, <c>crash</c>, <c>launch_failed</c>,
+    /// <c>launch_deferred_busy</c> (Phase 71oo — concurrent launch race),
     /// <c>user_marked_failed</c>, <c>cancelled</c>. Null on still-
     /// running rows. Distinct from <see cref="LastError"/> (free-
     /// form) and <see cref="ExitCode"/> (numeric).
     /// </summary>
     public string? StopReason { get; init; }
 
+    /// <summary>
+    /// Phase 71oo — sentinel exit code stamped onto runs whose
+    /// <c>LaunchAsync</c> was refused because another launch for the
+    /// same profile was already in flight. Picked as <c>-2</c> so it's
+    /// clearly out-of-band relative to normal Chrome / OS exit codes
+    /// (which are non-negative). Pairs with
+    /// <see cref="StopReason"/> = <c>"launch_deferred_busy"</c>.
+    /// </summary>
+    public const int ExitCodeDeferredBusy = -2;
+
     // ─── Derived helpers (computed from the fields above; not persisted) ───
 
     public bool IsRunning => FinishedAt is null && ExitCode is null;
     public bool IsSuccess => ExitCode == 0;
-    public bool IsFailed  => ExitCode is not null && ExitCode != 0;
+
+    /// <summary>
+    /// Phase 71oo — true when the run was skipped because another
+    /// launch was already in flight. Distinct from <see cref="IsFailed"/>
+    /// so success-rate / fail-rate aggregations can exclude it
+    /// (race-deferrals are NOT failures, the user's other launch will
+    /// run successfully). Aggregation queries should add
+    /// <c>WHERE stop_reason != 'launch_deferred_busy'</c> when computing
+    /// success or failure rates.
+    /// </summary>
+    public bool IsDeferredBusy =>
+        ExitCode == ExitCodeDeferredBusy
+        || string.Equals(StopReason, "launch_deferred_busy", StringComparison.Ordinal);
+
+    public bool IsFailed  => ExitCode is not null && ExitCode != 0 && !IsDeferredBusy;
 
     public TimeSpan? Duration =>
         StartedAt != default && FinishedAt is not null
@@ -57,7 +82,8 @@ public sealed class Run
 
     /// <summary>Compact status label suitable for table cells.</summary>
     public string StatusLabel =>
-        IsRunning ? "running"
-        : IsSuccess ? "OK"
+        IsRunning        ? "running"
+        : IsSuccess      ? "OK"
+        : IsDeferredBusy ? "deferred"
         : ExitCode!.Value.ToString();
 }

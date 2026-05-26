@@ -279,23 +279,72 @@ public sealed partial class SchedulerViewModel : BaseViewModel, IDisposable
                 }
                 var detailed = await _groups.GetAsync(group.Id);
                 if (detailed is null) return;
+                // Phase 71oo audit fix — track whether ANY member
+                // actually launched so a fully-raced Run-now click
+                // (every member already launching elsewhere) doesn't
+                // bump fire_count / last_fired_at. Mirrors the
+                // launchedAny pattern in RunnerHost.FireGroupAsync.
+                var anyMemberLaunched = false;
                 foreach (var name in detailed.Members)
                 {
                     if (_runner.ActiveProfileNames.Contains(name)) continue;
                     var profile = await _profiles.GetAsync(name);
                     if (profile is null) continue;
-                    try { await _runner.StartAsync(profile); }
+                    try
+                    {
+                        await _runner.StartAsync(profile);
+                        anyMemberLaunched = true;
+                    }
+                    catch (ProfileBusyException)
+                    {
+                        // Phase 71oo — concurrent launch race for this
+                        // group member. Skip it; nothing actionable to
+                        // show the user (the OTHER launch will succeed).
+                        _log.LogInformation(
+                            "Group run-now: '{Name}' skipped — already launching elsewhere",
+                            name);
+                    }
                     catch (Exception ex)
                     {
                         _log.LogError(ex, "Group run-now: '{Name}' failed", name);
                     }
                     await Task.Delay(150);
                 }
+
+                // Skip the fire bookkeeping entirely if EVERY member
+                // was raced. Logging it at INFO so the user can see
+                // why their Run-now click had no effect.
+                if (!anyMemberLaunched)
+                {
+                    _log.LogInformation(
+                        "Run-now group '{Group}' had no launchable members — all already running or racing",
+                        s.TargetName);
+                    await ReloadAsync();
+                    return;
+                }
             }
             // Bump fire_count + last_fired_at; let the loop recompute next_fire_at.
             var next = RunnerHostNextFireGuess(s);
             await _schedules.RecordFiredAsync(s.Id, DateTime.UtcNow, next);
             await ReloadAsync();
+        }
+        catch (ProfileBusyException pbex)
+        {
+            // Phase 71oo — Run-now button clicked while a scheduler tick
+            // (or another Run-now) is already launching the same profile.
+            // The OTHER launch will succeed; this one just needs a
+            // friendly message instead of the raw "DevToolsActivePort"
+            // crash stack the user would otherwise see. Logged at INFO
+            // because it's expected back-off, not an error.
+            _log.LogInformation(
+                "Run-now deferred for #{Id} — profile '{Profile}' already launching",
+                s.Id, pbex.ProfileName);
+            await _dialogs.ConfirmAsync(
+                "Already launching",
+                $"Profile '{pbex.ProfileName}' is already being launched (by the scheduler or " +
+                "another Run-now click). Wait a few seconds and try again — the other launch " +
+                "is in progress.",
+                "OK", ConfirmSeverity.Info);
         }
         catch (Exception ex)
         {

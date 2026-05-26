@@ -187,6 +187,17 @@ public sealed partial class ScriptRecorderViewModel : ObservableObject
                         runAssignedScript: false);
                     _weStartedTheBrowser = true;
                 }
+                catch (GhostShell.Core.Common.ProfileBusyException)
+                {
+                    // Phase 71oo — recording was requested while a
+                    // parallel launch (scheduler / Run-now / queue)
+                    // had the gate. Surface a friendly status line
+                    // instead of re-throwing — re-throwing would
+                    // crash the dialog with an unhandled exception.
+                    _weStartedTheBrowser = false;
+                    StatusLine = "profile already launching — wait a few seconds, then retry";
+                    return;
+                }
                 catch
                 {
                     _weStartedTheBrowser = false;
