@@ -56,9 +56,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# Resolve paths relative to repo root (parent of scripts/)
+# Resolve paths relative to the DESKTOP repo root. This script lives at
+# <repo>\chromium_patches\scripts\, so the repo root is TWO levels up.
 $here     = Split-Path -Parent $MyInvocation.MyCommand.Definition
-$repoRoot = Split-Path -Parent $here
+$repoRoot = Split-Path -Parent (Split-Path -Parent $here)
 
 if (-not $SourceDir) { $SourceDir = Join-Path $repoRoot "chrome_win64" }
 if (-not $OutDir)    { $OutDir    = Join-Path $repoRoot "dist" }
@@ -68,6 +69,12 @@ if (-not $OutDir)    { $OutDir    = Join-Path $repoRoot "dist" }
 # when neither source is present, then prompts interactively unless
 # -NonInteractive (CI) is set.
 function Resolve-Version-FromInstaller {
+    # Desktop repo ships a plain VERSION file (X.Y.Z.W) at its root — prefer it.
+    $verFile = Join-Path $repoRoot "VERSION"
+    if (Test-Path $verFile) {
+        $v = ((Get-Content -Raw -Path $verFile) -replace '\s', '')
+        if ($v -match '^\d+\.\d+\.\d+\.\d+$') { return $v }
+    }
     $issPath  = Join-Path $repoRoot "installer\ghost_shell_installer.iss"
     $bnPath   = Join-Path $repoRoot "installer\.build_number"
     $major = "0"; $minor = "0"; $patch = "0"; $build = "0"
@@ -221,13 +228,11 @@ Write-Host "[package] sha256:  $sha"
 Write-Host "[package] sidecar: $shaPath"
 Write-Host ""
 Write-Host "Next steps:"
-Write-Host "  1. Open https://github.com/thuesdays/ghost_shell_browser/releases/edit/v$Version"
-Write-Host "     (or create a new release with tag v$Version)"
-Write-Host "  2. Drag-and-drop both files into the 'Attach binaries' area:"
+Write-Host "  1. Create/edit the GitHub release for tag v$Version."
+Write-Host "  2. Attach BOTH files as release assets:"
 Write-Host "       $zipPath"
 Write-Host "       $shaPath"
-Write-Host "  3. Publish."
-Write-Host ""
-Write-Host "After release is live, fellow devs can fetch chrome_win64\ via:"
-Write-Host "  .\scripts\download_chromium.ps1"
+Write-Host "  3. Publish. The .sha256 sidecar is what the desktop"
+Write-Host "     self-update (GitHubUpdateService, audit DATA-01) verifies"
+Write-Host "     before extracting the downloaded archive."
 exit 0

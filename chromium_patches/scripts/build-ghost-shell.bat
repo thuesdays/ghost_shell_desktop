@@ -2,10 +2,12 @@
 REM ============================================================
 REM  Ghost Shell - Chromium build + flat deploy
 REM
-REM  1. Runs autoninja for BOTH chrome and crashpad_handler
+REM  1. Runs autoninja for chrome + chromedriver + crashpad_handler
 REM  2. Reads Chromium version from chrome\VERSION
 REM  3. Copies runtime files + SxS manifest to
-REM     F:\projects\goodmedika\chrome_win64\
+REM     F:\projects\ghost_shell_desktop\chrome_win64\
+REM     (the path ChromiumLocator probes first — "desktop project
+REM      chrome_win64" — so `dotnet run` from the desktop repo finds it)
 REM
 REM  No versioned subfolder, no junctions - each run overwrites
 REM  the previous chrome_win64\ directory.
@@ -21,9 +23,13 @@ setlocal EnableDelayedExpansion
 REM --- Config ---
 set "CHROMIUM_SRC=F:\projects\chromium\src"
 set "BUILD_DIR=out\GhostShell"
-set "DEPLOY_DIR=F:\projects\goodmedika\chrome_win64"
+set "DEPLOY_DIR=F:\projects\ghost_shell_desktop\chrome_win64"
+set "DEPOT_TOOLS=F:\projects\depot"
 
 set "SRC=%CHROMIUM_SRC%\%BUILD_DIR%"
+
+REM --- Ensure depot_tools (autoninja / gn) is on PATH ---
+if exist "%DEPOT_TOOLS%\autoninja.bat" set "PATH=%DEPOT_TOOLS%;%PATH%"
 
 REM --- Parse flags ---
 set "FLAG_CLEAN=0"
@@ -136,6 +142,7 @@ set "MISSING="
 echo   Required:
 for %%F in (
     chrome.exe
+    chromedriver.exe
     chrome.dll
     chrome_elf.dll
     d3dcompiler_47.dll
@@ -179,7 +186,6 @@ REM --- Optional files ---
 echo   Optional:
 for %%F in (
     crashpad_handler.exe
-    chromedriver.exe
     snapshot_blob.bin
     vulkan-1.dll
     msvcp140.dll

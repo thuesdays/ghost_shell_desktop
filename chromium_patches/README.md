@@ -92,11 +92,16 @@ in-repo (the web-version / fetch-prebuilt / branding / QA scripts from
 | `build-ghost-shell.bat` | `autoninja` build of chrome + chromedriver + crashpad_handler, then flat-deploy the runtime set to `chrome_win64\`. Flags: `/clean` (wipe `out\GhostShell` first), `/skip-build` (deploy an existing build only). |
 | `package_chromium.ps1` | pack `chrome_win64\` → `dist\chrome_win64-vX.Y.Z.W.zip` **+ `.sha256`** (the sibling checksum the desktop self-update verifies — see audit DATA-01). |
 
-> Note: `build-ghost-shell.bat`'s `DEPLOY_DIR` still points at the legacy
-> `F:\projects\goodmedika\chrome_win64` path — update it to the desktop's
-> `chrome_win64\` location before use. The CreepJS / JA3 / captcha QA tools
-> still live in `ghost_shell_browser\scripts` if build-verification tooling
-> is wanted later.
+Both scripts are repointed for this repo: `build-ghost-shell.bat` deploys to
+`F:\projects\ghost_shell_desktop\chrome_win64` (the path `ChromiumLocator`
+probes first), prepends `F:\projects\depot` to PATH, and now treats
+`chromedriver.exe` as a **required** deploy file (the locator skips any dir
+without it). `package_chromium.ps1` resolves the repo root two levels up,
+reads the version from the repo-root `VERSION`, and sources/packages
+`chrome_win64\` → `dist\`.
+
+> The CreepJS / JA3 / captcha QA tools still live in `ghost_shell_browser\scripts`
+> if build-verification tooling is wanted later.
 
 ## Audit
 
