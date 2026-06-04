@@ -33,11 +33,13 @@ public sealed class ChromeVersionsTests
     [Fact]
     public void PickWeighted_RespectsMaxBound()
     {
+        // Upper bound inside the curated range (146-149 post-PCP-04):
+        // capping at 147 must exclude 148/149.
         var rng = new Random(0);
         for (var i = 0; i < 200; i++)
         {
-            var (major, _) = ChromeVersions.PickWeighted(rng, maxMajor: "144");
-            Assert.True(int.Parse(major) <= 144);
+            var (major, _) = ChromeVersions.PickWeighted(rng, maxMajor: "147");
+            Assert.True(int.Parse(major) <= 147);
         }
     }
 
@@ -55,8 +57,9 @@ public sealed class ChromeVersionsTests
     [Fact]
     public void PickWeighted_DistributionFavorsHeavierWeights()
     {
-        // Run 10000 picks with no bounds. Major 147 has weight 55
-        // out of total 100; expect ~55% of picks. Allow ±5% slop.
+        // Run 10000 picks with no bounds. Post-PCP-04 the engine major
+        // (149) carries the heaviest weight (52 of 100) so it must
+        // dominate; expect ~52% of picks. Allow generous slop.
         var rng = new Random(123);
         var counts = new Dictionary<string, int>();
         for (var i = 0; i < 10000; i++)
@@ -64,7 +67,7 @@ public sealed class ChromeVersionsTests
             var (major, _) = ChromeVersions.PickWeighted(rng);
             counts[major] = counts.GetValueOrDefault(major) + 1;
         }
-        Assert.True(counts.GetValueOrDefault("147") > 4500,
-            $"147 picked only {counts.GetValueOrDefault("147")} / 10000");
+        Assert.True(counts.GetValueOrDefault("149") > 4500,
+            $"149 picked only {counts.GetValueOrDefault("149")} / 10000");
     }
 }

@@ -279,14 +279,26 @@ public class CaptchaRecoveryServiceTests
     {
         // L5 exhausted → AutoRelaunch=false even if actions ran.
         // L1-L4 → AutoRelaunch=true when at least one action lands.
+        //
+        // Drive the "an action landed" signal through skip-restore, which
+        // is set straight from the plan (no I/O). The L1 rotate-only path
+        // would instead hinge on a live HTTP rotation call succeeding —
+        // a network dependency that makes this unit test non-deterministic
+        // (it fails on any clean network where the rotation URL is
+        // unreachable). An L2 Moderate plan sets SkipRestoreOnNextLaunch,
+        // giving us a deterministic in-process action to assert on.
+        var fakeProxyHealth = new FakeProxyHealthService();
+        fakeProxyHealth.SeedCaptchas("p1", count: 2); // → L2 Moderate
         var svc = new CaptchaRecoveryService(
             new FakeProfileService(MakeProfile("p1", proxySlug: "p1")),
             NullLogger<CaptchaRecoveryService>.Instance,
             new FakeProxyService(WithRotation("p1")),
-            new FakeProxyHealthService(),
+            fakeProxyHealth,
             new FakeFingerprintService(),
             new FakeNotificationService());
         var result = await svc.HandleAsync(new CaptchaIncident { ProfileName = "p1" });
+        Assert.Equal(RecoverySeverity.Moderate, result.Plan.Severity);
+        Assert.True(result.Plan.SkipRestoreOnNextLaunch);
         Assert.True(result.AutoRelaunchRequested);
     }
 

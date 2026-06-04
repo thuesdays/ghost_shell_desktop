@@ -863,3 +863,59 @@
 - **Pre-build 'real-Chrome candidate parity' self-test harness wired into the build** — WRTC-06 shows internal QA can be tuned to hide the leak it should catch. A build-time harness that launches the engine against a local STUN server and asserts candidate shape matches a captured stock-Chrome-149 baseline (host = *.local, srflx raddr empty, no raw RFC1918, no global IPv6) would catch WRTC-02/04/07 regressions before shipping, independent of the application self-check.
 - **Network-service-level egress IP coherence guard** — WRTC-03 plus the proxy architecture means the default local address and any leaked candidate must be consistent with the proxy egress. A small engine feature that, when the GhostShell bridge is active and a proxy is configured, hard-zeroes all non-proxied default/local addresses at the P2PSocketManager boundary (a single chokepoint) would make real-IP egress through WebRTC structurally impossible rather than relying on multiple per-candidate patches.
 - **Bake the H2/TLS fingerprint into a versioned 'browser identity' table validated against live Chrome captures** — H2-01/H2-02: rather than ad-hoc patches, ship a curated table mapping each spoofed Chrome version to its exact real SETTINGS/window/priority + JA3/JA4 + UA metadata, validated in CI against captures from real Chrome of that version. The engine selects one coherent row per profile, so the H2 hash, TLS hash, and UA can never disagree — eliminating the cross-vector incoherence that detectors like Akamai/Cloudflare key on.
+
+---
+
+## Implementation status — 2026-06-04 (build 149.0.7805.0)
+
+The patch pass below is **live in the shipped binary**: built with
+`autoninja -C out\GhostShell chrome chromedriver crashpad_handler` (exit 0)
+and deployed to `chrome_win64\`. Verified at runtime: `chromedriver --version`
+= 149.0.7805.0; `chrome.exe` serves DevTools and accepts `--ghost-shell-payload`
+(Browser `Chrome/149.0.7805.0`, V8 14.9.155). Control-plane test suite: 367/367.
+
+### Implemented (native, vendored in `chromium_patches/ghost-shell-149.0.7805.0.patch`)
+- **Canvas/2D & image** — unified canonical noise field across readback paths;
+  toBlob/encodeRows, getImageData (amplitude/sub-rect/origin), measureText
+  coherence. **CANVAS-07**: `createImageBitmap` snapshot chokepoint now noised
+  for both `HTMLCanvasElement` and `OffscreenCanvas` (`image_bitmap.cc`),
+  byte-identical to the canonical field, on a fresh UNPREMUL CPU copy, gated,
+  display compositing untouched.
+- **WebGL/WebGPU** — readPixels/rendered-pixel hash noise; WebGPU
+  `adapter.info` realism (WG-01); vendor tokens `mali→arm`, `adreno→qualcomm`,
+  arch `arm→valhall` (WG-04); shader-precision/param-mask coherence.
+- **Web Audio** — copyFromChannel/time-domain/frequency noise made hardware-like
+  (no DC offset, full-buffer), latency/sampleRate coherence.
+- **navigator / screen / timing** — platform patch un-shadowed incl. workers;
+  performance.now() monotonic; DOMRect double-noise + identity mixing.
+- **WebRTC** — family-aware fake LAN IP (IPv4 + ULA IPv6) and `related_address`
+  scrub on non-host candidates (`peer_connection.cc`); host-scope default-local
+  address substituted (`socket_manager.cc`). Closes the raw-IP leak.
+- **TLS bridge** — `GhostShell_GetTLSKeyShares/SigAlgs/AesHw` strong defs +
+  `bssl::SSL_set_aes_hw_override_for_testing` wired; returns **stock Chrome-149
+  lists** by default (see decision below).
+- **Control plane** — PCP-04 spoof majors no longer trail the engine (149/148/
+  147/146).
+
+### Deliberate decisions (NOT bugs)
+- **TLS per-profile cipher/group lists — intentionally NOT emitted.** Real Chrome
+  installs share one cipher list; per-connection JA3 variation comes from GREASE +
+  extension permutation, not per-profile lists. Emitting per-profile lists would
+  make GhostShell profiles *less* like real Chrome. The bridge is complete and
+  inert (returns stock), so JA3/JA4 **matches** real Chrome 149. (PCP-01/H2-01)
+- **WebRTC fake-IP strategy kept over native-mDNS swap (WRTC-02).** The mDNS-native
+  posture (`.local` host candidates) is the most undetectable long-term, but the
+  swap conflicts with the current fake-IP rewrite and needs live STUN QA. Current
+  fake-IP approach functionally prevents the leak today.
+- **HTTP/2 = stock Chrome (no GREASE).** H2 grease path left disabled; stock H2
+  fingerprint already matches real Chrome and is the safest. (H2-01/H2-02)
+
+### Residuals (follow-ups, not blocking)
+- **CANVAS-07 partial**: `captureStream` and `OffscreenCanvas.transferToImageBitmap`
+  readback paths are not yet routed through the snapshot noiser (only
+  `createImageBitmap` is). Same canonical helper can be reused at those sites.
+- **WRTC-02/05/06**: native-mDNS adoption + foundation-recompute + self-check
+  tightening (see New-patch / Engine-feature ideas above).
+- **Lower-priority .NET coherence**: SCREEN-01 (avail/outer/pixel_depth), SPEECH-01
+  (voices), media groupId, structured fonts, permission defaults — config/builder
+  surface, no native rebuild required.
