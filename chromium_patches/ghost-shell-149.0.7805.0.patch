@@ -1,0 +1,3119 @@
+diff --git a/chrome/app/chrome_main_delegate.cc b/chrome/app/chrome_main_delegate.cc
+index 432d01794f53c..90d99846ad3a8 100644
+--- a/chrome/app/chrome_main_delegate.cc
++++ b/chrome/app/chrome_main_delegate.cc
+@@ -1,7 +1,12 @@
+ // Copyright 2012 The Chromium Authors
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+-
++#include "base/base64.h"
++#include "base/json/json_reader.h"
++#include "base/values.h"
++#include "base/no_destructor.h"
++#include "unicode/timezone.h"
++#include "unicode/unistr.h"
+ #include "chrome/app/chrome_main_delegate.h"
+ 
+ #include <stddef.h>
+@@ -1054,6 +1059,28 @@ void ChromeMainDelegate::SetupTracing() {
+ }
+ 
+ std::optional<int> ChromeMainDelegate::BasicStartupComplete() {
++  // === GHOST SHELL: safe defaults for standalone launch ===
++  // When chrome.exe is launched by double-click (no automation args),
++  // Crashpad handler fails because it can't find its config. These flags
++  // make standalone launch work out of the box while being harmless for
++  // automated/Selenium launches.
++  {
++    base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++    if (!cmd->HasSwitch("disable-crash-reporter")) {
++      cmd->AppendSwitch("disable-crash-reporter");
++    }
++    if (!cmd->HasSwitch("disable-breakpad")) {
++      cmd->AppendSwitch("disable-breakpad");
++    }
++    if (!cmd->HasSwitch("no-default-browser-check")) {
++      cmd->AppendSwitch("no-default-browser-check");
++    }
++    if (!cmd->HasSwitch("no-first-run")) {
++      cmd->AppendSwitch("no-first-run");
++    }
++  }
++  // === END GHOST SHELL ===
++
+ #if BUILDFLAG(IS_CHROMEOS)
+   ash::BootTimesRecorder::Get()->SaveChromeMainStats();
+ #endif
+@@ -1661,11 +1688,55 @@ ChromeMainDelegate::CreateContentUtilityClient() {
+   return chrome_content_utility_client_.get();
+ }
+ 
++// === GHOST SHELL BROWSER TZ CONFIG ===
++struct GhostTzConfig {
++  std::string timezone_id;
++
++  static const GhostTzConfig& Get() {
++    static base::NoDestructor<GhostTzConfig> instance([]() {
++      GhostTzConfig config;
++      base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++      if (cmd->HasSwitch("ghost-shell-payload")) {
++        std::string json;
++        if (base::Base64Decode(cmd->GetSwitchValueASCII("ghost-shell-payload"), &json)) {
++          auto parsed = base::JSONReader::Read(json, 0);
++          if (parsed && parsed->is_dict()) {
++            if (const auto* tz_dict = parsed->GetDict().FindDict("timezone")) {
++              if (const std::string* id = tz_dict->FindString("id")) {
++                config.timezone_id = *id;
++              }
++            }
++          }
++        }
++      }
++      return config;
++    }());
++    return *instance;
++  }
++};
++
+ std::optional<int> ChromeMainDelegate::PreBrowserMain() {
+   std::optional<int> exit_code = content::ContentMainDelegate::PreBrowserMain();
+   if (exit_code.has_value())
+     return exit_code;
+ 
++  // === GHOST SHELL: Override timezone for whole process ===
++  const std::string& tz_id = GhostTzConfig::Get().timezone_id;
++  if (!tz_id.empty()) {
++#if BUILDFLAG(IS_WIN)
++    _putenv_s("TZ", tz_id.c_str());
++    _tzset();
++#else
++    setenv("TZ", tz_id.c_str(), 1);
++    tzset();
++#endif
++    // Обновляем ICU default timezone
++    icu::TimeZone* tz = icu::TimeZone::createTimeZone(
++        icu::UnicodeString::fromUTF8(tz_id));
++    icu::TimeZone::adoptDefault(tz);
++  }
++  // === END GHOST SHELL ===
++
+ #if BUILDFLAG(ENABLE_EXTENSIONS)
+   const base::CommandLine& command_line =
+       *base::CommandLine::ForCurrentProcess();
+diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
+index f7b8a387aef7d..32bfa068fcc88 100644
+--- a/chrome/browser/chrome_content_browser_client.cc
++++ b/chrome/browser/chrome_content_browser_client.cc
+@@ -2,6 +2,11 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
++#include "base/command_line.h"
++#include "base/base64.h"
++#include "base/values.h"
++#include "base/json/json_reader.h"
++#include "base/no_destructor.h"
+ #include "chrome/browser/chrome_content_browser_client.h"
+ 
+ #include <algorithm>
+@@ -2827,6 +2832,7 @@ void ChromeContentBrowserClient::AppendExtraCommandLineSwitches(
+   static const char* const kCommonSwitchNames[] = {
+       embedder_support::kUserAgent,
+       switches::kUserDataDir,  // Make logs go to the right file.
++      "ghost-shell-payload",   // Propagate to renderer/GPU/utility processes
+   };
+   command_line->CopySwitchesFrom(browser_command_line, kCommonSwitchNames);
+ 
+@@ -7504,12 +7510,111 @@ std::string ChromeContentBrowserClient::GetProduct() {
+   return std::string(version_info::GetProductNameAndVersionForUserAgent());
+ }
+ 
++// === GHOST SHELL BROWSER CONFIG ===
++struct GhostBrowserConfig {
++  bool is_active = false;
++  std::string user_agent;
++  blink::UserAgentMetadata meta;
++
++  static const GhostBrowserConfig& Get() {
++    static base::NoDestructor<GhostBrowserConfig> instance([]() {
++      GhostBrowserConfig config;
++      base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++      
++      if (cmd->HasSwitch("ghost-shell-payload")) {
++        std::string b64_payload = cmd->GetSwitchValueASCII("ghost-shell-payload");
++        std::string json;
++        
++        if (base::Base64Decode(b64_payload, &json)) {
++          // Парсим JSON. В 2026 году Read() ожидает 2 аргумента.
++          auto parsed = base::JSONReader::Read(json, 0);
++          if (parsed && parsed->is_dict()) {
++            config.is_active = true;
++            // Используем auto, чтобы избежать проблем с именованием типов Dict/List
++            const auto& d = parsed->GetDict();
++
++            // Извлекаем Hardware (User-Agent)
++            const auto* hw = d.FindDict("hardware");
++            if (hw) {
++              const std::string* ua = hw->FindString("user_agent");
++              if (ua) config.user_agent = *ua;
++            }
++
++            // Извлекаем UA Metadata (Client Hints)
++            const auto* m_dict = d.FindDict("ua_metadata");
++            if (m_dict) {
++              const std::string* p = m_dict->FindString("platform");
++              if (p) config.meta.platform = *p;
++              
++              const std::string* pv = m_dict->FindString("platform_version");
++              if (pv) config.meta.platform_version = *pv;
++              
++              const std::string* a = m_dict->FindString("architecture");
++              if (a) config.meta.architecture = *a;
++              
++              const std::string* m = m_dict->FindString("model");
++              if (m) config.meta.model = *m;
++              
++              const std::string* b = m_dict->FindString("bitness");
++              if (b) config.meta.bitness = *b;
++              
++              const std::string* fv = m_dict->FindString("full_version");
++              if (fv) config.meta.full_version = *fv;
++              
++              config.meta.wow64 = m_dict->FindBool("wow64").value_or(false);
++              config.meta.mobile = m_dict->FindBool("mobile").value_or(false);
++              config.meta.form_factors = {"Desktop"};
++
++              // Парсим бренды (brands)
++              const auto* brands_list = m_dict->FindList("brands");
++              if (brands_list) {
++                for (const auto& item : *brands_list) {
++                  if (item.is_dict()) {
++                    const std::string* b_name = item.GetDict().FindString("brand");
++                    const std::string* b_version = item.GetDict().FindString("version");
++                    if (b_name && b_version) {
++                        config.meta.brand_version_list.emplace_back(*b_name, *b_version);
++                    }
++                  }
++                }
++              }
++
++              // Парсим полные версии (full_version_list)
++              const auto* full_list = m_dict->FindList("full_version_list");
++              if (full_list) {
++                for (const auto& item : *full_list) {
++                  if (item.is_dict()) {
++                    const std::string* b_name = item.GetDict().FindString("brand");
++                    const std::string* b_version = item.GetDict().FindString("version");
++                    if (b_name && b_version) {
++                        config.meta.brand_full_version_list.emplace_back(*b_name, *b_version);
++                    }
++                  }
++                }
++              }
++            }
++          }
++        }
++      }
++      return config;
++    }());
++    return *instance;
++  }
++};
++// === END GHOST SHELL BROWSER CONFIG ===
++
+ std::string ChromeContentBrowserClient::GetUserAgent() {
++  if (GhostBrowserConfig::Get().is_active && !GhostBrowserConfig::Get().user_agent.empty()) {
++    return GhostBrowserConfig::Get().user_agent;
++  }
+   return embedder_support::GetUserAgent();
+ }
+ 
+ blink::UserAgentMetadata ChromeContentBrowserClient::GetUserAgentMetadata() {
+   DCHECK_CURRENTLY_ON(BrowserThread::UI);
++  if (GhostBrowserConfig::Get().is_active) {
++    return GhostBrowserConfig::Get().meta;
++  }
+   return embedder_support::GetUserAgentMetadata();
+ }
+ 
+diff --git a/components/embedder_support/BUILD.gn b/components/embedder_support/BUILD.gn
+index 847ba42327e11..d7b7fe5adcec5 100644
+--- a/components/embedder_support/BUILD.gn
++++ b/components/embedder_support/BUILD.gn
+@@ -51,6 +51,8 @@ static_library("permissions") {
+ 
+ static_library("user_agent") {
+   sources = [
++    "ghost_shell_ua_override.cc",
++    "ghost_shell_ua_override.h",
+     "user_agent_utils.cc",
+     "user_agent_utils.h",
+   ]
+diff --git a/components/embedder_support/user_agent_utils.cc b/components/embedder_support/user_agent_utils.cc
+index 557eadb18229e..5c564874f2487 100644
+--- a/components/embedder_support/user_agent_utils.cc
++++ b/components/embedder_support/user_agent_utils.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "components/embedder_support/user_agent_utils.h"
++#include "components/embedder_support/ghost_shell_ua_override.h"
+ 
+ #include <stdint.h>
+ 
+@@ -644,17 +645,52 @@ blink::UserAgentMetadata GetUserAgentMetadata(bool only_low_entropy_ch) {
+   metadata.mobile = GetMobileBitForUAMetadata();
+   metadata.platform = GetPlatformForUAMetadata();
+ 
++  // === GHOST SHELL: UA Client Hints overlay (LOW-ENTROPY) ===
++  // Apply BEFORE early-returns below. Otherwise:
++  //   • only_low_entropy_ch=true  (called by network::ClientHints to
++  //     attach Sec-CH-UA / Sec-CH-UA-Platform / Sec-CH-UA-Mobile to
++  //     subresource requests) returns metadata WITHOUT spoof
++  //   • custom_ua present (when callers pass --user-agent) also
++  //     returns early, again skipping our overlay
++  //
++  // Low-entropy hints feed navigator.userAgentData.{brands,platform,
++  // mobile}. These are the fields the ua_ch_brands_present /
++  // ua_ch_platform_matches / ua_ch_mobile_matches selfchecks read.
++  // Putting the overlay only at the BOTTOM of the function (before
++  // the original early-returns) caused all three checks to fail
++  // because the early-returns fire first and the spoof never lands.
++  {
++    auto& gs_ua = embedder_support::GhostShellUAOverride::GetInstance();
++    if (gs_ua.IsActive()) {
++      if (!gs_ua.GetBrandList().empty()) {
++        metadata.brand_version_list = gs_ua.GetBrandList();
++      }
++      if (!gs_ua.GetPlatform().empty()) {
++        metadata.platform = gs_ua.GetPlatform();
++      }
++      metadata.mobile = gs_ua.GetMobile();
++    }
++  }
++
+   // For users providing a valid user-agent override via the command line:
+   // If kUACHOverrideBlank is enabled, set user-agent metadata with the
+   // default blank values, otherwise return the default UserAgentMetadata values
+   // to populate and send only the low entropy client hints.
+   // Notes: Sending low entropy hints with empty values may cause requests being
+   // blocked by web application firewall software, etc.
++  //
++  // GHOST SHELL: when our overlay is active we SUPPRESS the
++  // kUACHOverrideBlank reset. Otherwise a stealth profile that
++  // happens to also pass --user-agent (we do, for the legacy UA
++  // string) would zero out the brands/platform/mobile we just set.
+   std::optional<std::string> custom_ua = GetUserAgentFromCommandLine();
+   if (custom_ua.has_value()) {
+-    return base::FeatureList::IsEnabled(blink::features::kUACHOverrideBlank)
+-               ? blink::UserAgentMetadata()
+-               : metadata;
++    auto& gs_ua = embedder_support::GhostShellUAOverride::GetInstance();
++    if (!gs_ua.IsActive() &&
++        base::FeatureList::IsEnabled(blink::features::kUACHOverrideBlank)) {
++      return blink::UserAgentMetadata();
++    }
++    return metadata;
+   }
+ 
+   if (only_low_entropy_ch) {
+@@ -671,6 +707,36 @@ blink::UserAgentMetadata GetUserAgentMetadata(bool only_low_entropy_ch) {
+   metadata.bitness = GetCpuBitness();
+   metadata.wow64 = IsWoW64();
+   metadata.platform_version = GetPlatformVersion();
++
++  // === GHOST SHELL: UA Client Hints overlay (HIGH-ENTROPY) ===
++  // High-entropy hints feed navigator.userAgentData.getHighEntropyValues()
++  // — platformVersion, fullVersionList, architecture, bitness, model,
++  // wow64. The ua_ch_platform_version_matches and ua_ch_full_version_matches
++  // selfchecks read these.
++  {
++    auto& gs_ua = embedder_support::GhostShellUAOverride::GetInstance();
++    if (gs_ua.IsActive()) {
++      if (!gs_ua.GetBrandFullVersionList().empty()) {
++        metadata.brand_full_version_list = gs_ua.GetBrandFullVersionList();
++      }
++      if (!gs_ua.GetFullVersion().empty()) {
++        metadata.full_version = gs_ua.GetFullVersion();
++      }
++      if (!gs_ua.GetPlatformVersion().empty()) {
++        metadata.platform_version = gs_ua.GetPlatformVersion();
++      }
++      if (!gs_ua.GetArchitecture().empty()) {
++        metadata.architecture = gs_ua.GetArchitecture();
++      }
++      if (!gs_ua.GetBitness().empty()) {
++        metadata.bitness = gs_ua.GetBitness();
++      }
++      metadata.model = gs_ua.GetModel();
++      metadata.wow64 = gs_ua.GetWoW64();
++    }
++  }
++  // === END GHOST SHELL ===
++
+   return metadata;
+ }
+ 
+@@ -931,3 +997,4 @@ bool IsWoW64() {
+ }
+ 
+ }  // namespace embedder_support
++// rebuild_trigger_260428220310
+diff --git a/components/viz/service/display_embedder/skia_output_device_dcomp.cc b/components/viz/service/display_embedder/skia_output_device_dcomp.cc
+index c21a531946db3..78569739224fc 100644
+--- a/components/viz/service/display_embedder/skia_output_device_dcomp.cc
++++ b/components/viz/service/display_embedder/skia_output_device_dcomp.cc
+@@ -59,10 +59,14 @@ OutputSurface::DCSupportLevel GetDcSupportLevel() {
+     Microsoft::WRL::ComPtr<IDCompositionDevice3> dcomp_device =
+         gl::GetDirectCompositionDevice();
+ 
+-    if (Microsoft::WRL::ComPtr<IDCompositionDevice5> dcomp_device5;
+-        SUCCEEDED(dcomp_device.As(&dcomp_device5))) {
+-      return OutputSurface::DCSupportLevel::kDCompDynamicTexture;
+-    }
++    /* --- GHOST SHELL BYPASS: SDK MISMATCH ---
++  if (Microsoft::WRL::ComPtr<IDCompositionDevice5> dcomp_device5;
++      SUCCEEDED(gl::GetDirectCompositionDevice()->QueryInterface(
++          IID_PPV_ARGS(&dcomp_device5)))) {
++    // Внутри может быть вызов CheckPresentDurationSupport или что-то подобное
++    // Комментируем всё до закрывающей скобки этого if
++  }
++  ------------------------------------------ */
+ 
+     return OutputSurface::DCSupportLevel::kDCompTexture;
+   }
+diff --git a/content/browser/permissions/permission_controller_impl.cc b/content/browser/permissions/permission_controller_impl.cc
+index 30cf63190284f..0461dd50c2e89 100644
+--- a/content/browser/permissions/permission_controller_impl.cc
++++ b/content/browser/permissions/permission_controller_impl.cc
+@@ -37,10 +37,53 @@
+ #include "content/common/features.h"
+ #endif
+ 
++#include "base/command_line.h"
++#include "base/json/json_reader.h"
++#include "base/base64.h"
++#include "base/values.h"
++#include "base/no_destructor.h"
++
+ namespace content {
+ 
+ namespace {
+ 
++// === GHOST SHELL ===
++std::optional<PermissionResult> GetGhostShellPermission(PermissionType type) {
++  static base::NoDestructor<base::DictValue> gs_perms([]() -> base::DictValue {
++    base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++    if (cmd && cmd->HasSwitch("ghost-shell-payload")) {
++      std::string json;
++      if (base::Base64Decode(cmd->GetSwitchValueASCII("ghost-shell-payload"), &json)) {
++        if (auto val = base::JSONReader::Read(json, 0)) {
++          if (val->is_dict()) {
++            if (auto* perms = val->GetIfDict()->FindDict("permissions")) {
++              return perms->Clone();
++            }
++          }
++        }
++      }
++    }
++    return base::DictValue();
++  }());
++
++  if (gs_perms->empty()) return std::nullopt;
++
++  std::string name;
++  if (type == PermissionType::GEOLOCATION) name = "geolocation";
++  else if (type == PermissionType::NOTIFICATIONS) name = "notifications";
++  else if (type == PermissionType::VIDEO_CAPTURE) name = "camera";
++  else if (type == PermissionType::AUDIO_CAPTURE) name = "microphone";
++  else return std::nullopt;
++
++  const std::string* state = gs_perms->FindString(name);
++  if (!state) return std::nullopt;
++
++  if (*state == "granted") return PermissionResult(PermissionStatus::GRANTED, PermissionStatusSource::UNSPECIFIED);
++  if (*state == "denied") return PermissionResult(PermissionStatus::DENIED, PermissionStatusSource::UNSPECIFIED);
++  return PermissionResult(PermissionStatus::ASK, PermissionStatusSource::UNSPECIFIED);
++}
++// === END GHOST SHELL ===
++
+ std::optional<blink::scheduler::WebSchedulerTrackedFeature>
+ PermissionToSchedulingFeature(PermissionType permission_name) {
+   switch (permission_name) {
+@@ -611,6 +654,12 @@ PermissionResult PermissionControllerImpl::GetPermissionResultInternal(
+     const blink::mojom::PermissionDescriptorPtr& permission_descriptor,
+     const GURL& requesting_origin,
+     const GURL& embedding_origin) {
++  // === GHOST SHELL ===
++  if (auto gs_perm = GetGhostShellPermission(blink::PermissionDescriptorToPermissionType(permission_descriptor))) {
++    return *gs_perm;
++  }
++  // === END GHOST SHELL ===
++
+   std::optional<PermissionResult> permission_result = permission_overrides_.Get(
+       url::Origin::Create(requesting_origin),
+       url::Origin::Create(embedding_origin),
+@@ -636,6 +685,13 @@ PermissionControllerImpl::GetPermissionResultForCurrentDocumentInternal(
+     bool should_include_device_status) {
+   auto permission_type =
+       blink::PermissionDescriptorToPermissionType(permission_descriptor);
++
++  // === GHOST SHELL ===
++  if (auto gs_perm = GetGhostShellPermission(permission_type)) {
++    return *gs_perm;
++  }
++  // === END GHOST SHELL ===
++
+   std::optional<PermissionResult> permission_result = permission_overrides_.Get(
+       render_frame_host->GetLastCommittedOrigin(),
+       render_frame_host->GetMainFrame()->GetLastCommittedOrigin(),
+@@ -676,6 +732,12 @@ PermissionResult PermissionControllerImpl::GetPermissionResultForWorker(
+   auto permission_type =
+       blink::PermissionDescriptorToPermissionType(permission_descriptor);
+ 
++  // === GHOST SHELL ===
++  if (auto gs_perm = GetGhostShellPermission(permission_type)) {
++    return *gs_perm;
++  }
++  // === END GHOST SHELL ===
++
+   // TODO(crbug.com/428178708): This is likely incorrect for partitioned
+   // contexts and requires impact evaluation before updating to use embedding
+   // and requesting origins.
+@@ -728,6 +790,13 @@ PermissionControllerImpl::GetPermissionResultForOriginWithoutContext(
+     const url::Origin& embedding_origin) {
+   auto permission_type =
+       blink::PermissionDescriptorToPermissionType(permission_descriptor);
++
++  // === GHOST SHELL ===
++  if (auto gs_perm = GetGhostShellPermission(permission_type)) {
++    return *gs_perm;
++  }
++  // === END GHOST SHELL ===
++
+   std::optional<PermissionResult> permission_result = permission_overrides_.Get(
+       requesting_origin, embedding_origin, permission_type);
+   if (permission_result) {
+@@ -760,6 +829,12 @@ PermissionControllerImpl::GetPermissionResultForEmbeddedRequester(
+     return PermissionResult(PermissionStatus::DENIED);
+   }
+ 
++  // === GHOST SHELL ===
++  if (auto gs_perm = GetGhostShellPermission(permission_type)) {
++    return *gs_perm;
++  }
++  // === END GHOST SHELL ===
++
+   std::optional<PermissionResult> permission_result = permission_overrides_.Get(
+       requesting_origin,
+       render_frame_host->GetMainFrame()->GetLastCommittedOrigin(),
+diff --git a/net/socket/ssl_client_socket_impl.cc b/net/socket/ssl_client_socket_impl.cc
+index dbe2ca6661273..c1ceae23e32ec 100644
+--- a/net/socket/ssl_client_socket_impl.cc
++++ b/net/socket/ssl_client_socket_impl.cc
+@@ -14,11 +14,13 @@
+ #include <string_view>
+ #include <utility>
+ 
++#include "base/command_line.h"
+ #include "base/containers/span.h"
+ #include "base/containers/to_vector.h"
+ #include "base/feature_list.h"
+ #include "base/functional/bind.h"
+ #include "base/functional/callback_helpers.h"
++#include "base/strings/string_number_conversions.h"
+ #include "base/lazy_instance.h"
+ #include "base/location.h"
+ #include "base/memory/singleton.h"
+@@ -70,6 +72,16 @@
+ #include "third_party/boringssl/src/include/openssl/mem.h"
+ #include "third_party/boringssl/src/include/openssl/ssl.h"
+ 
++// Ghost Shell Anty (Tier 1 #4): per-profile JA3 cipher list and
++// supported_groups extension. Declared as extern "C" because
++// GhostShellConfig lives in Blink (which net/ can't include) — the
++// real implementations are exported from Blink's platform target via
++// PLATFORM_EXPORT in ghost_shell_config.h. Weak fallback stubs in
++// boringssl/extensions.cc keep tool binaries linkable.
++extern "C" int GhostShell_GetTLSCipherSuites(unsigned short* out, int max);
++extern "C" int GhostShell_GetTLSSupportedGroups(unsigned short* out, int max);
++extern "C" bool GhostShell_IsActive();
++
+ namespace net {
+ 
+ namespace {
+@@ -767,6 +779,68 @@ int SSLClientSocketImpl::Init() {
+     return ERR_UNEXPECTED;
+   }
+ 
++  // === GHOST SHELL ANTY (Tier 1 #4) ===
++  // Per-profile JA3 cipher list. The default selection above mirrors
++  // upstream Chromium; here we override it with a profile-specific
++  // ordering so two profiles produce distinct JA3 hashes for the same
++  // server. We build the OpenSSL "name1:name2:..." command from the
++  // wire-format uint16 IDs returned by GhostShell_GetTLSCipherSuites,
++  // mapping each through SSL_get_cipher_by_value -> SSL_CIPHER_get_name.
++  // Unknown / unsupported IDs are skipped silently so a stale profile
++  // can't block the handshake. If the resulting list is empty (all IDs
++  // unrecognised) we keep the default — better a working connection
++  // with the default JA3 than a broken one.
++  if (GhostShell_IsActive()) {
++    constexpr int kMaxGsCiphers = 64;
++    unsigned short gs_ciphers[kMaxGsCiphers];
++    int gs_n = GhostShell_GetTLSCipherSuites(gs_ciphers, kMaxGsCiphers);
++    if (gs_n > 0) {
++      std::string gs_cmd;
++      gs_cmd.reserve(gs_n * 32);
++      for (int i = 0; i < gs_n; ++i) {
++        const SSL_CIPHER* c = SSL_get_cipher_by_value(gs_ciphers[i]);
++        if (!c) continue;
++        const char* name = SSL_CIPHER_get_name(c);
++        if (!name || !*name) continue;
++        if (!gs_cmd.empty()) gs_cmd.push_back(':');
++        gs_cmd.append(name);
++      }
++      if (!gs_cmd.empty()) {
++        if (!SSL_set_strict_cipher_list(ssl_.get(), gs_cmd.c_str())) {
++          // Profile-specific list failed to apply (probably one of the
++          // names is wrong on this build). Fall through with the
++          // upstream default already set above — don't fail the socket.
++          LOG(WARNING) << "GhostShell: per-profile cipher list rejected, "
++                          "falling back to defaults: " << gs_cmd;
++        }
++      }
++    }
++
++    // Per-profile supported_groups (TLS 1.3 named curves). BoringSSL's
++    // SSL_set1_group_ids takes a uint16_t array directly. Empty list ->
++    // no override. Mismatched / unknown IDs would be caught by BoringSSL;
++    // we treat any failure as soft and log it.
++    constexpr int kMaxGsGroups = 16;
++    unsigned short gs_groups[kMaxGsGroups];
++    int gs_g = GhostShell_GetTLSSupportedGroups(gs_groups, kMaxGsGroups);
++    if (gs_g > 0) {
++      // SSL_set1_group_ids expects const uint16_t* — same memory layout as
++      // unsigned short on every supported platform, but cast explicitly so
++      // a weird host with a wider unsigned short would surface at compile
++      // time rather than corrupt the call.
++      static_assert(sizeof(unsigned short) == sizeof(uint16_t),
++                    "GhostShell TLS groups bridge expects 16-bit shorts");
++      const uint16_t* gs_groups_u16 =
++          reinterpret_cast<const uint16_t*>(gs_groups);
++      if (!SSL_set1_group_ids(ssl_.get(), gs_groups_u16,
++                              static_cast<size_t>(gs_g))) {
++        LOG(WARNING) << "GhostShell: per-profile supported_groups rejected, "
++                        "falling back to defaults";
++      }
++    }
++  }
++  // === END GHOST SHELL ANTY (Tier 1 #4) ===
++
+   // Disable SHA-1 server signatures.
+   // TODO(crbug.com/boringssl/699): Once the default is flipped in BoringSSL, we
+   // no longer need to override it.
+@@ -843,6 +917,10 @@ int SSLClientSocketImpl::Init() {
+     }
+   }
+ 
++  // Ghost Shell Anty: extension permutation is now seeded directly
++  // inside BoringSSL via the C-bridge to GhostShellConfig — no
++  // per-handshake plumbing here. See third_party/boringssl/src/ssl/
++  // extensions.cc::ghost_shell_fill_seeds_from_config.
+   SSL_set_permute_extensions(ssl_.get(), 1);
+ 
+   // Configure BoringSSL to send Trust Anchor IDs, if provided.
+diff --git a/net/spdy/spdy_session.cc b/net/spdy/spdy_session.cc
+index c5a0d3f25629c..3076d32e5ca46 100644
+--- a/net/spdy/spdy_session.cc
++++ b/net/spdy/spdy_session.cc
+@@ -71,6 +71,19 @@
+ #include "url/scheme_host_port.h"
+ #include "url/url_constants.h"
+ 
++// Ghost Shell Anty (Polish #1): C-bridge to GhostShellConfig for the
++// HTTP/2 SETTINGS GREASE patch in SendInitialData(). Declared at file
++// scope (C++ disallows extern "C" inside function bodies).
++//
++// Declarations only — the weak fallback DEFINITIONS live in
++// boringssl/extensions.cc (the single owner). On Windows/lld-link,
++// having two TUs each provide a weak definition causes a "duplicate
++// symbol" link error rather than ELF-style folding. So we only
++// declare here and let the linker resolve to Blink's strong def
++// (chrome.exe) or BoringSSL's weak fallback (tool binaries).
++extern "C" bool GhostShell_IsActive();
++extern "C" int  GhostShell_GetRandomSeed();
++
+ namespace net {
+ 
+ namespace {
+@@ -2267,11 +2280,43 @@ void SpdySession::SendInitialData() {
+     }
+   }
+   if (enable_http2_settings_grease_) {
+-    spdy::SpdySettingsId greased_id = 0x0a0a +
+-                                      0x1000 * base::RandGenerator(0xf + 1) +
+-                                      0x0010 * base::RandGenerator(0xf + 1);
+-    uint32_t greased_value = base::RandGenerator(
+-        static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()) + 1);
++    // Ghost Shell Anty (Polish #1): per-profile-stable GREASE.
++    // Default Chromium uses base::RandGenerator for both id and value
++    // — that means the HTTP/2 fingerprint hash (Akamai / Cloudflare
++    // observe it) varies between every TCP connection of the same
++    // profile, which itself is unusual. Real browsers reuse the
++    // GREASE id for the lifetime of a process — different profiles
++    // see different values, but within one profile they're stable.
++    // We mirror that pattern by deriving the id+value from the
++    // GhostShellConfig random seed via a SplitMix64 mix.
++    //
++    // GhostShell_GetRandomSeed/IsActive are declared at file scope
++    // (top of this file) as weak-linkage extern "C" — strong defs
++    // win in chrome.exe; weak fallback returns 0/false in tool
++    // binaries that don't link Blink.
++    spdy::SpdySettingsId greased_id;
++    uint32_t greased_value;
++    if (GhostShell_IsActive()) {
++      uint64_t st = static_cast<uint64_t>(
++          static_cast<uint32_t>(GhostShell_GetRandomSeed()));
++      // SplitMix64 — same construction used elsewhere in Ghost Shell.
++      st += 0x9E3779B97F4A7C15ULL;
++      uint64_t z = st;
++      z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
++      z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
++      z =  z ^ (z >> 31);
++      // Map to the GREASE id format defined by RFC9113 §5.5: settings
++      // with id 0x0a0a + 0x1000*x + 0x0010*y where x,y in [0,15].
++      greased_id = static_cast<spdy::SpdySettingsId>(
++          0x0a0a + 0x1000 * ((z >> 4) & 0xf) + 0x0010 * (z & 0xf));
++      greased_value = static_cast<uint32_t>(z >> 32);
++    } else {
++      greased_id = 0x0a0a +
++                   0x1000 * base::RandGenerator(0xf + 1) +
++                   0x0010 * base::RandGenerator(0xf + 1);
++      greased_value = base::RandGenerator(
++          static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()) + 1);
++    }
+     // Let insertion silently fail if `settings_map` already contains
+     // `greased_id`.
+     settings_map.emplace(greased_id, greased_value);
+diff --git a/services/network/p2p/socket_manager.cc b/services/network/p2p/socket_manager.cc
+index ffc2c2c133160..930ef75f94f74 100644
+--- a/services/network/p2p/socket_manager.cc
++++ b/services/network/p2p/socket_manager.cc
+@@ -6,11 +6,21 @@
+ 
+ #include <stddef.h>
+ 
++#include <algorithm>
+ #include <optional>
+ #include <utility>
+ 
+ #include "base/functional/bind.h"
+ #include "base/memory/raw_ptr.h"
++#include "net/base/ip_address.h"
++
++// Ghost Shell Anty: C-bridge to GhostShellConfig living in
++// third_party/blink/renderer/platform. The network process can't
++// include Blink headers directly, so we just declare the two
++// symbols Blink exports for non-Blink consumers. Linker resolves
++// them at build time.
++extern "C" bool GhostShell_IsActive();
++extern "C" int  GhostShell_GetRandomSeed();
+ #include "base/task/single_thread_task_runner.h"
+ #include "base/task/thread_pool.h"
+ #include "net/base/address_family.h"
+@@ -261,11 +271,56 @@ void P2PSocketManager::DumpPacket(base::span<const uint8_t> packet,
+                                              incoming);
+ }
+ 
++namespace {
++
++// Ghost Shell Anty: drop interfaces in HOST scope (private RFC1918
++// / link-local / loopback) from the network list before the renderer
++// enumerates ICE candidates. The result: renderer sees only publicly-
++// routable addresses (in practice, with a proxy: none — so the only
++// ICE candidates come from STUN/TURN). LAN IPs cannot leak even on a
++// privileged exploit.
++//
++// Gated on GhostShell_IsActive() — the C-bridge to GhostShellConfig.
++// When the user launches the browser without --ghost-shell-payload,
++// IsActive() returns false and the filter is bypassed (stock behaviour).
++bool GhostShellShouldFilterHostCandidates() {
++  return GhostShell_IsActive();
++}
++
++bool GhostShellIsHostScopeAddress(const net::IPAddress& a) {
++  if (a.IsLoopback() || a.IsLinkLocal() || a.IsZero()) {
++    return true;
++  }
++  // IPv4 RFC1918: 10/8, 172.16/12, 192.168/16, 100.64/10 (CGNAT).
++  if (a.IsIPv4()) {
++    const auto& b = a.bytes();
++    if (b[0] == 10) return true;
++    if (b[0] == 172 && (b[1] & 0xF0) == 0x10) return true;
++    if (b[0] == 192 && b[1] == 168) return true;
++    if (b[0] == 100 && (b[1] & 0xC0) == 0x40) return true;
++  }
++  // IPv6 ULA: fc00::/7.
++  if (a.IsIPv6()) {
++    const auto& b = a.bytes();
++    if ((b[0] & 0xFE) == 0xFC) return true;
++  }
++  return false;
++}
++
++}  // namespace
++
+ net::NetworkInterfaceList P2PSocketManager::DoGetNetworkList() {
+   net::NetworkInterfaceList list;
+   if (!net::GetNetworkList(&list, net::EXCLUDE_HOST_SCOPE_VIRTUAL_INTERFACES)) {
+     LOG(ERROR) << "GetNetworkList failed.";
+   }
++  if (GhostShellShouldFilterHostCandidates()) {
++    list.erase(std::remove_if(list.begin(), list.end(),
++                              [](const net::NetworkInterface& i) {
++                                return GhostShellIsHostScopeAddress(i.address);
++                              }),
++               list.end());
++  }
+   return list;
+ }
+ 
+diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
+index 5fd388fba60b2..186e9f2a692d7 100644
+--- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
++++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
+@@ -23,7 +23,11 @@
+  * THE POSSIBILITY OF SUCH DAMAGE.
+  */
+ 
++ 
++#include "third_party/blink/renderer/platform/ghost_shell_config.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_initializer.h"
++#include "third_party/icu/source/i18n/unicode/timezone.h"
++#include "third_party/icu/source/common/unicode/unistr.h"
+ 
+ #include <algorithm>
+ #include <limits>
+@@ -1047,6 +1051,38 @@ v8::Isolate* V8Initializer::InitializeMainThread() {
+       scheduler->V8BestEffortTaskRunner(), snapshot_mode,
+       create_histogram_callback, add_histogram_sample_callback,
+       ThreadState::Current()->ReleaseCppHeap());
++  if (GhostShellConfig::GetInstance().IsActive()) {
++    // Phase 46 — override ICU's process-wide default timezone with
++    // the payload-supplied id. V8/Blink reads
++    // Intl.DateTimeFormat().resolvedOptions().timeZone via
++    // ICU::TimeZone::createDefault() — without setting adoptDefault
++    // first, the kRedetect notification just re-reads the system
++    // clock TZ and the spoofed id is lost. Memory: adoptDefault
++    // takes ownership and deletes the previous default. Safe to
++    // call once per isolate init; isolate creation is single-
++    // threaded on the main thread so no race.
++    String gs_tz = GhostShellConfig::GetInstance().GetTimezoneId();
++    if (!gs_tz.empty()) {
++      std::string gs_tz_utf8 = gs_tz.Utf8();
++      icu::UnicodeString tz_name(
++          gs_tz_utf8.c_str(),
++          static_cast<int32_t>(gs_tz_utf8.length()),
++          US_INV);
++      icu::TimeZone* zone = icu::TimeZone::createTimeZone(tz_name);
++      // createTimeZone returns Etc/Unknown for invalid ids — guard
++      // by comparing the resolved id; on mismatch delete the orphan
++      // ourselves (adoptDefault would otherwise take ownership).
++      icu::UnicodeString resolved_id;
++      zone->getID(resolved_id);
++      if (resolved_id != UNICODE_STRING_SIMPLE("Etc/Unknown")) {
++        icu::TimeZone::adoptDefault(zone);
++      } else {
++        delete zone;
++      }
++    }
++    isolate->DateTimeConfigurationChangeNotification(
++        v8::Isolate::TimeZoneDetection::kRedetect);
++  }
+   scheduler->SetV8Isolate(isolate);
+ 
+   // ThreadState::isolate_ needs to be set before setting the EmbedderHeapTracer
+diff --git a/third_party/blink/renderer/core/dom/element.cc b/third_party/blink/renderer/core/dom/element.cc
+index f8b8cd63f7157..58048ab290997 100644
+--- a/third_party/blink/renderer/core/dom/element.cc
++++ b/third_party/blink/renderer/core/dom/element.cc
+@@ -23,7 +23,7 @@
+  * the Free Software Foundation, Inc., 51 Franklin Street, Fifth Floor,
+  * Boston, MA 02110-1301, USA.
+  */
+-
++#include "third_party/blink/renderer/platform/ghost_shell_config.h"
+ #include "third_party/blink/renderer/core/dom/element.h"
+ 
+ #include <algorithm>
+@@ -3479,7 +3479,24 @@ gfx::RectF Element::GetBoundingClientRectNoLifecycleUpdate() const {
+ DOMRect* Element::GetBoundingClientRect() {
+   GetDocument().EnsurePaintLocationDataValidForNode(
+       this, DocumentUpdateReason::kJavaScript);
+-  return DOMRect::FromRectF(GetBoundingClientRectNoLifecycleUpdate());
++      
++  // 1. Сохраняем результат в переменную вместо прямого return
++  DOMRect* result = DOMRect::FromRectF(GetBoundingClientRectNoLifecycleUpdate());
++
++  // --- GHOST SHELL CORE PATCH: GEOMETRY NOISE ---
++  if (GhostShellConfig::GetInstance().IsActive()) {
++    double offset = GhostShellConfig::GetInstance().GetRectOffset();
++    // Добавляем микро-сдвиг (например, 0.005) чтобы уникализировать рендеринг шрифтов
++    if (offset > 0.0) {
++      result->setX(result->x() + offset);
++      result->setY(result->y() + offset);
++      result->setWidth(result->width() + offset);
++      result->setHeight(result->height() + offset);
++    }
++  }
++  // ----------------------------------------------
++
++  return result;
+ }
+ 
+ DOMRect* Element::GetBoundingClientRectForBinding() {
+diff --git a/third_party/blink/renderer/core/dom/events/event.cc b/third_party/blink/renderer/core/dom/events/event.cc
+index 70457a49a12d5..1574239c59f32 100644
+--- a/third_party/blink/renderer/core/dom/events/event.cc
++++ b/third_party/blink/renderer/core/dom/events/event.cc
+@@ -46,6 +46,7 @@
+ #include "third_party/blink/renderer/platform/bindings/script_state.h"
+ #include "third_party/blink/renderer/platform/instrumentation/use_counter.h"
+ #include "third_party/blink/renderer/platform/runtime_enabled_features.h"
++#include "third_party/blink/renderer/platform/ghost_shell_config.h"
+ 
+ namespace blink {
+ 
+@@ -96,7 +97,42 @@ Event::Event(const AtomicString& event_type,
+       handling_passive_(PassiveMode::kNotPassiveDefault),
+       event_phase_(Event::PhaseType::kNone),
+       current_target_(nullptr),
+-      platform_time_stamp_(platform_time_stamp) {}
++      platform_time_stamp_(platform_time_stamp) {
++  // === GHOST SHELL: Jitter Pointer/Mouse Event Timestamps ===
++  if (GhostShellConfig::GetInstance().IsActive() && !platform_time_stamp_.is_null()) {
++    if (event_type == event_type_names::kPointermove ||
++        event_type == event_type_names::kPointerdown ||
++        event_type == event_type_names::kPointerup ||
++        event_type == event_type_names::kPointerover ||
++        event_type == event_type_names::kPointerout ||
++        event_type == event_type_names::kPointerenter ||
++        event_type == event_type_names::kPointerleave ||
++        event_type == event_type_names::kMousemove ||
++        event_type == event_type_names::kMousedown ||
++        event_type == event_type_names::kMouseup ||
++        event_type == event_type_names::kMouseover ||
++        event_type == event_type_names::kMouseout ||
++        event_type == event_type_names::kMouseenter ||
++        event_type == event_type_names::kMouseleave ||
++        event_type == event_type_names::kClick ||
++        event_type == event_type_names::kAuxclick ||
++        event_type == event_type_names::kContextmenu ||
++        event_type == event_type_names::kDblclick ||
++        event_type == event_type_names::kWheel) {
++      
++      // Deterministic jitter based on the original timestamp so that
++      // pointer and mouse compat events get the EXACT same jitter.
++      int64_t micros = platform_time_stamp_.since_origin().InMicroseconds();
++      // Pseudo-random hash
++      int64_t hash = (micros * 1103515245L + 12345L);
++      int64_t sign = (hash % 2 == 0) ? 1 : -1;
++      int64_t jitter_us = sign * (100 + (hash % 301)); // ±100µs to ±400µs
++      
++      platform_time_stamp_ += base::Microseconds(jitter_us);
++    }
++  }
++  // === END GHOST SHELL ===
++}
+ 
+ Event::Event(const AtomicString& event_type,
+              const EventInit* initializer,
+diff --git a/third_party/blink/renderer/core/execution_context/navigator_base.cc b/third_party/blink/renderer/core/execution_context/navigator_base.cc
+index cccfafe8f93a0..730fdfbb3ae67 100644
+--- a/third_party/blink/renderer/core/execution_context/navigator_base.cc
++++ b/third_party/blink/renderer/core/execution_context/navigator_base.cc
+@@ -2,6 +2,7 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
++#include "third_party/blink/renderer/platform/ghost_shell_config.h"
+ #include "third_party/blink/renderer/core/execution_context/navigator_base.h"
+ 
+ #include "base/feature_list.h"
+@@ -47,6 +48,10 @@ NavigatorBase::NavigatorBase(ExecutionContext* context)
+     : NavigatorLanguage(context), ExecutionContextClient(context) {}
+ 
+ String NavigatorBase::userAgent() const {
++  if (GhostShellConfig::GetInstance().IsActive()) {
++    String ua = GhostShellConfig::GetInstance().GetUserAgent();
++    if (!ua.empty()) return ua;
++  }
+   ExecutionContext* execution_context = GetExecutionContext();
+   return execution_context ? execution_context->UserAgent() : String();
+ }
+diff --git a/third_party/blink/renderer/core/frame/local_dom_window.cc b/third_party/blink/renderer/core/frame/local_dom_window.cc
+index 924dbc4d1f6a6..9e7c3bc24268c 100644
+--- a/third_party/blink/renderer/core/frame/local_dom_window.cc
++++ b/third_party/blink/renderer/core/frame/local_dom_window.cc
+@@ -23,7 +23,7 @@
+  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+  */
+-
++#include "third_party/blink/renderer/platform/ghost_shell_config.h"
+ #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+ 
+ #include <memory>
+@@ -1572,6 +1572,8 @@ bool LocalDOMWindow::offscreenBuffering() const {
+ }
+ 
+ int LocalDOMWindow::outerHeight() const {
++  if (GhostShellConfig::GetInstance().IsActive())
++    return GhostShellConfig::GetInstance().GetOuterHeight();
+   if (!GetFrame())
+     return 0;
+ 
+@@ -1597,6 +1599,8 @@ int LocalDOMWindow::outerHeight() const {
+ }
+ 
+ int LocalDOMWindow::outerWidth() const {
++  if (GhostShellConfig::GetInstance().IsActive())
++    return GhostShellConfig::GetInstance().GetOuterWidth();
+   if (!GetFrame())
+     return 0;
+ 
+@@ -1669,6 +1673,8 @@ int LocalDOMWindow::innerWidth() const {
+ }
+ 
+ int LocalDOMWindow::screenX() const {
++  if (GhostShellConfig::GetInstance().IsActive())
++    return GhostShellConfig::GetInstance().GetScreenX();
+   LocalFrame* frame = GetFrame();
+   if (!frame)
+     return 0;
+@@ -1687,6 +1693,8 @@ int LocalDOMWindow::screenX() const {
+ }
+ 
+ int LocalDOMWindow::screenY() const {
++  if (GhostShellConfig::GetInstance().IsActive())
++    return GhostShellConfig::GetInstance().GetScreenY();
+   LocalFrame* frame = GetFrame();
+   if (!frame)
+     return 0;
+@@ -1800,10 +1808,13 @@ CSSStyleDeclaration* LocalDOMWindow::getComputedStyle(
+ }
+ 
+ double LocalDOMWindow::devicePixelRatio() const {
+-  if (!GetFrame())
+-    return 0.0;
+-
+-  return GetFrame()->DevicePixelRatio();
++  if (GhostShellConfig::GetInstance().IsActive()) {
++    double dpr = GhostShellConfig::GetInstance().GetPixelRatio();
++    if (dpr > 0.0) return dpr;
++  }
++  if (GetFrame())
++    return GetFrame()->DevicePixelRatio();
++  return 0.0;
+ }
+ 
+ ScriptPromise<ScrollResult> LocalDOMWindow::scrollBy(ScriptState* script_state,
+diff --git a/third_party/blink/renderer/core/frame/navigator.cc b/third_party/blink/renderer/core/frame/navigator.cc
+index 583f05f8dd5fb..cb417c9631260 100644
+--- a/third_party/blink/renderer/core/frame/navigator.cc
++++ b/third_party/blink/renderer/core/frame/navigator.cc
+@@ -98,12 +98,9 @@ bool Navigator::cookieEnabled() const {
+ }
+ 
+ bool Navigator::webdriver() const {
+-  if (RuntimeEnabledFeatures::AutomationControlledEnabled())
+-    return true;
+-
+-  bool automation_enabled = false;
+-  probe::ApplyAutomationOverride(GetExecutionContext(), automation_enabled);
+-  return automation_enabled;
++  // Ghost Shell Core Patch: Permanently disable the automation flag.
++  // This bypasses BotGuard and all webdriver detection scripts.
++  return false;
+ }
+ 
+ String Navigator::GetAcceptLanguages() {
+diff --git a/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc b/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc
+index f5c0db2d1b58d..d24bdd911a7df 100644
+--- a/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc
++++ b/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc
+@@ -2,13 +2,19 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
++#include "third_party/blink/renderer/platform/ghost_shell_config.h"
+ #include "third_party/blink/renderer/core/frame/navigator_concurrent_hardware.h"
+ 
+ #include "base/system/sys_info.h"
+ 
++
+ namespace blink {
+ 
+ unsigned NavigatorConcurrentHardware::hardwareConcurrency() const {
++  if (GhostShellConfig::GetInstance().IsActive()) {
++    int v = GhostShellConfig::GetInstance().GetHardwareConcurrency();
++    if (v > 0) return static_cast<unsigned>(v);
++  }
+   return static_cast<unsigned>(base::SysInfo::NumberOfProcessors());
+ }
+ 
+diff --git a/third_party/blink/renderer/core/frame/navigator_device_memory.cc b/third_party/blink/renderer/core/frame/navigator_device_memory.cc
+index 05fa33e4568e8..69f7be2933ea7 100644
+--- a/third_party/blink/renderer/core/frame/navigator_device_memory.cc
++++ b/third_party/blink/renderer/core/frame/navigator_device_memory.cc
+@@ -2,17 +2,46 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
++#include "third_party/blink/renderer/platform/ghost_shell_config.h"
+ #include "third_party/blink/renderer/core/frame/navigator_device_memory.h"
+ 
++#include "base/logging.h"
+ #include "third_party/blink/public/common/device_memory/approximated_device_memory.h"
+ #include "third_party/blink/public/mojom/use_counter/metrics/web_feature.mojom-shared.h"
+ #include "third_party/blink/renderer/core/dom/document.h"
+ #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+ 
++
+ namespace blink {
++// Touched to force ninja recompilation for GhostShellConfig — bumped 2026-04-28b
+ 
+ float NavigatorDeviceMemory::deviceMemory() const {
+-  return ApproximatedDeviceMemory::GetApproximatedDeviceMemory();
++  // VLOG diagnostic — first ~5 calls per process. Lets us see in
++  // chrome_debug.log whether the override is active in the renderer
++  // and what value it returns. selfcheck device_memory_matches keeps
++  // failing despite the C++ patch + parser FindInt fallback both being
++  // in chrome.dll; this trace will tell us if IsActive() is false in
++  // this renderer, or GetDeviceMemory() returns 0, or the spoofed
++  // value is non-8. Filename: [GhostShellDevMem] grep target.
++  static int call_count = 0;
++  ++call_count;
++  bool is_active = GhostShellConfig::GetInstance().IsActive();
++  double spoofed = 0.0;
++  if (is_active) {
++    spoofed = GhostShellConfig::GetInstance().GetDeviceMemory();
++  }
++  float native = ApproximatedDeviceMemory::GetApproximatedDeviceMemory();
++  if (call_count <= 5) {
++    VLOG(1) << "[GhostShellDevMem] deviceMemory() call#" << call_count
++            << " IsActive=" << is_active
++            << " spoofed=" << spoofed
++            << " native=" << native;
++  }
++  if (is_active && spoofed > 0) {
++    return static_cast<float>(spoofed);
++  }
++  return native;
+ }
+ 
+ }  // namespace blink
++// rebuild_trigger_260428220310
+diff --git a/third_party/blink/renderer/core/frame/navigator_id.cc b/third_party/blink/renderer/core/frame/navigator_id.cc
+index 22243ebf5e26f..9156f5eeab81e 100644
+--- a/third_party/blink/renderer/core/frame/navigator_id.cc
++++ b/third_party/blink/renderer/core/frame/navigator_id.cc
+@@ -28,7 +28,7 @@
+  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+  */
+-
++#include "third_party/blink/renderer/platform/ghost_shell_config.h"
+ #include "third_party/blink/renderer/core/frame/navigator_id.h"
+ 
+ #include "base/feature_list.h"
+@@ -59,6 +59,12 @@ String NavigatorID::appVersion() {
+ }
+ 
+ String NavigatorID::platform() const {
++  // --- GHOST SHELL CORE PATCH ---
++  if (GhostShellConfig::GetInstance().IsActive()) {
++    String p = GhostShellConfig::GetInstance().GetPlatform();
++    if (!p.empty()) return p;
++  }
++  // ------------------------------
+ #if BUILDFLAG(IS_MAC)
+   // Match Safari and Mozilla on Mac x86.
+   return "MacIntel";
+diff --git a/third_party/blink/renderer/core/frame/navigator_language.cc b/third_party/blink/renderer/core/frame/navigator_language.cc
+index 75cd3461317b7..44cc5b87cee50 100644
+--- a/third_party/blink/renderer/core/frame/navigator_language.cc
++++ b/third_party/blink/renderer/core/frame/navigator_language.cc
+@@ -2,6 +2,7 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
++#include "third_party/blink/renderer/platform/ghost_shell_config.h"
+ #include "third_party/blink/renderer/core/frame/navigator_language.h"
+ 
+ #include "base/command_line.h"
+@@ -37,11 +38,38 @@ NavigatorLanguage::NavigatorLanguage(ExecutionContext* execution_context)
+     : execution_context_(execution_context) {}
+ 
+ AtomicString NavigatorLanguage::language() {
++  if (GhostShellConfig::GetInstance().IsActive()) {
++    // Вызываем наш же метод languages(), чтобы взять первый язык из подмененного списка
++    const Vector<String>& langs = languages();
++    if (!langs.empty()) return AtomicString(langs.front());
++  }
+   return AtomicString(languages().front());
+ }
+ 
+ const Vector<String>& NavigatorLanguage::languages() {
+-  EnsureUpdatedLanguage();
++  // === GHOST SHELL ===
++  if (GhostShellConfig::GetInstance().IsActive()) {
++    if (!languages_dirty_ && !languages_.empty()) return languages_;
++    
++    // Получаем массив языков из конфига
++    languages_ = GhostShellConfig::GetInstance().GetLanguages();
++    languages_dirty_ = false;
++    return languages_;
++  }
++  // === END GHOST SHELL ===
++
++  if (!languages_dirty_) return languages_;
++  languages_.clear();
++  
++  String accept_languages = GetAcceptLanguages();
++  
++  // ИСПРАВЛЕНИЕ: Новый API возвращает Vector<String> напрямую
++  languages_ = accept_languages.Split(',');
++  
++  for (auto& lang : languages_)
++    lang = String(lang.StripWhiteSpace().Replace('_', '-'));
++    
++  languages_dirty_ = false;
+   return languages_;
+ }
+ 
+diff --git a/third_party/blink/renderer/core/frame/screen.cc b/third_party/blink/renderer/core/frame/screen.cc
+index 69ffc2b05f75d..52189ce82de28 100644
+--- a/third_party/blink/renderer/core/frame/screen.cc
++++ b/third_party/blink/renderer/core/frame/screen.cc
+@@ -25,7 +25,7 @@
+  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+  */
+-
++#include "third_party/blink/renderer/platform/ghost_shell_config.h"
+ #include "third_party/blink/renderer/core/frame/screen.h"
+ 
+ #include "base/numerics/safe_conversions.h"
+@@ -79,30 +79,41 @@ bool Screen::AreWebExposedScreenPropertiesEqual(
+ }
+ 
+ int Screen::height() const {
+-  if (!DomWindow())
+-    return 0;
+-  return GetRect(/*available=*/false).height();
++  if (GhostShellConfig::GetInstance().IsActive()) {
++    int h = GhostShellConfig::GetInstance().GetScreenHeight();
++    if (h > 0) return h;
++  }
++  LocalFrame* frame = DomWindow()->GetFrame();
++  if (!frame) return 0;
++  if (frame->GetSettings() && frame->GetSettings()->GetReportScreenSizeInPhysicalPixelsQuirk()) {
++    return static_cast<int>(lroundf(GetRect(true).height() *
++                                    frame->DevicePixelRatio()));
++  }
++  return GetRect(true).height();
+ }
+ 
+ int Screen::width() const {
+-  if (!DomWindow())
+-    return 0;
+-  return GetRect(/*available=*/false).width();
++  if (GhostShellConfig::GetInstance().IsActive()) {
++    int w = GhostShellConfig::GetInstance().GetScreenWidth();
++    if (w > 0) return w;
++  }
++  LocalFrame* frame = DomWindow()->GetFrame();
++  if (!frame) return 0;
++  if (frame->GetSettings() && frame->GetSettings()->GetReportScreenSizeInPhysicalPixelsQuirk()) {
++    return static_cast<int>(lroundf(GetRect(true).width() *
++                                    frame->DevicePixelRatio()));
++  }
++  return GetRect(true).width();
+ }
+ 
+ unsigned Screen::colorDepth() const {
+-  // "If the user agent does not know the color depth or does not want to
+-  // return it for privacy considerations, it should return 24."
+-  //
+-  // https://drafts.csswg.org/cssom-view/#dom-screen-colordepth
+-  unsigned unknown_color_depth = 24u;
+-
+-  if (!DomWindow()) {
+-    return unknown_color_depth;
++  if (GhostShellConfig::GetInstance().IsActive()) {
++    int d = GhostShellConfig::GetInstance().GetColorDepth();
++    if (d > 0) return static_cast<unsigned>(d);
+   }
+-  return GetScreenInfo().depth == 0
+-             ? unknown_color_depth
+-             : base::saturated_cast<unsigned>(GetScreenInfo().depth);
++  LocalFrame* frame = DomWindow()->GetFrame();
++  if (!frame) return 0;
++  return base::saturated_cast<unsigned>(GetScreenInfo().depth);
+ }
+ 
+ unsigned Screen::pixelDepth() const {
+@@ -121,16 +132,24 @@ int Screen::availTop() const {
+   return GetRect(/*available=*/true).y();
+ }
+ 
+-int Screen::availHeight() const {
+-  if (!DomWindow())
+-    return 0;
+-  return GetRect(/*available=*/true).height();
++int Screen::availWidth() const {
++  if (GhostShellConfig::GetInstance().IsActive()) {
++    int w = GhostShellConfig::GetInstance().GetAvailWidth();
++    if (w > 0) return w;
++  }
++  LocalFrame* frame = DomWindow()->GetFrame();
++  if (!frame) return 0;
++  return GetRect(false).width();
+ }
+ 
+-int Screen::availWidth() const {
+-  if (!DomWindow())
+-    return 0;
+-  return GetRect(/*available=*/true).width();
++int Screen::availHeight() const {
++  if (GhostShellConfig::GetInstance().IsActive()) {
++    int h = GhostShellConfig::GetInstance().GetAvailHeight();
++    if (h > 0) return h;
++  }
++  LocalFrame* frame = DomWindow()->GetFrame();
++  if (!frame) return 0;
++  return GetRect(false).height();
+ }
+ 
+ void Screen::Trace(Visitor* visitor) const {
+diff --git a/third_party/blink/renderer/core/geometry/dom_rect_read_only.h b/third_party/blink/renderer/core/geometry/dom_rect_read_only.h
+index 450b7865e7220..6720175bb4ca1 100644
+--- a/third_party/blink/renderer/core/geometry/dom_rect_read_only.h
++++ b/third_party/blink/renderer/core/geometry/dom_rect_read_only.h
+@@ -8,12 +8,46 @@
+ #include "third_party/blink/renderer/core/core_export.h"
+ #include "third_party/blink/renderer/core/geometry/geometry_util.h"
+ #include "third_party/blink/renderer/platform/bindings/script_wrappable.h"
++#include "third_party/blink/renderer/platform/ghost_shell_config.h"
+ #include "ui/gfx/geometry/point_f.h"
+ #include "ui/gfx/geometry/rect.h"
+ #include "ui/gfx/geometry/rect_f.h"
+ 
+ namespace blink {
+ 
++// Ghost Shell Anty (Tier 2 #1): per-rect deterministic sub-pixel
++// offset to DOMRect getters. The base offset comes from
++// GhostShellConfig::GetRectOffset(); a SplitMix64 hash of the
++// rect's stable members (x_, y_, width_, height_) produces a per-
++// rect mix factor in roughly [-1, +1] so two profiles see different
++// rects but the same profile sees the same rect every call. Skip
++// when offset is 0.0 (config default — patch off for non-active
++// profiles).
++inline double GhostShellRectAdjust(double base, int field_id,
++                                   double x_, double y_,
++                                   double width_, double height_) {
++  auto& cfg = GhostShellConfig::GetInstance();
++  if (!cfg.IsActive()) return base;
++  const double off = cfg.GetRectOffset();
++  if (off == 0.0) return base;
++  uint64_t h = static_cast<uint64_t>(cfg.GetRandomSeed());
++  h ^= 0x9E3779B97F4A7C15ULL;
++  // Mix all four members + the field id (0=x,1=y,2=w,3=h,4=t,5=r,6=b,7=l)
++  auto mix64 = [&](double v) {
++    union { double d; uint64_t u; } u;
++    u.d = v;
++    h ^= u.u;
++    h *= 0xBF58476D1CE4E5B9ULL;
++    h = (h >> 27) | (h << 37);
++  };
++  mix64(x_); mix64(y_); mix64(width_); mix64(height_);
++  h ^= static_cast<uint64_t>(field_id);
++  h *= 0x94D049BB133111EBULL;
++  const double mix = static_cast<double>(
++      static_cast<int32_t>(h & 0xFFFFFFFFu)) / 2147483648.0;  // [-1, +1)
++  return base + off * mix;
++}
++
+ class DOMRectInit;
+ class ScriptObject;
+ class ScriptState;
+@@ -32,15 +66,39 @@ class CORE_EXPORT DOMRectReadOnly : public ScriptWrappable {
+ 
+   DOMRectReadOnly(double x, double y, double width, double height);
+ 
+-  double x() const { return x_; }
+-  double y() const { return y_; }
+-  double width() const { return width_; }
+-  double height() const { return height_; }
++  double x() const {
++    return GhostShellRectAdjust(x_, 0, x_, y_, width_, height_);
++  }
++  double y() const {
++    return GhostShellRectAdjust(y_, 1, x_, y_, width_, height_);
++  }
++  double width() const {
++    return GhostShellRectAdjust(width_, 2, x_, y_, width_, height_);
++  }
++  double height() const {
++    return GhostShellRectAdjust(height_, 3, x_, y_, width_, height_);
++  }
+ 
+-  double top() const { return geometry_util::NanSafeMin(y_, y_ + height_); }
+-  double right() const { return geometry_util::NanSafeMax(x_, x_ + width_); }
+-  double bottom() const { return geometry_util::NanSafeMax(y_, y_ + height_); }
+-  double left() const { return geometry_util::NanSafeMin(x_, x_ + width_); }
++  double top() const {
++    return GhostShellRectAdjust(
++        geometry_util::NanSafeMin(y_, y_ + height_), 4,
++        x_, y_, width_, height_);
++  }
++  double right() const {
++    return GhostShellRectAdjust(
++        geometry_util::NanSafeMax(x_, x_ + width_), 5,
++        x_, y_, width_, height_);
++  }
++  double bottom() const {
++    return GhostShellRectAdjust(
++        geometry_util::NanSafeMax(y_, y_ + height_), 6,
++        x_, y_, width_, height_);
++  }
++  double left() const {
++    return GhostShellRectAdjust(
++        geometry_util::NanSafeMin(x_, x_ + width_), 7,
++        x_, y_, width_, height_);
++  }
+ 
+   // This is just a utility function, which is not web exposed.
+   gfx::PointF Center() const;
+diff --git a/third_party/blink/renderer/core/html/canvas/text_metrics.cc b/third_party/blink/renderer/core/html/canvas/text_metrics.cc
+index 05abca7f395b8..3c62f6478097f 100644
+--- a/third_party/blink/renderer/core/html/canvas/text_metrics.cc
++++ b/third_party/blink/renderer/core/html/canvas/text_metrics.cc
+@@ -4,6 +4,15 @@
+ 
+ #include "third_party/blink/renderer/core/html/canvas/text_metrics.h"
+ 
++// Ghost Shell Anty: per-profile sub-pixel offset to canvas
++// measureText().width. The Font allowlist is applied earlier in
++// FontCache::GetFontData (Sprint 11), but the same per-profile width
++// offset must also flow through TextMetrics so canvas-text fingerprint
++// signatures (e.g. fingerprint.com's text-width vector) stabilise per
++// profile and differ between profiles. The offset is small (sub-pixel)
++// so it doesn't break layout-style measurement use cases.
++#include "third_party/blink/renderer/platform/ghost_shell_config.h"
++
+ #include "base/numerics/checked_math.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_canvas_text_align.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_canvas_text_baseline.h"
+@@ -107,6 +116,37 @@ void TextMetrics::Update(const Font* font,
+ 
+   auto [xpos, glyph_bounds] = MeasureRuns(text_painter);
+   double real_width = xpos;
++
++  // === GHOST SHELL (Tier 1 #3) ===
++  // Apply per-profile sub-pixel font width offset. The base offset
++  // comes from GhostShellConfig::GetFontWidthOffset() and is multiplied
++  // by a deterministic per-string hash so the same string measures the
++  // same way across calls (canvas fingerprint stability) but different
++  // strings differ. Skip empty text to keep measureText("") at 0.
++  if (real_width > 0.0) {
++    auto& gs_cfg = GhostShellConfig::GetInstance();
++    if (gs_cfg.IsActive()) {
++      const double base_off = gs_cfg.GetFontWidthOffset();
++      if (base_off != 0.0) {
++        // Per-string deterministic salt: SplitMix-style mix of
++        // characters + profile seed. Output range ≈ [-1, +1] which
++        // keeps the perturbation under one display pixel.
++        uint64_t h = static_cast<uint64_t>(gs_cfg.GetRandomSeed());
++        h ^= 0x9E3779B97F4A7C15ULL;
++        for (unsigned i = 0; i < text_.length(); ++i) {
++          h ^= static_cast<uint64_t>(text_[i]);
++          h *= 0xBF58476D1CE4E5B9ULL;
++          h = (h >> 27) | (h << 37);
++        }
++        const double mix = static_cast<double>(
++            static_cast<int32_t>(h & 0xFFFFFFFFu)) / 2147483648.0;
++        real_width += base_off * mix;
++        if (real_width < 0.0) real_width = 0.0;
++      }
++    }
++  }
++  // === END GHOST SHELL ===
++
+   width_ = real_width;
+ 
+   text_align_dx_ = 0.0f;
+diff --git a/third_party/blink/renderer/core/timing/performance.cc b/third_party/blink/renderer/core/timing/performance.cc
+index 136a5eec5b154..eff0eb557bdaa 100644
+--- a/third_party/blink/renderer/core/timing/performance.cc
++++ b/third_party/blink/renderer/core/timing/performance.cc
+@@ -40,6 +40,8 @@
+ #include "base/task/single_thread_task_runner.h"
+ #include "base/time/default_clock.h"
+ #include "base/time/time.h"
++#include "base/rand_util.h"
++#include "third_party/blink/renderer/platform/ghost_shell_config.h"
+ #include "services/metrics/public/cpp/ukm_builders.h"
+ #include "third_party/blink/public/common/features.h"
+ #include "third_party/blink/public/mojom/permissions_policy/document_policy_feature.mojom-blink.h"
+@@ -1269,7 +1271,16 @@ DOMHighResTimeStamp Performance::MonotonicTimeToDOMHighResTimeStamp(
+ }
+ 
+ DOMHighResTimeStamp Performance::now() const {
+-  return MonotonicTimeToDOMHighResTimeStamp(base::TimeTicks::Now());
++  DOMHighResTimeStamp t = MonotonicTimeToDOMHighResTimeStamp(base::TimeTicks::Now());
++
++  // === GHOST SHELL: Add timing jitter ===
++  if (GhostShellConfig::GetInstance().IsActive()) {
++    // ±50µs uniform noise to break timing variance analysis
++    t += base::RandDouble() * 0.1 - 0.05;
++  }
++  // === END GHOST SHELL ===
++
++  return t;
+ }
+ 
+ // static
+diff --git a/third_party/blink/renderer/modules/battery/battery_manager.cc b/third_party/blink/renderer/modules/battery/battery_manager.cc
+index 51cdc75ceee61..765e3ab4167ac 100644
+--- a/third_party/blink/renderer/modules/battery/battery_manager.cc
++++ b/third_party/blink/renderer/modules/battery/battery_manager.cc
+@@ -2,6 +2,9 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
++
++#include "third_party/blink/renderer/platform/ghost_shell_config.h"
++#include <limits>
+ #include "third_party/blink/renderer/modules/battery/battery_manager.h"
+ 
+ #include "third_party/blink/public/mojom/frame/lifecycle.mojom-blink.h"
+@@ -15,6 +18,7 @@
+ #include "third_party/blink/renderer/modules/battery/battery_dispatcher.h"
+ 
+ namespace blink {
++// Touched to force ninja recompilation for GhostShellConfig
+ 
+ const char BatteryManager::kSupplementName[] = "BatteryManager";
+ 
+@@ -80,19 +84,47 @@ ScriptPromise<BatteryManager> BatteryManager::StartRequest(
+ }
+ 
+ bool BatteryManager::charging() {
+-  return battery_status_.Charging();
++  // === GHOST SHELL ===
++  if (GhostShellConfig::GetInstance().IsActive() &&
++      GhostShellConfig::GetInstance().HasBattery()) {
++    return GhostShellConfig::GetInstance().GetBatteryCharging();
++  }
++  // === END GHOST SHELL ===
++  return battery_status_.Charging(); // Capital C
+ }
+ 
+ double BatteryManager::chargingTime() {
++  // === GHOST SHELL ===
++  if (GhostShellConfig::GetInstance().IsActive() &&
++      GhostShellConfig::GetInstance().HasBattery()) {
++    double t = GhostShellConfig::GetInstance().GetBatteryChargingTime();
++    if (t < 0) return std::numeric_limits<double>::infinity();
++    return t;
++  }
++  // === END GHOST SHELL ===
+   return battery_status_.charging_time().InSecondsF();
+ }
+ 
+ double BatteryManager::dischargingTime() {
++  // === GHOST SHELL ===
++  if (GhostShellConfig::GetInstance().IsActive() &&
++      GhostShellConfig::GetInstance().HasBattery()) {
++    double t = GhostShellConfig::GetInstance().GetBatteryDischargingTime();
++    if (t < 0) return std::numeric_limits<double>::infinity();
++    return t;
++  }
++  // === END GHOST SHELL ===
+   return battery_status_.discharging_time().InSecondsF();
+ }
+ 
+ double BatteryManager::level() {
+-  return battery_status_.Level();
++  // === GHOST SHELL ===
++  if (GhostShellConfig::GetInstance().IsActive() &&
++      GhostShellConfig::GetInstance().HasBattery()) {
++    return GhostShellConfig::GetInstance().GetBatteryLevel();
++  }
++  // === END GHOST SHELL ===
++  return battery_status_.Level(); // Capital L
+ }
+ 
+ void BatteryManager::DidUpdateData() {
+diff --git a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
+index 808c108363a6e..6aa44eca3a3fc 100644
+--- a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
++++ b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
+@@ -2,6 +2,7 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
++#include "third_party/blink/renderer/platform/ghost_shell_config.h"
+ #include "third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.h"
+ 
+ #include <cmath>
+@@ -103,6 +104,9 @@
+ #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
+ #include "ui/gfx/geometry/skia_conversions.h"
+ #include "ui/gfx/geometry/vector2d_f.h"
++#include "third_party/blink/renderer/platform/ghost_shell_config.h"
++#include <algorithm>
++#include <cstdint>
+ 
+ // Including "base/time/time.h" triggers a bug in IWYU.
+ // https://github.com/include-what-you-use/include-what-you-use/issues/1122
+@@ -534,6 +538,43 @@ ImageData* BaseRenderingContext2D::getImageDataInternal(
+     }
+   }
+ 
++  // === GHOST SHELL CANVAS NOISE ===
++  {
++    auto& gs = GhostShellConfig::GetInstance();
++    if (gs.IsActive()) {
++      const double noise_amp = gs.GetCanvasNoise();
++      if (noise_amp > 0.0) {
++        // LCG seeded per-call — varies jitter across repeated reads. Real
++        // GPU readbacks aren't bit-identical either, so this MATCHES
++        // real-hardware behavior, not just varies it.
++        const int32_t seed = gs.GetRandomSeed();
++        base::span<uint8_t> bytes_span = image_data->RawByteSpan();
++        if (!bytes_span.empty()) {
++          uint8_t* bytes = bytes_span.data();
++          const size_t len = bytes_span.size();
++          uint32_t rng = static_cast<uint32_t>(seed) ^ 0xA5A5A5A5u;
++          // Iterate RGBA pixels — leave alpha (i+3) untouched so
++          // transparency semantics stay identical.
++          for (size_t i = 0; i + 3 < len; i += 4) {
++            for (int c = 0; c < 3; ++c) {
++              rng = rng * 1103515245u + 12345u;
++              // Jitter range: +/- (noise_amp * 1.5 * 255), rounded
++              double delta =
++                  (static_cast<double>((rng >> 16) & 0xFFu) / 255.0) *
++                      noise_amp * 255.0 * 3.0 -
++                  noise_amp * 255.0 * 1.5;
++              int32_t v = static_cast<int32_t>(bytes[i + c]) +
++                          static_cast<int32_t>(delta);
++              bytes[i + c] =
++                  static_cast<uint8_t>(std::clamp(v, 0, 255));
++            }
++          }
++        }
++      }
++    }
++  }
++  // === END GHOST SHELL ===
++
+   return image_data;
+ }
+ 
+diff --git a/third_party/blink/renderer/modules/font_access/font_access.cc b/third_party/blink/renderer/modules/font_access/font_access.cc
+index f066f2052eb0c..14d99b8edadc0 100644
+--- a/third_party/blink/renderer/modules/font_access/font_access.cc
++++ b/third_party/blink/renderer/modules/font_access/font_access.cc
+@@ -4,7 +4,16 @@
+ 
+ #include "third_party/blink/renderer/modules/font_access/font_access.h"
+ 
++// Ghost Shell Anty: per-profile font privacy budget. Filters
++// queryLocalFonts() against the explicit allowlist served by
++// GhostShellConfig::GetFontList() — same per-profile font set the
++// rest of Blink consults for canvas-measurement etc. No new CLI
++// flags; the list rides on the existing --ghost-shell-payload.
++#include "third_party/blink/renderer/platform/ghost_shell_config.h"
++
+ #include <algorithm>
++#include <string>
++#include <unordered_set>
+ 
+ #include "base/feature_list.h"
+ #include "base/numerics/safe_conversions.h"
+@@ -31,6 +40,36 @@ namespace {
+ 
+ const char kFeaturePolicyBlocked[] =
+     "Access to the feature \"local-fonts\" is disallowed by Permissions Policy";
++
++// Ghost Shell Anty: build a postscript-name set from the per-profile
++// font list configured in GhostShellConfig. The list is the explicit
++// allowlist — anything not in it is filtered out of queryLocalFonts.
++//
++// We also keep a small hardcoded core (Arial/Helvetica/Times/system
++// UI etc.) so legitimate pages with a working sans/serif fallback
++// chain don't break on profiles whose generated fontlist accidentally
++// omitted them.
++std::unordered_set<std::string> GhostShellAllowedFonts() {
++  std::unordered_set<std::string> out;
++  auto& cfg = blink::GhostShellConfig::GetInstance();
++  if (cfg.IsActive()) {
++    for (const auto& f : cfg.GetFontList()) {
++      out.insert(std::string(f.Utf8().c_str()));
++    }
++  }
++  // Always-keep core. Removing these breaks pages that rely on
++  // generic-family fallback resolution.
++  static const char* const kCore[] = {
++      "Arial", "ArialMT", "Helvetica", "TimesNewRomanPSMT",
++      "Times-Roman", "CourierNewPSMT", "Courier", "Verdana",
++      "Georgia", "Tahoma", "Trebuchet MS", "Impact",
++      "Comic Sans MS", "Symbol", "Webdings", "Wingdings",
++      "SegoeUI", "SegoeUI-Light", "SegoeUI-Bold",
++  };
++  for (const char* c : kCore) out.insert(c);
++  return out;
++}
++
+ }
+ 
+ // static
+@@ -153,6 +192,14 @@ void FontAccess::DidGetEnumerationResponse(
+   base::span<const uint8_t> mapped_mem(mapping);
+   table.ParseFromArray(mapped_mem.data(),
+                        base::checked_cast<int>(mapped_mem.size()));
++
++  // Ghost Shell Anty: build per-profile font allowlist once per
++  // response. Empty set → filter disabled (matches upstream).
++  const auto allowlist = GhostShellAllowedFonts();
++  const bool gs_filter_active =
++      blink::GhostShellConfig::GetInstance().IsActive() &&
++      !allowlist.empty();
++
+   for (const auto& element : table.fonts()) {
+     // If the optional postscript name filter is set in QueryOptions,
+     // only allow items that match.
+@@ -161,6 +208,14 @@ void FontAccess::DidGetEnumerationResponse(
+       continue;
+     }
+ 
++    // Ghost Shell allowlist gate. Filter inactive → keep all.
++    // Filter active → keep iff postscript_name is in the per-profile
++    // allowlist (which already includes the always-keep core).
++    if (gs_filter_active &&
++        allowlist.find(element.postscript_name()) == allowlist.end()) {
++      continue;
++    }
++
+     auto entry = FontEnumerationEntry{
+         .postscript_name = String::FromUtf8(element.postscript_name()),
+         .full_name = String::FromUtf8(element.full_name()),
+diff --git a/third_party/blink/renderer/modules/media_capabilities/media_capabilities.cc b/third_party/blink/renderer/modules/media_capabilities/media_capabilities.cc
+index 583d08846d9c6..131c1606ac1d2 100644
+--- a/third_party/blink/renderer/modules/media_capabilities/media_capabilities.cc
++++ b/third_party/blink/renderer/modules/media_capabilities/media_capabilities.cc
+@@ -2,6 +2,7 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
++#include "third_party/blink/renderer/platform/ghost_shell_config.h"
+ #include "third_party/blink/renderer/modules/media_capabilities/media_capabilities.h"
+ 
+ #include <memory>
+@@ -805,6 +806,45 @@ ScriptPromise<MediaCapabilitiesDecodingInfo> MediaCapabilities::decodingInfo(
+   // Validation errors should return above.
+   DCHECK(message.empty());
+ 
++  // === GHOST SHELL MEDIA CODECS SPOOFING ===
++  {
++    auto& gs = blink::GhostShellConfig::GetInstance();
++    if (gs.IsActive()) {
++      String content_type;
++      if (config->hasVideo() && config->video()->hasContentType()) {
++        content_type = config->video()->contentType().ToAsciiLower();
++      } else if (config->hasAudio() && config->audio()->hasContentType()) {
++        content_type = config->audio()->contentType().ToAsciiLower();
++      }
++
++      String codec_key;
++      if (content_type.contains("av01") || content_type.contains("av1"))
++        codec_key = "av1";
++      else if (content_type.contains("vp09") || content_type.contains("vp9"))
++        codec_key = "vp9";
++      else if (content_type.contains("avc1") || content_type.contains("h264"))
++        codec_key = "h264";
++      else if (content_type.contains("hvc1") || content_type.contains("h265") ||
++               content_type.contains("hev1"))
++        codec_key = "h265";
++
++      if (!codec_key.empty()) {
++        auto* result = MediaCapabilitiesDecodingInfo::Create();
++        result->setSupported(gs.GetCodecSupported(codec_key));
++        result->setSmooth(gs.GetCodecSmooth(codec_key));
++        result->setPowerEfficient(gs.GetCodecPowerEfficient(codec_key));
++
++        auto* resolver = MakeGarbageCollected<
++            ScriptPromiseResolver<MediaCapabilitiesDecodingInfo>>(
++            script_state, exception_state.GetContext());
++        auto promise = resolver->Promise();
++        resolver->Resolve(result);
++        return promise;
++      }
++    }
++  }
++  // === END GHOST SHELL ===
++
+   if (is_webrtc) {
+     UseCounter::Count(ExecutionContext::From(script_state),
+                       WebFeature::kMediaCapabilitiesDecodingInfoWebrtc);
+diff --git a/third_party/blink/renderer/modules/mediastream/media_devices.cc b/third_party/blink/renderer/modules/mediastream/media_devices.cc
+index 18855d9d71185..79f35341b61a4 100644
+--- a/third_party/blink/renderer/modules/mediastream/media_devices.cc
++++ b/third_party/blink/renderer/modules/mediastream/media_devices.cc
+@@ -2,6 +2,8 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
++#include "third_party/blink/renderer/platform/ghost_shell_config.h"
++#include "base/json/json_reader.h"
+ #include "third_party/blink/renderer/modules/mediastream/media_devices.h"
+ 
+ #include <algorithm>
+@@ -525,6 +527,114 @@ ScriptPromise<IDLSequence<MediaDeviceInfo>> MediaDevices::enumerateDevices(
+       kEnumerateDevicesTimeout);
+   const auto promise = result_tracker->Promise();
+ 
++  // === GHOST SHELL: Spoof media devices list early ===
++  //
++  // VLOG instrumentation:
++  //   --enable-logging=stderr --v=1 in chrome flags or
++  //   GHOST_SHELL_VERBOSE_CHROME=1 env (which adds them automatically)
++  // surfaces all [GhostShellMedia] log lines to chrome_debug.log.
++  // We log:
++  //   - whether GhostShellConfig is Active (and bails if not)
++  //   - the raw JSON length of each list (0 = empty payload)
++  //   - whether each list parsed as a JSON array
++  //   - how many devices made it into the spoofed list per kind
++  //   - the final resolve count
++  // Pulls together "patch ran but produced 0" vs. "patch never ran"
++  // vs. "JSON malformed" vs. "selfcheck saw something else".
++  bool gs_active = GhostShellConfig::GetInstance().IsActive();
++  VLOG(1) << "[GhostShellMedia] enumerateDevices() entered, IsActive="
++          << gs_active;
++  if (gs_active) {
++    HeapVector<Member<MediaDeviceInfo>> spoofed_devices;
++    int per_kind_count[3] = {0, 0, 0};  // ai, vi, ao — for diagnostic log
++
++    auto parse_list = [&spoofed_devices, &per_kind_count](
++                          const String& json_str,
++                          mojom::blink::MediaDeviceType type,
++                          const char* kind_label,
++                          int slot) {
++      std::string json = json_str.Utf8();
++      VLOG(1) << "[GhostShellMedia]   " << kind_label
++              << " json_len=" << json.size()
++              << (json.empty() ? " (EMPTY — payload missing 'media."
++                                 : " head='")
++              << (json.empty() ? "" : json.substr(0, 80))
++              << (json.empty() ? "" : "'");
++      auto parsed = base::JSONReader::Read(json, 0);
++      if (!parsed) {
++        VLOG(1) << "[GhostShellMedia]     ✗ JSONReader::Read returned null";
++        return;
++      }
++      if (!parsed->is_list()) {
++        VLOG(1) << "[GhostShellMedia]     ✗ parsed value is not a list, "
++                   "type=" << static_cast<int>(parsed->type());
++        return;
++      }
++      int items_seen = 0;
++      int items_added = 0;
++      for (const auto& item : parsed->GetList()) {
++        ++items_seen;
++        if (!item.is_dict()) {
++          VLOG(1) << "[GhostShellMedia]     ✗ item " << items_seen
++                  << " is not a dict";
++          continue;
++        }
++        const auto& d = item.GetDict();
++        const std::string* d_id = d.FindString("deviceId");
++        const std::string* lbl = d.FindString("label");
++        const std::string* grp = d.FindString("groupId");
++        if (!d_id || !lbl) {
++          VLOG(1) << "[GhostShellMedia]     ✗ item " << items_seen
++                  << " missing deviceId or label "
++                  << "(deviceId=" << (d_id ? "yes" : "no")
++                  << " label="    << (lbl  ? "yes" : "no") << ")";
++          continue;
++        }
++
++        auto to_blink_str = [](const std::string& s) {
++          return String::FromUtf8(base::span<const uint8_t>(
++              reinterpret_cast<const uint8_t*>(s.data()), s.length()));
++        };
++
++        spoofed_devices.push_back(
++            MakeGarbageCollected<MediaDeviceInfo>(
++                to_blink_str(*d_id),
++                to_blink_str(*lbl),
++                grp ? to_blink_str(*grp) : String(),
++                type));
++        ++items_added;
++      }
++      per_kind_count[slot] = items_added;
++      VLOG(1) << "[GhostShellMedia]     " << kind_label
++              << ": " << items_added << "/" << items_seen
++              << " device(s) added";
++    };
++
++    auto& cfg = GhostShellConfig::GetInstance();
++    parse_list(cfg.GetAudioInputsJSON(),
++               mojom::blink::MediaDeviceType::kMediaAudioInput,
++               "audio_inputs",  0);
++    parse_list(cfg.GetVideoInputsJSON(),
++               mojom::blink::MediaDeviceType::kMediaVideoInput,
++               "video_inputs",  1);
++    parse_list(cfg.GetAudioOutputsJSON(),
++               mojom::blink::MediaDeviceType::kMediaAudioOutput,
++               "audio_outputs", 2);
++
++    VLOG(1) << "[GhostShellMedia] resolving with "
++            << spoofed_devices.size()
++            << " devices total (ai=" << per_kind_count[0]
++            << " vi=" << per_kind_count[1]
++            << " ao=" << per_kind_count[2] << ")";
++
++    result_tracker->Resolve(spoofed_devices);
++    tracer->End();
++    return promise;
++  }
++  VLOG(1) << "[GhostShellMedia] IsActive=false, falling through to native "
++             "enumerateDevices() — selfcheck will see real-hardware list";
++  // === END GHOST SHELL ===
++
+   SendLogMessage(base::StringPrintf(
+       "enumerateDevices({result_tracker=%p}, "
+       "{request_audio_input_capabilities=%s})",
+@@ -1401,6 +1511,9 @@ void MediaDevices::DevicesEnumerated(
+         video_input_capabilities,
+     Vector<mojom::blink::AudioInputDeviceCapabilitiesPtr>
+         audio_input_capabilities) {
++
++  // === GHOST SHELL hook moved to enumerateDevices ===
++          
+   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+   LogDevicesEnumerated(result_tracker, enumeration, video_input_capabilities,
+                        audio_input_capabilities);
+@@ -1758,3 +1871,4 @@ void MediaDevices::ReportCompletedEnumerateDevices(bool is_successful) {
+ }
+ 
+ }  // namespace blink
++// rebuild_trigger_260428220310
+diff --git a/third_party/blink/renderer/modules/netinfo/network_information.cc b/third_party/blink/renderer/modules/netinfo/network_information.cc
+index 976a3c8c36dbf..7d3ae89047e12 100644
+--- a/third_party/blink/renderer/modules/netinfo/network_information.cc
++++ b/third_party/blink/renderer/modules/netinfo/network_information.cc
+@@ -2,6 +2,8 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
++
++#include "third_party/blink/renderer/platform/ghost_shell_config.h"
+ #include "third_party/blink/renderer/modules/netinfo/network_information.h"
+ 
+ #include <algorithm>
+@@ -84,18 +86,29 @@ bool NetworkInformation::IsObserving() const {
+ }
+ 
+ V8ConnectionType NetworkInformation::type() const {
++  // === GHOST SHELL ===
++  if (GhostShellConfig::GetInstance().IsActive()) {
++    String t = GhostShellConfig::GetInstance().GetConnectionType();
++    if (t == "bluetooth") return V8ConnectionType(V8ConnectionType::Enum::kBluetooth);
++    if (t == "cellular") return V8ConnectionType(V8ConnectionType::Enum::kCellular);
++    if (t == "ethernet") return V8ConnectionType(V8ConnectionType::Enum::kEthernet);
++    if (t == "none") return V8ConnectionType(V8ConnectionType::Enum::kNone);
++    if (t == "wifi") return V8ConnectionType(V8ConnectionType::Enum::kWifi);
++    if (t == "wimax") return V8ConnectionType(V8ConnectionType::Enum::kWimax);
++    if (t == "other") return V8ConnectionType(V8ConnectionType::Enum::kOther);
++    if (t == "unknown") return V8ConnectionType(V8ConnectionType::Enum::kUnknown);
++  }
++  // === END GHOST SHELL ===
++
+   if (RuntimeEnabledFeatures::NetInfoConstantTypeEnabled()) {
+     return V8ConnectionType(V8ConnectionType::Enum::kUnknown);
+   }
+ 
+-  // type_ is only updated when listening for events, so ask
+-  // networkStateNotifier if not listening (crbug.com/379841).
+   if (!IsObserving()) {
+     return V8ConnectionType(
+         ConnectionTypeToEnum(GetNetworkStateNotifier().ConnectionType()));
+   }
+ 
+-  // If observing, return m_type which changes when the event fires, per spec.
+   return V8ConnectionType(ConnectionTypeToEnum(type_));
+ }
+ 
+@@ -111,6 +124,16 @@ double NetworkInformation::downlinkMax() const {
+ }
+ 
+ V8EffectiveConnectionType NetworkInformation::effectiveType() {
++  // === GHOST SHELL ===
++  if (GhostShellConfig::GetInstance().IsActive()) {
++    String t = GhostShellConfig::GetInstance().GetConnectionEffectiveType();
++    if (t == "slow-2g") return V8EffectiveConnectionType(V8EffectiveConnectionType::Enum::kSlow2G);
++    if (t == "2g") return V8EffectiveConnectionType(V8EffectiveConnectionType::Enum::k2G);
++    if (t == "3g") return V8EffectiveConnectionType(V8EffectiveConnectionType::Enum::k3G);
++    if (t == "4g") return V8EffectiveConnectionType(V8EffectiveConnectionType::Enum::k4G);
++  }
++  // === END GHOST SHELL ===
++
+   MaybeShowWebHoldbackConsoleMsg();
+   std::optional<WebEffectiveConnectionType> override_ect =
+       GetNetworkStateNotifier().GetWebHoldbackEffectiveType();
+@@ -119,19 +142,20 @@ V8EffectiveConnectionType NetworkInformation::effectiveType() {
+         EffectiveConnectionTypeToEnum(override_ect.value()));
+   }
+ 
+-  // effective_type_ is only updated when listening for events, so ask
+-  // networkStateNotifier if not listening (crbug.com/379841).
+   if (!IsObserving()) {
+     return V8EffectiveConnectionType(EffectiveConnectionTypeToEnum(
+         GetNetworkStateNotifier().EffectiveType()));
+   }
+ 
+-  // If observing, return m_type which changes when the event fires, per spec.
+   return V8EffectiveConnectionType(
+       EffectiveConnectionTypeToEnum(effective_type_));
+ }
+ 
+ uint32_t NetworkInformation::rtt() {
++  if (GhostShellConfig::GetInstance().IsActive()) {
++    int rtt = GhostShellConfig::GetInstance().GetConnectionRtt();
++    if (rtt >= 0) return static_cast<uint32_t>(rtt);
++  }
+   MaybeShowWebHoldbackConsoleMsg();
+   std::optional<base::TimeDelta> override_rtt =
+       GetNetworkStateNotifier().GetWebHoldbackHttpRtt();
+@@ -148,6 +172,9 @@ uint32_t NetworkInformation::rtt() {
+ }
+ 
+ double NetworkInformation::downlink() {
++  if (GhostShellConfig::GetInstance().IsActive()) {
++    return GhostShellConfig::GetInstance().GetConnectionDownlink();
++  }
+   MaybeShowWebHoldbackConsoleMsg();
+   std::optional<double> override_downlink_mbps =
+       GetNetworkStateNotifier().GetWebHoldbackDownlinkThroughputMbps();
+@@ -165,6 +192,9 @@ double NetworkInformation::downlink() {
+ }
+ 
+ bool NetworkInformation::saveData() const {
++  if (GhostShellConfig::GetInstance().IsActive()) {
++    return GhostShellConfig::GetInstance().GetConnectionSaveData();
++  }
+   bool save_data =
+       IsObserving() ? save_data_ : GetNetworkStateNotifier().SaveDataEnabled();
+ 
+diff --git a/third_party/blink/renderer/modules/permissions/permissions.cc b/third_party/blink/renderer/modules/permissions/permissions.cc
+index 7dfb58070581f..0b5bd04833fdd 100644
+--- a/third_party/blink/renderer/modules/permissions/permissions.cc
++++ b/third_party/blink/renderer/modules/permissions/permissions.cc
+@@ -29,9 +29,12 @@
+ #include "third_party/blink/renderer/platform/wtf/functional.h"
+ #include "third_party/blink/renderer/platform/wtf/vector.h"
+ #include "third_party/blink/renderer/platform/wtf/wtf_size_t.h"
++#include "third_party/blink/renderer/platform/ghost_shell_config.h"
+ 
+ namespace blink {
++
+ namespace {
++
+ void RecordTopLevelStorageAccessQueryMetrics(bool is_top_level_storage_access) {
+   base::UmaHistogramBoolean("Permissions.Query.TopLevelStorageAccess",
+                             is_top_level_storage_access);
+@@ -111,6 +114,90 @@ ScriptPromise<PermissionStatus> Permissions::query(
+   if (exception_state.HadException())
+     return EmptyPromise();
+ 
++  // === GHOST SHELL: Permissions API spoofing ===
++  // Return templated permission state before going to the browser process.
++  // This prevents bot detectors from seeing "denied" for all permissions.
++  //
++  // VLOG instrumentation:
++  //   IsActive false              → skipped, native chrome handles
++  //   PermissionNameToString empty → enum -> string mapping incomplete
++  //                                  for this permission (e.g. clipboard-write
++  //                                  may map to "clipboard_write" with an
++  //                                  underscore where payload uses dash)
++  //   state_str empty              → mapping returned a key, but payload's
++  //                                  permissions dict has no entry for it
++  //   state_str "granted"/"denied"/anything else → final spoofed status
++  // Pulls together "selfcheck reads X but JS sees Y" debugging.
++  {
++    auto& gs = GhostShellConfig::GetInstance();
++    bool gs_active = gs.IsActive();
++    String perm_name = gs_active
++                           ? PermissionNameToString(descriptor->name)
++                           : String();
++    // Normalize to W3C spec form: PermissionNameToString returns
++    // inconsistent strings — some with dashes ("storage-access",
++    // "window-management"), some with underscores ("clipboard_write",
++    // "screen_wake_lock"). The JS API and our payload use the dash
++    // form (W3C spec). Without this normalization,
++    // GetPermissionState("clipboard_write") missed the payload entry
++    // "clipboard-write" and the patch silently fell through to native,
++    // making perm_clipboard_write_matches always fail.
++    // See chromium TODO crbug.com/1395451.
++    String perm_name_normalized = perm_name;
++    if (!perm_name_normalized.empty()) {
++      // WTF::String::Replace mutates in place — same idiom used in
++      // language.cc:41 and locale_to_script_mapping.cc:446.
++      perm_name_normalized.Replace('_', '-');
++    }
++    String state_str = (gs_active && !perm_name_normalized.empty())
++                           ? gs.GetPermissionState(perm_name_normalized)
++                           : String();
++    VLOG(1) << "[GhostShellPerm] query enum="
++            << static_cast<int>(descriptor->name)
++            << " IsActive=" << gs_active
++            << " perm_name_raw='"
++            << (perm_name.empty() ? String("<empty>") : perm_name).Utf8()
++            << "' perm_name_norm='"
++            << (perm_name_normalized.empty() ? String("<empty>")
++                                              : perm_name_normalized).Utf8()
++            << "' state='"
++            << (state_str.empty() ? String("<empty>") : state_str).Utf8()
++            << "'";
++    if (gs_active && !perm_name_normalized.empty() && !state_str.empty()) {
++      mojom::blink::PermissionStatus fake_status;
++      if (state_str == "granted") {
++        fake_status = mojom::blink::PermissionStatus::GRANTED;
++      } else if (state_str == "denied") {
++        fake_status = mojom::blink::PermissionStatus::DENIED;
++      } else {
++        fake_status = mojom::blink::PermissionStatus::ASK;  // "prompt"
++      }
++      VLOG(1) << "[GhostShellPerm]   ✓ resolving with fake_status="
++              << static_cast<int>(fake_status);
++
++      auto fake_result = mojom::blink::PermissionStatusWithDetails::New();
++      fake_result->status = fake_status;
++
++      PermissionStatusListener* listener =
++          GetOrCreatePermissionStatusListener(
++              std::move(fake_result), descriptor->Clone());
++
++      auto* resolver = MakeGarbageCollected<
++          ScriptPromiseResolver<PermissionStatus>>(
++          script_state, exception_state.GetContext());
++      auto promise = resolver->Promise();
++      if (listener) {
++        resolver->Resolve(PermissionStatus::Take(listener, resolver));
++      }
++      return promise;
++    }
++    if (gs_active) {
++      VLOG(1) << "[GhostShellPerm]   → falling through to native "
++                 "(perm_name or state was empty)";
++    }
++  }
++  // === END GHOST SHELL ===
++
+   RecordTopLevelStorageAccessQueryMetrics(
+       descriptor->name == PermissionName::TOP_LEVEL_STORAGE_ACCESS);
+ 
+diff --git a/third_party/blink/renderer/modules/screen_orientation/screen_orientation.cc b/third_party/blink/renderer/modules/screen_orientation/screen_orientation.cc
+index fce1a975e3a2e..f32e5a84e1f64 100644
+--- a/third_party/blink/renderer/modules/screen_orientation/screen_orientation.cc
++++ b/third_party/blink/renderer/modules/screen_orientation/screen_orientation.cc
+@@ -2,6 +2,8 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
++
++#include "third_party/blink/renderer/platform/ghost_shell_config.h"
+ #include "third_party/blink/renderer/modules/screen_orientation/screen_orientation.h"
+ 
+ #include <memory>
+@@ -88,10 +90,25 @@ ExecutionContext* ScreenOrientation::GetExecutionContext() const {
+ }
+ 
+ V8OrientationType ScreenOrientation::type() const {
++  // === GHOST SHELL ===
++  if (GhostShellConfig::GetInstance().IsActive()) {
++    String t = GhostShellConfig::GetInstance().GetOrientationType();
++    if (t == "portrait-primary") 
++      return V8OrientationType(V8OrientationType::Enum::kPortraitPrimary);
++    if (t == "portrait-secondary") 
++      return V8OrientationType(V8OrientationType::Enum::kPortraitSecondary);
++    if (t == "landscape-primary") 
++      return V8OrientationType(V8OrientationType::Enum::kLandscapePrimary);
++    if (t == "landscape-secondary") 
++      return V8OrientationType(V8OrientationType::Enum::kLandscapeSecondary);
++  }
++  // === END GHOST SHELL ===
+   return V8OrientationType(OrientationTypeToV8Enum(type_));
+ }
+ 
+ uint16_t ScreenOrientation::angle() const {
++  if (GhostShellConfig::GetInstance().IsActive())
++    return static_cast<uint16_t>(GhostShellConfig::GetInstance().GetOrientationAngle());
+   return angle_;
+ }
+ 
+diff --git a/third_party/blink/renderer/modules/speech/speech_synthesis.cc b/third_party/blink/renderer/modules/speech/speech_synthesis.cc
+index 2327015bc565b..b25a04a31e93d 100644
+--- a/third_party/blink/renderer/modules/speech/speech_synthesis.cc
++++ b/third_party/blink/renderer/modules/speech/speech_synthesis.cc
+@@ -44,6 +44,7 @@
+ #include "third_party/blink/renderer/modules/speech/speech_synthesis_event.h"
+ #include "third_party/blink/renderer/modules/speech/speech_synthesis_voice.h"
+ #include "third_party/blink/renderer/platform/instrumentation/use_counter.h"
++#include "third_party/blink/renderer/platform/ghost_shell_config.h"
+ 
+ namespace blink {
+ 
+@@ -98,6 +99,33 @@ void SpeechSynthesis::OnSetVoiceList(
+ const HeapVector<Member<SpeechSynthesisVoice>>& SpeechSynthesis::getVoices() {
+   // Kick off initialization here to ensure voice list gets populated.
+   std::ignore = TryEnsureMojomSynthesis();
++
++  // === GHOST SHELL: Spoof empty voice list for headless evasion ===
++  if (voice_list_.empty() && GhostShellConfig::GetInstance().IsActive()) {
++    String platform = GhostShellConfig::GetInstance().GetPlatform();
++    if (platform.contains("Win")) {
++      auto add_voice = [this](const String& uri, const String& name, 
++                              const String& lang, bool is_default, bool is_local) {
++        auto mojom_voice = mojom::blink::SpeechSynthesisVoice::New();
++        mojom_voice->voice_uri = uri;
++        mojom_voice->name = name;
++        mojom_voice->lang = lang;
++        mojom_voice->is_default = is_default;
++        mojom_voice->is_local_service = is_local;
++        voice_list_.push_back(
++            MakeGarbageCollected<SpeechSynthesisVoice>(std::move(mojom_voice)));
++      };
++
++      add_voice("Microsoft David - English (United States)", 
++                "Microsoft David - English (United States)", "en-US", true, true);
++      add_voice("Microsoft Zira - English (United States)", 
++                "Microsoft Zira - English (United States)", "en-US", false, true);
++      add_voice("Microsoft Mark - English (United States)", 
++                "Microsoft Mark - English (United States)", "en-US", false, true);
++    }
++  }
++  // === END GHOST SHELL ===
++
+   return voice_list_;
+ }
+ 
+diff --git a/third_party/blink/renderer/modules/webaudio/audio_buffer.cc b/third_party/blink/renderer/modules/webaudio/audio_buffer.cc
+index 878cf31314270..c52d73dab3bdb 100644
+--- a/third_party/blink/renderer/modules/webaudio/audio_buffer.cc
++++ b/third_party/blink/renderer/modules/webaudio/audio_buffer.cc
+@@ -25,7 +25,7 @@
+  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+  */
+-
++#include "third_party/blink/renderer/platform/ghost_shell_config.h"
+ #include "third_party/blink/renderer/modules/webaudio/audio_buffer.h"
+ 
+ #include <memory>
+@@ -205,23 +205,37 @@ NotShared<DOMFloat32Array> AudioBuffer::getChannelData(
+     unsigned channel_index,
+     ExceptionState& exception_state) {
+   if (channel_index >= channels_.size()) {
+-    exception_state.ThrowDOMException(
+-        DOMExceptionCode::kIndexSizeError,
+-        StrCat({"channel index (", String::Number(channel_index),
+-                ") exceeds number of channels (",
+-                String::Number(channels_.size()), ")"}));
+-    return NotShared<DOMFloat32Array>(nullptr);
++    exception_state.ThrowDOMException(DOMExceptionCode::kIndexSizeError,
++                                      "channel index out of bounds");
++    return NotShared<DOMFloat32Array>();
+   }
+-
++  // Передаем вызов во внутреннюю функцию, где и работает наш патч
+   return getChannelData(channel_index);
+ }
+ 
+ NotShared<DOMFloat32Array> AudioBuffer::getChannelData(unsigned channel_index) {
+-  if (channel_index >= channels_.size()) {
+-    return NotShared<DOMFloat32Array>(nullptr);
++  if (channel_index >= channels_.size())
++    return NotShared<DOMFloat32Array>();
++
++  DOMFloat32Array* channel_array = channels_[channel_index].Get();
++  if (!channel_array) return NotShared<DOMFloat32Array>();
++
++  // === GHOST SHELL AUDIO NOISE ===
++  if (GhostShellConfig::GetInstance().IsActive() && !noise_applied_) {
++    double offset = GhostShellConfig::GetInstance().GetAudioOffset();
++    if (offset != 0.0) {
++      float* data = channel_array->Data();
++      size_t len = channel_array->length();
++      size_t noise_count = std::min(len, static_cast<size_t>(100));
++      for (size_t i = 0; i < noise_count; ++i) {
++        data[i] += static_cast<float>(offset);
++      }
++      noise_applied_ = true;
++    }
+   }
++  // === END GHOST SHELL ===
+ 
+-  return NotShared<DOMFloat32Array>(channels_[channel_index].Get());
++  return NotShared<DOMFloat32Array>(channel_array);
+ }
+ 
+ void AudioBuffer::copyFromChannel(NotShared<DOMFloat32Array> destination,
+diff --git a/third_party/blink/renderer/modules/webaudio/audio_buffer.h b/third_party/blink/renderer/modules/webaudio/audio_buffer.h
+index ded499af2ffae..1b5bed8191c33 100644
+--- a/third_party/blink/renderer/modules/webaudio/audio_buffer.h
++++ b/third_party/blink/renderer/modules/webaudio/audio_buffer.h
+@@ -120,6 +120,7 @@ class MODULES_EXPORT AudioBuffer final : public ScriptWrappable {
+ 
+   float sample_rate_;
+   uint32_t length_;
++  bool noise_applied_ = false;  // Ghost Shell: apply noise only once
+ 
+   HeapVector<Member<DOMFloat32Array>> channels_;
+ };
+diff --git a/third_party/blink/renderer/modules/webaudio/base_audio_context.cc b/third_party/blink/renderer/modules/webaudio/base_audio_context.cc
+index 69c2baf20193f..4bcb6cb1c3b0c 100644
+--- a/third_party/blink/renderer/modules/webaudio/base_audio_context.cc
++++ b/third_party/blink/renderer/modules/webaudio/base_audio_context.cc
+@@ -22,7 +22,7 @@
+  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+  * DAMAGE.
+  */
+-
++#include "third_party/blink/renderer/platform/ghost_shell_config.h"
+ #include "third_party/blink/renderer/modules/webaudio/base_audio_context.h"
+ 
+ #include "base/metrics/histogram_functions.h"
+diff --git a/third_party/blink/renderer/modules/webaudio/base_audio_context.h b/third_party/blink/renderer/modules/webaudio/base_audio_context.h
+index ec874f0d2b3b0..dd0be32512dd1 100644
+--- a/third_party/blink/renderer/modules/webaudio/base_audio_context.h
++++ b/third_party/blink/renderer/modules/webaudio/base_audio_context.h
+@@ -25,7 +25,7 @@
+ 
+ #ifndef THIRD_PARTY_BLINK_RENDERER_MODULES_WEBAUDIO_BASE_AUDIO_CONTEXT_H_
+ #define THIRD_PARTY_BLINK_RENDERER_MODULES_WEBAUDIO_BASE_AUDIO_CONTEXT_H_
+-
++#include "third_party/blink/renderer/platform/ghost_shell_config.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/memory/scoped_refptr.h"
+ #include "third_party/blink/renderer/bindings/core/v8/active_script_wrappable.h"
+@@ -116,7 +116,35 @@ class MODULES_EXPORT BaseAudioContext
+   // https://webaudio.github.io/web-audio-api/#BaseAudioContext
+   // Cannot be called from the audio thread.
+   AudioDestinationNode* destination() const;
+-  float sampleRate() const { return destination_handler_->SampleRate(); }
++  float sampleRate() const {
++    // --- GHOST SHELL CORE PATCH (Tier 1 #1) ---
++    // Override hardware-reported sample rate with per-profile target
++    // (default 48000) plus small per-profile integer jitter from
++    // GetAudioRateJitter() (typically ±2 Hz, deterministic per profile).
++    // The jitter band keeps two profiles on the same template
++    // distinguishable while staying within the validator's tolerance
++    // (Sprint 11.2 relaxed audio_rate_in_jitter_band to ±2 Hz).
++    //
++    // Only applied to realtime AudioContext — OfflineAudioContext must
++    // return its constructor-supplied rate verbatim (fingerprinters that
++    // do `new OfflineAudioContext(2, 44100, 44100).sampleRate` expect
++    // 44100 back; mismatch is itself a tell).
++    //
++    // GetAudioSampleRate() == 0 means "config did not set this field" —
++    // fall back to the hardware value so we don't accidentally report
++    // 0 Hz on profiles that never enabled audio enforcement.
++    auto& gs_cfg = GhostShellConfig::GetInstance();
++    if (gs_cfg.IsActive() &&
++        const_cast<BaseAudioContext*>(this)->HasRealtimeConstraint()) {
++      const int gs_base = gs_cfg.GetAudioSampleRate();
++      if (gs_base > 0) {
++        const int gs_jit = gs_cfg.GetAudioRateJitter();
++        return static_cast<float>(gs_base + gs_jit);
++      }
++    }
++    // ------------------------------------------
++    return destination_handler_->SampleRate();
++  }
+   double currentTime() const { return destination_handler_->CurrentTime(); }
+   AudioListener* listener() { return listener_.Get(); }
+   // Virtual so AudioContext::state() can add UseCounters.
+diff --git a/third_party/blink/renderer/modules/webaudio/realtime_analyser.cc b/third_party/blink/renderer/modules/webaudio/realtime_analyser.cc
+index 4ff2fecc93e20..d7bfc9bd2c9b2 100644
+--- a/third_party/blink/renderer/modules/webaudio/realtime_analyser.cc
++++ b/third_party/blink/renderer/modules/webaudio/realtime_analyser.cc
+@@ -38,6 +38,8 @@
+ #include "third_party/blink/renderer/platform/audio/vector_math.h"
+ #include "third_party/blink/renderer/platform/wtf/math_extras.h"
+ 
++#include "third_party/blink/renderer/platform/ghost_shell_config.h"
++
+ namespace blink {
+ 
+ namespace {
+@@ -114,9 +116,10 @@ void RealtimeAnalyser::GetFloatFrequencyData(DOMFloat32Array* destination_array,
+   const size_t len = std::min(source_length, destination_array->length());
+   if (len > 0) {
+     base::span<float> destination = destination_array->AsSpan();
++    double audio_off = blink::GhostShellConfig::GetInstance().IsActive() ? blink::GhostShellConfig::GetInstance().GetAudioOffset() : 0.0;
+     for (unsigned i = 0; i < len; ++i) {
+       const float linear_value = magnitude_buffer_[i];
+-      const double db_mag = audio_utilities::LinearToDecibels(linear_value);
++      const double db_mag = audio_utilities::LinearToDecibels(linear_value) + audio_off;
+       destination[i] = static_cast<float>(db_mag);
+     }
+   }
+@@ -147,9 +150,10 @@ void RealtimeAnalyser::GetByteFrequencyData(DOMUint8Array* destination_array,
+     const double min_decibels = min_decibels_;
+ 
+     base::span<unsigned char> destination = destination_array->AsSpan();
++    double audio_off = blink::GhostShellConfig::GetInstance().IsActive() ? blink::GhostShellConfig::GetInstance().GetAudioOffset() : 0.0;
+     for (unsigned i = 0; i < len; ++i) {
+       const float linear_value = magnitude_buffer_[i];
+-      const double db_mag = audio_utilities::LinearToDecibels(linear_value);
++      const double db_mag = audio_utilities::LinearToDecibels(linear_value) + audio_off;
+ 
+       // The range m_minDecibels to m_maxDecibels will be scaled to byte values
+       // from 0 to UCHAR_MAX.
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+index 57821997ef5dc..86ad76187a7f1 100644
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+@@ -23,6 +23,7 @@
+  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+  */
+ 
++ #include "third_party/blink/renderer/platform/ghost_shell_config.h"
+ #include "third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h"
+ 
+ #include <memory>
+@@ -163,6 +164,7 @@
+ #include "third_party/skia/include/gpu/ganesh/GrTypes.h"
+ #include "ui/gfx/geometry/size.h"
+ 
++
+ // Killswitch guarding WebGL creating its CanvasResourceProvider with the size
+ // of its DrawingBuffer rather than the size of its Host.
+ BASE_FEATURE(kWebGLCanvasResourceProviderDrawingBufferSize,
+@@ -3786,6 +3788,65 @@ ScriptObject WebGLRenderingContextBase::getExtension(ScriptState* script_state,
+     UseCounter::Count(context, WebFeature::kWebGLDebugRendererInfo);
+   }
+ 
++  // === GHOST SHELL (Tier 1 #2 + Tier 2 #3) ===
++  // If the per-profile allowlist excludes this extension, deny it the
++  // same way an unsupported extension would be denied — return null to
++  // keep behaviour identical between filtered and unsupported.
++  //
++  // Always-keep core (same list as in getSupportedExtensions): real
++  // GPUs report these universally, so denying them would itself be a
++  // fingerprint signal. WEBGL_debug_renderer_info also stays enabled
++  // so our UNMASKED_VENDOR/RENDERER override fires.
++  auto& gs = blink::GhostShellConfig::GetInstance();
++  if (gs.IsActive()) {
++    const auto& allow = gs.GetWebGLExtensions();
++    if (!allow.empty()) {
++      static const char* const kCore[] = {
++          "ANGLE_instanced_arrays",
++          "EXT_blend_minmax",
++          "EXT_color_buffer_half_float",
++          "EXT_float_blend",
++          "EXT_frag_depth",
++          "EXT_shader_texture_lod",
++          "EXT_texture_compression_bptc",
++          "EXT_texture_compression_rgtc",
++          "EXT_texture_filter_anisotropic",
++          "OES_element_index_uint",
++          "OES_fbo_render_mipmap",
++          "OES_standard_derivatives",
++          "OES_texture_float",
++          "OES_texture_float_linear",
++          "OES_texture_half_float",
++          "OES_texture_half_float_linear",
++          "OES_vertex_array_object",
++          "WEBGL_color_buffer_float",
++          "WEBGL_compressed_texture_s3tc",
++          "WEBGL_debug_renderer_info",
++          "WEBGL_debug_shaders",
++          "WEBGL_depth_texture",
++          "WEBGL_draw_buffers",
++          "WEBGL_lose_context",
++          "WEBGL_multi_draw",
++      };
++      bool ok = false;
++      for (const String& a : allow) {
++        if (a == name) { ok = true; break; }
++      }
++      if (!ok) {
++        for (const char* c : kCore) {
++          if (name == c) { ok = true; break; }
++        }
++      }
++      if (!ok) {
++        return ScriptObject(
++            script_state->GetIsolate(),
++            ToV8Traits<IDLNullable<WebGLExtension>>::ToV8(script_state,
++                                                          nullptr));
++      }
++    }
++  }
++  // === END GHOST SHELL ===
++
+   WebGLExtension* extension = EnableExtensionIfSupported(name, context);
+   return ScriptObject(
+       script_state->GetIsolate(),
+@@ -4010,7 +4071,8 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
+     case GL_RENDERBUFFER_BINDING:
+       return WebGLAny(script_state, renderbuffer_binding_.Get());
+     case GL_RENDERER:
+-      return WebGLAny(script_state, String("WebKit WebGL"));
++      return WebGLAny(script_state,
++                      String("WebKit WebGL"));  // Fake Renderer
+     case GL_SAMPLE_ALPHA_TO_COVERAGE:
+       return GetBooleanParameter(script_state, pname);
+     case GL_SAMPLE_BUFFERS:
+@@ -4088,7 +4150,8 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
+     case GC3D_UNPACK_COLORSPACE_CONVERSION_WEBGL:
+       return WebGLAny(script_state, unpack_colorspace_conversion_);
+     case GL_VENDOR:
+-      return WebGLAny(script_state, String("WebKit"));
++      return WebGLAny(script_state,
++                      String("WebKit"));  // Fake Vendor
+     case GL_VERSION:
+       return WebGLAny(
+           script_state,
+@@ -4106,6 +4169,17 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
+       return ScriptValue::CreateNull(script_state->GetIsolate());
+     case WebGLDebugRendererInfo::kUnmaskedRendererWebgl:
+       if (ExtensionEnabled(kWebGLDebugRendererInfoName)) {
++        // === GHOST SHELL (Tier 1 #2) ===
++        // UNMASKED_RENDERER_WEBGL must agree with WebGPU adapter info,
++        // so we read the dedicated unmasked field. Fall back to the
++        // legacy GetGLRenderer() if a profile didn't populate the new
++        // field (compat with profiles created before Tier 0).
++        if (GhostShellConfig::GetInstance().IsActive()) {
++          String v = GhostShellConfig::GetInstance().GetUnmaskedRenderer();
++          if (v.empty()) v = GhostShellConfig::GetInstance().GetGLRenderer();
++          if (!v.empty()) return WebGLAny(script_state, v);
++        }
++        // === END GHOST SHELL ===
+         return WebGLAny(script_state,
+                         String(ContextGL()->GetString(GL_RENDERER)));
+       }
+@@ -4113,8 +4187,19 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
+           GL_INVALID_ENUM, "getParameter",
+           "invalid parameter name, WEBGL_debug_renderer_info not enabled");
+       return ScriptValue::CreateNull(script_state->GetIsolate());
++
+     case WebGLDebugRendererInfo::kUnmaskedVendorWebgl:
+       if (ExtensionEnabled(kWebGLDebugRendererInfoName)) {
++        // === GHOST SHELL (Tier 1 #2) ===
++        // UNMASKED_VENDOR_WEBGL must agree with WebGPU adapter.vendor.
++        // Read GetUnmaskedVendor() first; fall back to legacy GetGLVendor()
++        // for profiles created before Tier 0.
++        if (GhostShellConfig::GetInstance().IsActive()) {
++          String v = GhostShellConfig::GetInstance().GetUnmaskedVendor();
++          if (v.empty()) v = GhostShellConfig::GetInstance().GetGLVendor();
++          if (!v.empty()) return WebGLAny(script_state, v);
++        }
++        // === END GHOST SHELL ===
+         return WebGLAny(script_state,
+                         String(ContextGL()->GetString(GL_VENDOR)));
+       }
+@@ -4416,8 +4501,29 @@ WebGLShaderPrecisionFormat* WebGLRenderingContextBase::getShaderPrecisionFormat(
+   GLint precision = 0;
+   ContextGL()->GetShaderPrecisionFormat(shader_type, precision_type, range,
+                                         &precision);
+-  return MakeGarbageCollected<WebGLShaderPrecisionFormat>(range[0], range[1],
+-                                                          precision);
++
++  GLint jitter_min  = range[0];
++  GLint jitter_max  = range[1];
++  GLint jitter_prec = precision;
++
++  auto& gs = blink::GhostShellConfig::GetInstance();
++  if (gs.IsActive() && gs.GetWebGLNoise() > 0.0) {
++    const int mask = gs.GetWebGLParamsMask();
++    const int32_t seed = gs.GetRandomSeed();
++    const uint32_t salt = static_cast<uint32_t>(shader_type) * 31u +
++                          static_cast<uint32_t>(precision_type);
++    auto apply_jitter = [&](GLint val, int bit) -> GLint {
++      if (!(mask & (1 << bit))) return val;
++      uint32_t h = static_cast<uint32_t>(seed) * 2654435761u + salt + bit;
++      return val + (static_cast<int>((h >> 28) % 3)) - 1;
++    };
++    jitter_min  = apply_jitter(jitter_min, 0);
++    jitter_max  = apply_jitter(jitter_max, 1);
++    jitter_prec = apply_jitter(jitter_prec, 2);
++  }
++
++  return MakeGarbageCollected<WebGLShaderPrecisionFormat>(jitter_min, jitter_max,
++                                                          jitter_prec);
+ }
+ 
+ String WebGLRenderingContextBase::getShaderSource(WebGLShader* shader) {
+@@ -4439,6 +4545,70 @@ WebGLRenderingContextBase::getSupportedExtensions() {
+     }
+   }
+ 
++  // === GHOST SHELL (Tier 1 #2 + Tier 2 #3) ===
++  // Filter the extension list down to the per-profile allowlist
++  // (GetWebGLExtensions) PLUS a hardcoded "always-keep core" of
++  // extensions that effectively every modern GPU advertises. This
++  // prevents a profile with a short allowlist from breaking sites
++  // that depend on universal extensions (Three.js / Babylon.js
++  // probe these on first frame and refuse to render without them).
++  //
++  // An empty allowlist means "no filter" — existing profiles that
++  // don't populate the field stay unchanged. Same-name comparison
++  // is case-sensitive — matches ExtensionTracker::ExtensionName().
++  auto& gs = blink::GhostShellConfig::GetInstance();
++  if (gs.IsActive()) {
++    const auto& allow = gs.GetWebGLExtensions();
++    if (!allow.empty()) {
++      // Always-keep core: extensions present on >99% of real GPUs
++      // per WebGL Stats (https://web3dsurvey.com). Removing any of
++      // these is itself a tell, regardless of profile config.
++      static const char* const kCore[] = {
++          "ANGLE_instanced_arrays",
++          "EXT_blend_minmax",
++          "EXT_color_buffer_half_float",
++          "EXT_float_blend",
++          "EXT_frag_depth",
++          "EXT_shader_texture_lod",
++          "EXT_texture_compression_bptc",
++          "EXT_texture_compression_rgtc",
++          "EXT_texture_filter_anisotropic",
++          "OES_element_index_uint",
++          "OES_fbo_render_mipmap",
++          "OES_standard_derivatives",
++          "OES_texture_float",
++          "OES_texture_float_linear",
++          "OES_texture_half_float",
++          "OES_texture_half_float_linear",
++          "OES_vertex_array_object",
++          "WEBGL_color_buffer_float",
++          "WEBGL_compressed_texture_s3tc",
++          "WEBGL_debug_renderer_info",
++          "WEBGL_debug_shaders",
++          "WEBGL_depth_texture",
++          "WEBGL_draw_buffers",
++          "WEBGL_lose_context",
++          "WEBGL_multi_draw",
++      };
++      Vector<String> filtered;
++      filtered.reserve(allow.size() + std::size(kCore));
++      for (const String& name : result) {
++        bool keep = false;
++        for (const String& a : allow) {
++          if (a == name) { keep = true; break; }
++        }
++        if (!keep) {
++          for (const char* c : kCore) {
++            if (name == c) { keep = true; break; }
++          }
++        }
++        if (keep) filtered.push_back(name);
++      }
++      return filtered;
++    }
++  }
++  // === END GHOST SHELL ===
++
+   return result;
+ }
+ 
+@@ -7835,6 +8005,39 @@ ScriptValue WebGLRenderingContextBase::GetIntParameter(
+       default:
+         break;
+     }
++
++    // === GHOST SHELL (Tier 1 #2) ===
++    // Apply per-profile jitter to a curated set of fingerprint-prone
++    // MAX_* WebGL parameters. The mask in GetWebGLParamsMask() decides
++    // which params are jittered (default 0 = none — safe for profiles
++    // mimicking known hardware, where MAX_TEXTURE_SIZE is hardware-fixed).
++    // A non-zero mask selects bits per param (see numbers below).
++    // Jitter is ±1 deterministic per (profile-seed, pname); enabled only
++    // when WebGL noise > 0 to keep this opt-in via the profile config.
++    auto& gs_cfg = blink::GhostShellConfig::GetInstance();
++    if (gs_cfg.IsActive() && gs_cfg.GetWebGLNoise() > 0.0) {
++      const int gs_mask = gs_cfg.GetWebGLParamsMask();
++      const uint32_t gs_seed = static_cast<uint32_t>(gs_cfg.GetRandomSeed());
++      auto gs_jitter = [&](int bit) -> GLint {
++        if (!(gs_mask & (1 << bit))) return value;
++        uint32_t h = gs_seed * 2654435761u + static_cast<uint32_t>(pname);
++        return value + ((h >> 28) & 1u ? 1 : -1);
++      };
++      switch (pname) {
++        case GL_MAX_TEXTURE_SIZE:                 value = gs_jitter(3); break;
++        case GL_MAX_CUBE_MAP_TEXTURE_SIZE:        value = gs_jitter(4); break;
++        case GL_MAX_RENDERBUFFER_SIZE:            value = gs_jitter(5); break;
++        case GL_MAX_VERTEX_UNIFORM_VECTORS:       value = gs_jitter(6); break;
++        case GL_MAX_FRAGMENT_UNIFORM_VECTORS:     value = gs_jitter(7); break;
++        case GL_MAX_VARYING_VECTORS:              value = gs_jitter(8); break;
++        case GL_MAX_VERTEX_ATTRIBS:               value = gs_jitter(9); break;
++        case GL_MAX_TEXTURE_IMAGE_UNITS:          value = gs_jitter(10); break;
++        case GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS:   value = gs_jitter(11); break;
++        case GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS: value = gs_jitter(12); break;
++        default: break;
++      }
++    }
++    // === END GHOST SHELL ===
+   }
+   return WebGLAny(script_state, value);
+ }
+@@ -7863,6 +8066,20 @@ ScriptValue WebGLRenderingContextBase::GetWebGLFloatArrayParameter(
+   std::array<GLfloat, 4> value = {0};
+   if (!isContextLost())
+     ContextGL()->GetFloatv(pname, value.data());
++
++  auto& gs = blink::GhostShellConfig::GetInstance();
++  if (gs.IsActive() && gs.GetWebGLNoise() > 0.0) {
++    const int32_t seed = gs.GetRandomSeed();
++    if (pname == GL_ALIASED_LINE_WIDTH_RANGE && (gs.GetWebGLParamsMask() & (1 << 3))) {
++      uint32_t h = static_cast<uint32_t>(seed) * 2654435761u + 0x0A;
++      float delta = ((static_cast<int>(h % 21) - 10) / 200.0f);
++      value[0] = std::max(0.0f, value[0] + delta);
++    } else if (pname == GL_ALIASED_POINT_SIZE_RANGE && (gs.GetWebGLParamsMask() & (1 << 4))) {
++      uint32_t h = static_cast<uint32_t>(seed) * 2654435761u + 0x0B;
++      float delta = ((static_cast<int>(h % 21) - 10) / 200.0f);
++      value[0] = std::max(0.0f, value[0] + delta);
++    }
++  }
+   unsigned length = 0;
+   switch (pname) {
+     case GL_ALIASED_POINT_SIZE_RANGE:
+@@ -7887,6 +8104,17 @@ ScriptValue WebGLRenderingContextBase::GetWebGLIntArrayParameter(
+   std::array<GLint, 4> value = {0};
+   if (!isContextLost())
+     ContextGL()->GetIntegerv(pname, value.data());
++
++  auto& gs = blink::GhostShellConfig::GetInstance();
++  if (gs.IsActive() && gs.GetWebGLNoise() > 0.0) {
++    if (pname == GL_MAX_VIEWPORT_DIMS && (gs.GetWebGLParamsMask() & (1 << 5))) {
++      const int32_t seed = gs.GetRandomSeed();
++      uint32_t h = static_cast<uint32_t>(seed) * 2654435761u + 0x0C;
++      int delta = (static_cast<int>(h % 3) - 1);
++      value[0] = std::max(0, value[0] + delta);
++      value[1] = std::max(0, value[1] + delta);
++    }
++  }
+   unsigned length = 0;
+   switch (pname) {
+     case GL_MAX_VIEWPORT_DIMS:
+diff --git a/third_party/blink/renderer/modules/webgpu/gpu_adapter.cc b/third_party/blink/renderer/modules/webgpu/gpu_adapter.cc
+index 4e4ca8dcb4feb..e43d0b5d540ea 100644
+--- a/third_party/blink/renderer/modules/webgpu/gpu_adapter.cc
++++ b/third_party/blink/renderer/modules/webgpu/gpu_adapter.cc
+@@ -25,6 +25,7 @@
+ #include "third_party/blink/renderer/platform/graphics/gpu/webgpu_callback.h"
+ #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+ #include "third_party/blink/renderer/platform/runtime_enabled_features.h"
++#include "third_party/blink/renderer/platform/ghost_shell_config.h"
+ 
+ namespace blink {
+ 
+@@ -119,6 +120,24 @@ GPUAdapter::GPUAdapter(
+   GetHandle().GetLimits(limits.GetLinked());
+   limits_ = MakeGarbageCollected<GPUSupportedLimits>(limits);
+ 
++  // === GHOST SHELL WEBGPU SPOOFING ===
++  auto& gs = blink::GhostShellConfig::GetInstance();
++  if (gs.IsActive()) {
++    String webgl_vendor = gs.GetUnmaskedVendor();
++    String webgpu_vendor;
++    wtf_size_t open  = webgl_vendor.rfind('(');
++    wtf_size_t close = webgl_vendor.rfind(')');
++    if (open != kNotFound && close != kNotFound && close > open) {
++      webgpu_vendor = webgl_vendor.substr(open + 1, close - open - 1).ToAsciiLower();
++    } else {
++      webgpu_vendor = "unknown";
++    }
++    vendor_ = webgpu_vendor;
++    device_ = gs.GetUnmaskedRenderer();
++    architecture_ = "";
++    description_ = "";
++  }
++
+   info_ = CreateAdapterInfoForAdapter();
+ }
+ 
+diff --git a/third_party/blink/renderer/modules/webgpu/gpu_adapter_info.cc b/third_party/blink/renderer/modules/webgpu/gpu_adapter_info.cc
+index 9d155705c1350..a583870bc1bb1 100644
+--- a/third_party/blink/renderer/modules/webgpu/gpu_adapter_info.cc
++++ b/third_party/blink/renderer/modules/webgpu/gpu_adapter_info.cc
+@@ -1,7 +1,8 @@
+ // Copyright 2022 The Chromium Authors
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+-
++#include "base/no_destructor.h"
++#include "third_party/blink/renderer/platform/ghost_shell_config.h"
+ #include "third_party/blink/renderer/modules/webgpu/gpu_adapter_info.h"
+ 
+ #include "third_party/blink/renderer/modules/webgpu/gpu_memory_heap_info.h"
+@@ -46,18 +47,34 @@ void GPUAdapterInfo::AppendSubgroupMatrixConfig(
+ }
+ 
+ const String& GPUAdapterInfo::vendor() const {
++  if (GhostShellConfig::GetInstance().IsActive()) {
++    // NoDestructor создает объект один раз и безопасно "утекает" при закрытии
++    static const base::NoDestructor<String> v(GhostShellConfig::GetInstance().GetGPUVendor());
++    if (!v->empty()) return *v;
++  }
+   return vendor_;
+ }
+ 
+ const String& GPUAdapterInfo::architecture() const {
++  if (GhostShellConfig::GetInstance().IsActive()) {
++    static const base::NoDestructor<String> a(GhostShellConfig::GetInstance().GetGPUArch());
++    if (!a->empty()) return *a;
++  }
+   return architecture_;
+ }
+ 
+ const String& GPUAdapterInfo::device() const {
++  if (GhostShellConfig::GetInstance().IsActive()) {
++    // Внимание: если GetGPUDevice() не объявлен в ghost_shell_config.h, 
++    // закомментируй эти строки или добавь метод в заголовок.
++    static const base::NoDestructor<String> d(GhostShellConfig::GetInstance().GetGPUDevice());
++    if (!d->empty()) return *d;
++  }
+   return device_;
+ }
+ 
+ const String& GPUAdapterInfo::description() const {
++  // description оставляем реальным — без него вычисляется через другие поля
+   return description_;
+ }
+ 
+diff --git a/third_party/blink/renderer/platform/BUILD.gn b/third_party/blink/renderer/platform/BUILD.gn
+index 71420d495390d..ce7bb349d576a 100644
+--- a/third_party/blink/renderer/platform/BUILD.gn
++++ b/third_party/blink/renderer/platform/BUILD.gn
+@@ -353,6 +353,8 @@ component("platform") {
+   output_name = "blink_platform"
+ 
+   sources = [
++    "ghost_shell_config.cc",
++    "ghost_shell_config.h",
+     "accept_languages_watcher.h",
+     "animation/animation_translation_util.cc",
+     "animation/animation_translation_util.h",
+diff --git a/third_party/blink/renderer/platform/DEPS b/third_party/blink/renderer/platform/DEPS
+index 25dc8571e5f72..7fe57d8003537 100644
+--- a/third_party/blink/renderer/platform/DEPS
++++ b/third_party/blink/renderer/platform/DEPS
+@@ -52,6 +52,9 @@ include_rules = [
+     "+base/unguessable_token.h",
+     "+base/uuid.h",
+     "+base/values.h",
++    "+base/base64.h",
++    "+base/json/json_reader.h",
++    "+base/json/json_writer.h",
+     "+build/mac",
+     "+build/win",
+     "+device",
+@@ -110,7 +113,7 @@ specific_include_rules = {
+     "web_url_error\.cc": [
+         "+net/base/net_errors.h"
+     ],
+-    "ukm_time_aggregator_test.cc" : [
++    "ukm_time_aggregator_test.cc": [
+         "+components/ukm/test_ukm_recorder.h"
+     ],
+     "search_engine_utils.cc": [
+@@ -119,4 +122,4 @@ specific_include_rules = {
+     ".*_fuzzer.cc": [
+         "+testing/libfuzzer",
+     ],
+-}
++}
+\ No newline at end of file
+diff --git a/third_party/blink/renderer/platform/fonts/font_cache.cc b/third_party/blink/renderer/platform/fonts/font_cache.cc
+index 75cc0b764f8c4..479c3c6c898e5 100644
+--- a/third_party/blink/renderer/platform/fonts/font_cache.cc
++++ b/third_party/blink/renderer/platform/fonts/font_cache.cc
+@@ -27,6 +27,8 @@
+  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+  */
+ 
++ 
++#include "third_party/blink/renderer/platform/ghost_shell_config.h"
+ #include "third_party/blink/renderer/platform/fonts/font_cache.h"
+ 
+ #include <limits>
+@@ -153,6 +155,32 @@ const SimpleFontData* FontCache::GetFontData(
+     const FontDescription& font_description,
+     const AtomicString& family,
+     AlternateFontName altername_font_name) {
++
++  // === GHOST SHELL: Font availability filter ===
++  if (GhostShellConfig::GetInstance().IsActive()) {
++    const Vector<String>& allowed = GhostShellConfig::GetInstance().GetFontList();
++    if (!allowed.empty()) {
++      bool found = false;
++      for (const String& allowed_name : allowed) {
++        if (EqualIgnoringAsciiCase(allowed_name, family)) {
++          found = true;
++          break;
++        }
++      }
++      if (!found) {
++        if (!EqualIgnoringAsciiCase(family, "serif") &&
++            !EqualIgnoringAsciiCase(family, "sans-serif") &&
++            !EqualIgnoringAsciiCase(family, "monospace") &&
++            !EqualIgnoringAsciiCase(family, "cursive") &&
++            !EqualIgnoringAsciiCase(family, "fantasy") &&
++            !EqualIgnoringAsciiCase(family, "system-ui")) {
++          return nullptr;
++        }
++      }
++    }
++  }
++  // === END GHOST SHELL ===
++
+   if (const FontPlatformData* platform_data = GetFontPlatformData(
+           font_description,
+           FontFaceCreationParams(
+diff --git a/third_party/blink/renderer/platform/graphics/image_data_buffer.cc b/third_party/blink/renderer/platform/graphics/image_data_buffer.cc
+index c76f6553e1cec..e9c2b71813b20 100644
+--- a/third_party/blink/renderer/platform/graphics/image_data_buffer.cc
++++ b/third_party/blink/renderer/platform/graphics/image_data_buffer.cc
+@@ -32,6 +32,13 @@
+ 
+ #include "third_party/blink/renderer/platform/graphics/image_data_buffer.h"
+ 
++// Ghost Shell Anty: per-profile canvas pixel noise. Reads from
++// GhostShellConfig (the central per-profile fingerprint singleton —
++// populated once on launch from --ghost-shell-payload base64 JSON).
++// No new CLI flags; canvas_noise + random_seed are just two more
++// fields on the existing config record.
++#include "third_party/blink/renderer/platform/ghost_shell_config.h"
++
+ #include "base/compiler_specific.h"
+ #include "base/memory/ptr_util.h"
+ #include "third_party/blink/renderer/platform/image-encoders/image_encoder_utils.h"
+@@ -43,6 +50,67 @@
+ 
+ namespace blink {
+ 
++namespace {
++
++// SplitMix64 — keyed hash producing uniform output for every
++// (profile_seed, x, y) triplet. Used to pick which pixels get
++// perturbed and which direction each channel flips.
++inline uint64_t GhostShellMix(uint64_t z) {
++  z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
++  z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
++  return z ^ (z >> 31);
++}
++
++// Apply +/- 1-LSB noise to ~0.5% of N32 pixels. No-op when
++// GhostShellConfig isn't active OR pixmap isn't 8-bit-per-channel
++// RGBA. Seed comes from GetRandomSeed() (per-profile stable);
++// density modulated by canvas_noise (0..0.003 typical).
++//
++// Visually imperceptible (1 LSB on 8-bit channel < quantization
++// threshold) but makes the pixel hash differ across profiles.
++void GhostShellApplyCanvasNoise(SkPixmap* dst) {
++  auto& cfg = blink::GhostShellConfig::GetInstance();
++  if (!cfg.IsActive() || !dst || dst->info().bytesPerPixel() != 4) {
++    return;
++  }
++  const double noise_strength = cfg.GetCanvasNoise();
++  if (noise_strength <= 0.0) {
++    return;
++  }
++  // canvas_noise is a 0..0.003 density value: at 0.003 we perturb
++  // ~3 pixels per thousand. The divisor below converts that to a
++  // "1-in-N" gate for the hash test.
++  const uint64_t gate = noise_strength > 0
++      ? std::max<uint64_t>(2ULL, static_cast<uint64_t>(1.0 / noise_strength))
++      : 0;
++  if (gate == 0) return;
++  const uint64_t seed = static_cast<uint64_t>(cfg.GetRandomSeed());
++  const int w = dst->width();
++  const int h = dst->height();
++  if (w <= 0 || h <= 0) return;
++  for (int y = 0; y < h; ++y) {
++    uint8_t* row = static_cast<uint8_t*>(dst->writable_addr(0, y));
++    if (!row) continue;
++    for (int x = 0; x < w; ++x) {
++      const uint64_t k = GhostShellMix(
++          seed ^ static_cast<uint64_t>(x) ^
++          (static_cast<uint64_t>(y) << 32));
++      // Density-modulated gate: 1-in-N pixels touched, where N
++      // is derived from canvas_noise (e.g. 0.005 → 1-in-200).
++      if ((k % gate) != 0) continue;
++      uint8_t* px = row + x * 4;
++      // +/- 1 LSB on R/G/B; alpha untouched. Direction comes from
++      // bits 8..10 of k so each channel flips independently.
++      px[0] = static_cast<uint8_t>(px[0] + ((k & 0x100) ? 1 : -1));
++      px[1] = static_cast<uint8_t>(px[1] + ((k & 0x200) ? 1 : -1));
++      px[2] = static_cast<uint8_t>(px[2] + ((k & 0x400) ? 1 : -1));
++    }
++  }
++}
++
++}  // namespace
++
++
+ ImageDataBuffer::ImageDataBuffer(scoped_refptr<StaticBitmapImage> image) {
+   if (!image)
+     return;
+@@ -130,14 +198,24 @@ base::span<const uint8_t> ImageDataBuffer::PixelData() const {
+ bool ImageDataBuffer::EncodeImage(const ImageEncodingMimeType mime_type,
+                                   const double& quality,
+                                   Vector<unsigned char>* encoded_image) const {
+-  return ImageEncoder::Encode(encoded_image, pixmap_, mime_type, quality);
++  // Ghost Shell Anty: apply per-profile noise to pixmap pixels
++  // before encoding. const_cast is sound because the pixmap is
++  // backed by writable SkData we created on construction (or a
++  // peeked image we're about to encode away from). No-op when
++  // GhostShellConfig isn't active.
++  SkPixmap mut = pixmap_;
++  GhostShellApplyCanvasNoise(&mut);
++  return ImageEncoder::Encode(encoded_image, mut, mime_type, quality);
+ }
+ 
+ String ImageDataBuffer::ToDataURL(const ImageEncodingMimeType mime_type,
+                                   const double& quality) const {
+   DCHECK(is_valid_);
+   Vector<unsigned char> result;
+-  if (!ImageEncoder::Encode(&result, pixmap_, mime_type, quality)) {
++  // Ghost Shell Anty: same noise injection as EncodeImage above.
++  SkPixmap mut = pixmap_;
++  GhostShellApplyCanvasNoise(&mut);
++  if (!ImageEncoder::Encode(&result, mut, mime_type, quality)) {
+     return "data:,";
+   }
+   return StrCat({"data:", ImageEncoderUtils::MimeTypeName(mime_type),
+diff --git a/ui/gl/dc_layer_tree.cc b/ui/gl/dc_layer_tree.cc
+index 554ee34fea445..129e8a0b1d17f 100644
+--- a/ui/gl/dc_layer_tree.cc
++++ b/ui/gl/dc_layer_tree.cc
+@@ -337,10 +337,10 @@ void DCLayerTree::Initialize(
+   d3d12_command_queue_ = GetDirectCompositionD3D12CommandQueue();
+ 
+   if (d3d12_command_queue_) {
+-    Microsoft::WRL::ComPtr<EXPERIMENTAL_IDCompositionDevice6> dcomp_device6;
++    /* Microsoft::WRL::ComPtr<EXPERIMENTAL_IDCompositionDevice6> dcomp_device6;
+     HRESULT hr = dcomp_device_.As(&dcomp_device6);
+     CHECK_EQ(hr, S_OK);
+-    dcomp_device_6_ = std::move(dcomp_device6);
++    dcomp_device_6_ = std::move(dcomp_device6); */
+   }
+ 
+   solid_color_surface_pool_ =
+@@ -393,14 +393,14 @@ void DCLayerTree::Initialize(
+ 
+   hdr_metadata_helper_ = HDRMetadataHelperWin::Create();
+ 
+-  if (Microsoft::WRL::ComPtr<IDCompositionDevice5> dcomp_device5;
++  /* if (Microsoft::WRL::ComPtr<IDCompositionDevice5> dcomp_device5;
+       SUCCEEDED(dcomp_device_.As(&dcomp_device5))) {
+     hr = dcomp_device5->CreateDynamicTexture(&primary_plane_surface_);
+     if (FAILED(hr)) {
+       LOG(WARNING) << "Failed to create IDCompositionDynamicTexture: "
+                    << logging::SystemErrorCodeToString(hr);
+     }
+-  }
++  } */
+ }
+ 
+ VideoProcessorWrapper* DCLayerTree::InitializeVideoProcessor(
+@@ -1038,7 +1038,7 @@ base::expected<void, CommitError> DCLayerTree::VisualTree::BuildTree(
+                        num_layers_modified);
+ 
+   if (needs_commit) {
+-    if (dc_layer_tree_->dcomp_device_6_) {
++    /* if (dc_layer_tree_->dcomp_device_6_) {
+       // First call `PresentCompositionTextures` to specify the queue that the
+       // next `Commit` call uses to actually present the composition textures.
+       IUnknown* command_queue_unk = dc_layer_tree_->d3d12_command_queue_.Get();
+@@ -1052,7 +1052,7 @@ base::expected<void, CommitError> DCLayerTree::VisualTree::BuildTree(
+                             kIDCompositionDevice6PresentCompositionTextures,
+                         hr});
+       }
+-    }
++    } */
+ 
+     TRACE_EVENT0("gpu", "DCLayerTree::CommitAndClearPendingOverlays::Commit");
+     base::ScopedUmaHistogramTimer scoped_timer(
+@@ -1394,11 +1394,11 @@ base::expected<void, CommitError> DCLayerTree::CommitAndClearPendingOverlays(
+           DVLOG(1) << "Set primary_plane_surface_ damage: "
+                    << overlay.damage_rect.ToString();
+ 
+-          const RECT damage_rect =
+-              gfx::ToEnclosingRect(overlay.damage_rect).ToRECT();
+-          HRESULT hr = primary_plane_surface_->SetTexture(dcomp_texture.Get(),
+-                                                          &damage_rect, 1);
+-          CHECK_EQ(hr, S_OK);
++          // const RECT damage_rect =
++          //     gfx::ToEnclosingRect(overlay.damage_rect).ToRECT();
++/*           HRESULT hr = primary_plane_surface_->SetTexture(dcomp_texture.Get(),
++                                                          &damage_rect, 1); */
++          // CHECK_EQ(hr, S_OK);
+ 
+           overlay.overlay_image = DCLayerOverlayImage(
+               overlay.overlay_image->size(), primary_plane_surface_,
+@@ -1419,7 +1419,7 @@ base::expected<void, CommitError> DCLayerTree::CommitAndClearPendingOverlays(
+     // primary plane overlay to be removed from the visual tree this frame,
+     // which will cause commit to happen.
+     DVLOG(1) << "Reset primary_plane_surface_ damage.";
+-    primary_plane_surface_->SetTexture(nullptr);
++/*     primary_plane_surface_->SetTexture(nullptr); */
+     primary_plane_surface_serial_ = 0;
+   }
+ 
+diff --git a/ui/gl/dc_layer_tree.h b/ui/gl/dc_layer_tree.h
+index ba30a1d9fe676..c24042c687256 100644
+--- a/ui/gl/dc_layer_tree.h
++++ b/ui/gl/dc_layer_tree.h
+@@ -27,6 +27,8 @@
+ #include "ui/gl/gl_export.h"
+ #include "ui/gl/hdr_metadata_helper_win.h"
+ 
++typedef IDCompositionTexture IDCompositionDynamicTexture;
++
+ namespace gfx {
+ namespace mojom {
+ class DelegatedInkPointRenderer;
+@@ -539,7 +541,6 @@ class GL_EXPORT DCLayerTree {
+   Microsoft::WRL::ComPtr<IDCompositionDevice3> dcomp_device_;
+   Microsoft::WRL::ComPtr<IDCompositionTarget> dcomp_target_;
+   // IDCompositionDevice6 enables support for D3D12 composition textures.
+-  Microsoft::WRL::ComPtr<EXPERIMENTAL_IDCompositionDevice6> dcomp_device_6_;
+   // A d3d12 command queue from Dawn that is used to present composition
+   // textures prior to DComp commit.
+   Microsoft::WRL::ComPtr<ID3D12CommandQueue> d3d12_command_queue_;
+diff --git a/ui/gl/direct_composition_support.cc b/ui/gl/direct_composition_support.cc
+index 2b56c72adb90b..27cc186ce51b6 100644
+--- a/ui/gl/direct_composition_support.cc
++++ b/ui/gl/direct_composition_support.cc
+@@ -770,11 +770,11 @@ void InitializeDirectComposition(
+ 
+   g_d3d11_device = d3d11_device.Detach();
+ 
+-  Microsoft::WRL::ComPtr<EXPERIMENTAL_IDCompositionDevice6> dcomp_device6;
++  /* Microsoft::WRL::ComPtr<EXPERIMENTAL_IDCompositionDevice6> dcomp_device6;
+   hr = g_dcomp_device->QueryInterface(IID_PPV_ARGS(&dcomp_device6));
+   if (SUCCEEDED(hr)) {
+     g_d3d12_command_queue = d3d12_command_queue.Detach();
+-  }
++  } */
+ 
+   if (features::UseCompositorClockVSyncInterval()) {
+     using PFN_DXGI_DISABLE_VBLANK_VIRTUALIZATION = HRESULT(WINAPI*)();
