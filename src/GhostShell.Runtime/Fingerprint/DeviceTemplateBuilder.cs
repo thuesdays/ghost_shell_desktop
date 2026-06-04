@@ -420,13 +420,13 @@ public sealed class DeviceTemplateBuilder
         // through ANGLE — NEVER Direct3D11 (a Windows-only API). A phone
         // reporting "...Direct3D11..." is an instant bot signal.
         if (gpu.Contains("mali"))
-            return ("ARM", $"ANGLE (ARM, {model}, OpenGL ES 3.2)", "mali");
+            return ("ARM", $"ANGLE (ARM, {model}, OpenGL ES 3.2)", "arm");
         if (gpu.Contains("adreno") || gpu.Contains("qualcomm"))
         {
             var num = new string(model.Where(char.IsDigit).ToArray());
             return ("Qualcomm",
                     $"ANGLE (Qualcomm, Adreno (TM) {(num.Length > 0 ? num : "740")}, OpenGL ES 3.2)",
-                    "adreno");
+                    "qualcomm");
         }
 
         // Desktop discrete / integrated (Windows / Linux, Direct3D11 / GL).
@@ -444,7 +444,7 @@ public sealed class DeviceTemplateBuilder
         // audit FINGERPRINT-02: an Android template that didn't match a known
         // mobile GPU must still resolve to ARM/GLES, never the Intel default.
         if (Os == DeviceOs.Android)
-            return ("ARM", "ANGLE (ARM, Mali-G715, OpenGL ES 3.2)", "mali");
+            return ("ARM", "ANGLE (ARM, Mali-G715, OpenGL ES 3.2)", "arm");
 
         // Default: Intel integrated (desktop Windows/Linux only).
         var intelName = string.IsNullOrEmpty(model) ? "UHD Graphics 770" : model;
@@ -477,12 +477,16 @@ public sealed class DeviceTemplateBuilder
         return "0x00009A60";
     }
 
+    // audit WG-04: webgpu_vendor must be a canonical Chromium adapter vendor
+    // token ("arm"/"qualcomm"/"apple"/"nvidia"/"amd"/"intel") — NOT "mali"
+    // or "adreno" (those are device families, not WebGPU vendor strings).
     private static string ResolveWebGpuArch(string vendor) => vendor switch
     {
         "nvidia"   => "ada",
         "amd"      => "rdna3",
         "apple"    => "apple-gpu",
         "qualcomm" => "adreno",
+        "arm"      => "valhall",
         _          => "xe",
     };
 

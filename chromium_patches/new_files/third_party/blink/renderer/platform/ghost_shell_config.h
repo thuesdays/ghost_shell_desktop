@@ -37,7 +37,18 @@ class PLATFORM_EXPORT GhostShellConfig {
     if (device_memory_ >= 0.5) return 0.5;
     return 0.25;
   }
-  // Raw value (for internal use, e.g. performance.memory.jsHeapSizeLimit)
+  // Raw, un-clamped device_memory value as parsed from the payload.
+  //
+  // audit PCP-07: this is currently UNCONSUMED. It was intended to pin
+  // performance.memory.jsHeapSizeLimit to a per-profile value coherent with
+  // the claimed RAM tier, but no Blink patch reads it yet AND the .NET
+  // DeviceTemplateBuilder clamps device_memory to <=8 before emission, so in
+  // practice this never exceeds 8 today. jsHeapSizeLimit therefore still
+  // reflects the real V8 heap limit. Kept (not deleted) because a future
+  // MemoryInfo/performance.memory patch is the right consumer; if that patch
+  // lands, .NET must emit an UNCLAMPED hardware.device_memory_raw separately
+  // from the W3C-bucketed device_memory. Low severity: real Chrome's
+  // jsHeapSizeLimit is a fixed ~2-4GB independent of RAM, so the gap is subtle.
   double GetDeviceMemoryRaw() const { return device_memory_; }
   String GetPlatform() const { return platform_; }
   String GetUserAgent() const { return user_agent_; }
@@ -47,6 +58,14 @@ class PLATFORM_EXPORT GhostShellConfig {
   // ─── Languages ──────────────────────────────────────────
   String GetLanguage() const { return language_; }
   const Vector<String>& GetLanguages() const { return languages_; }
+  // audit PCP-06: the q-weighted Accept-Language HTTP header is now enforced
+  // browser-side from this SAME payload value (see
+  // embedder_support::GhostShellUAOverride::GetAcceptLanguage() consumed in
+  // ChromeContentBrowserClient::ConfigureNetworkContextParams), so the request
+  // header and navigator.languages are derived from one ordered list and can
+  // no longer disagree. This renderer-side getter is retained for any in-
+  // renderer consistency check; navigator.languages itself comes from
+  // GetLanguages().
   String GetAcceptLanguage() const { return accept_language_; }
 
   // ─── Screen ─────────────────────────────────────────────
@@ -131,7 +150,15 @@ class PLATFORM_EXPORT GhostShellConfig {
   //   rect_*     → blink::DOMRect::{x,y,width,height}
   //   font_*     → blink::Element::offsetWidth/Height (text-measuring paths)
   //   screen_*   → GetAvailWidth/Height — subtract for fake taskbar
-  //   tz_*       → Date::getTimezoneOffset (±1 minute drift)
+  //
+  // audit PCP-09: there is intentionally NO timezone *jitter*. Real users
+  // on the same IANA zone share the EXACT same getTimezoneOffset() value, so
+  // adding ±1min drift would REDUCE realism and de-anonymise the profile.
+  // Date::getTimezoneOffset() is derived from the ICU default zone that
+  // V8Initializer adopts from GetTimezoneId(), keeping it coherent with
+  // Intl.DateTimeFormat().resolvedOptions().timeZone. GetTimezoneOffsetMin()
+  // below carries the payload's pre-computed offset (matching that zone) for
+  // any self-check that needs the numeric value without re-deriving it.
   //
   // The values are seeded by device_templates.py::_build_noise() from
   // SHA256(profile_name), so profile_01 always gets the same numbers.
@@ -145,7 +172,9 @@ class PLATFORM_EXPORT GhostShellConfig {
   double GetRectOffset() const { return rect_offset_; }
   double GetFontWidthOffset() const { return font_width_offset_; }
   int GetScreenAvailJitter() const { return screen_avail_jitter_; }
-  int GetTimezoneOffsetJitter() const { return timezone_offset_jitter_; }
+  // audit PCP-09: GetTimezoneOffsetJitter() removed — timezone offset jitter
+  // is intentionally not implemented (see noise-seed block above). The
+  // timezone_offset_jitter_ field and its noise-parse line were also removed.
 
   // ─── WebRTC Media Devices (JSON) ────────────────────────
   String GetAudioInputsJSON() const { return audio_inputs_json_; }
@@ -304,7 +333,8 @@ class PLATFORM_EXPORT GhostShellConfig {
   double rect_offset_ = 0.0;
   double font_width_offset_ = 0.0;
   int screen_avail_jitter_ = 0;
-  int timezone_offset_jitter_ = 0;
+  // audit PCP-09: timezone_offset_jitter_ field removed (dead — no consumer,
+  // and timezone offset jitter is intentionally not implemented).
 
   // WebRTC media (raw JSON — парсится на месте использования)
   String audio_inputs_json_ = "[]";
@@ -372,6 +402,10 @@ PLATFORM_EXPORT int GhostShell_GetRandomSeed();
 PLATFORM_EXPORT int GhostShell_GetTLSCipherSuites(unsigned short* out, int max);
 PLATFORM_EXPORT int GhostShell_GetTLSSupportedGroups(unsigned short* out,
                                                      int max);
+// audit TLS-02/03/04 — key_shares, signature_algorithms, aes_hw override.
+PLATFORM_EXPORT int GhostShell_GetTLSKeyShares(unsigned short* out, int max);
+PLATFORM_EXPORT int GhostShell_GetTLSSigAlgs(unsigned short* out, int max);
+PLATFORM_EXPORT int GhostShell_GetTLSAesHw();
 }
 
 #endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_GHOST_SHELL_CONFIG_H_

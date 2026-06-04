@@ -39,6 +39,22 @@ class GhostShellUAOverride {
     return brand_full_version_list_;
   }
 
+  // audit PCP-02/PCP-03: form factors for Sec-CH-UA-Form-Factors and
+  // navigator.userAgentData.getHighEntropyValues({"formFactors"}). Parsed from
+  // the payload's ua_metadata.form_factor (singular: "desktop"/"mobile"/
+  // "tablet") and mapped to the plural blink form-factor vector. Empty means
+  // "not spoofed — let native logic decide". This is the SINGLE source of
+  // truth: ChromeContentBrowserClient::GetUserAgentMetadata() now routes
+  // through embedder_support::GetUserAgentMetadata() which consults this.
+  const std::vector<std::string>& GetFormFactors() const {
+    return form_factors_;
+  }
+
+  // audit PCP-06: q-weighted Accept-Language header string, taken verbatim
+  // from the payload so the request header exactly matches navigator.languages
+  // (same ordered source). Empty means "not spoofed".
+  std::string GetAcceptLanguage()   const { return accept_language_; }
+
   // Scalar fields — empty string means "use default / not spoofed".
   std::string GetFullVersion()      const { return full_version_; }
   std::string GetPlatform()         const { return platform_; }
@@ -63,6 +79,12 @@ class GhostShellUAOverride {
 
   std::vector<blink::UserAgentBrandVersion> brand_version_list_;
   std::vector<blink::UserAgentBrandVersion> brand_full_version_list_;
+
+  // audit PCP-03: mapped from ua_metadata.form_factor (singular) to the plural
+  // blink form-factor vector.
+  std::vector<std::string> form_factors_;
+  // audit PCP-06: q-weighted Accept-Language header from the payload.
+  std::string accept_language_;
 
   std::string full_version_;
   std::string platform_;

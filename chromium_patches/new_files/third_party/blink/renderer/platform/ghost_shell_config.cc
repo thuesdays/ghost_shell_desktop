@@ -21,7 +21,7 @@ namespace blink {
 
 namespace {
 
-String ToBlinkString(const std::string* s) {
+[[maybe_unused]] String ToBlinkString(const std::string* s) {
   if (!s || s->empty()) return String();
   return String::FromUtf8(base::span<const uint8_t>(
       reinterpret_cast<const uint8_t*>(s->data()), s->length()));
@@ -31,6 +31,24 @@ String ToBlinkString(const std::string& s) {
   if (s.empty()) return String();
   return String::FromUtf8(base::span<const uint8_t>(
       reinterpret_cast<const uint8_t*>(s.data()), s.length()));
+}
+
+// audit PCP-08: forward-compatible string assignment.
+//
+// All String fields used to be assigned unconditionally via
+//   field_ = ToBlinkString(dict->FindString(key));
+// FindString returns nullptr when the key is absent, ToBlinkString(nullptr)
+// returns a null String, and the header default (e.g. platform_="Win32",
+// timezone_id_="Europe/Kyiv") was silently wiped to null. A partial / older
+// payload that omitted a string sub-key therefore produced "undefined-shaped"
+// navigator values — a tell in itself, and a violation of the documented
+// forward-compat guarantee. This mirrors the value_or pattern already used for
+// numerics: only overwrite the default when the key is actually present.
+template <typename DictT>
+void AssignIfPresent(String& field, const DictT& dict, const char* key) {
+  if (const std::string* s = dict.FindString(key)) {
+    field = ToBlinkString(*s);
+  }
 }
 
 // NOTE on types:
@@ -124,16 +142,16 @@ void GhostShellConfig::Initialize() {
     } else {
       device_memory_ = hw->FindDouble("device_memory").value_or(device_memory_);
     }
-    platform_             = ToBlinkString(hw->FindString("platform"));
-    user_agent_           = ToBlinkString(hw->FindString("user_agent"));
+    AssignIfPresent(platform_, *hw, "platform");      // audit PCP-08
+    AssignIfPresent(user_agent_, *hw, "user_agent");  // audit PCP-08
     max_touch_points_     = hw->FindInt("max_touch_points").value_or(max_touch_points_);
     pdf_viewer_enabled_   = hw->FindBool("pdf_viewer_enabled").value_or(pdf_viewer_enabled_);
   }
 
   // ─── Languages ─────────────────────────────────────────
   if (const auto* langs = dict.FindDict("languages")) {
-    language_        = ToBlinkString(langs->FindString("language"));
-    accept_language_ = ToBlinkString(langs->FindString("accept_language"));
+    AssignIfPresent(language_, *langs, "language");                // audit PCP-08
+    AssignIfPresent(accept_language_, *langs, "accept_language");  // audit PCP-08
     if (const auto* list = langs->FindList("languages")) {
       languages_.clear();
       for (const auto& v : *list) {
@@ -155,17 +173,17 @@ void GhostShellConfig::Initialize() {
     color_depth_        = screen->FindInt("color_depth").value_or(color_depth_);
     pixel_depth_        = screen->FindInt("pixel_depth").value_or(pixel_depth_);
     pixel_ratio_        = screen->FindDouble("pixel_ratio").value_or(pixel_ratio_);
-    orientation_type_   = ToBlinkString(screen->FindString("orientation"));
+    AssignIfPresent(orientation_type_, *screen, "orientation");  // audit PCP-08
     orientation_angle_  = screen->FindInt("orientation_angle").value_or(orientation_angle_);
   }
 
   // ─── Graphics ──────────────────────────────────────────
   if (const auto* graphics = dict.FindDict("graphics")) {
-    gl_vendor_   = ToBlinkString(graphics->FindString("gl_vendor"));
-    gl_renderer_ = ToBlinkString(graphics->FindString("gl_renderer"));
-    gpu_vendor_  = ToBlinkString(graphics->FindString("webgpu_vendor"));
-    gpu_arch_    = ToBlinkString(graphics->FindString("webgpu_arch"));
-    gpu_device_  = ToBlinkString(graphics->FindString("webgpu_device"));
+    AssignIfPresent(gl_vendor_, *graphics, "gl_vendor");        // audit PCP-08
+    AssignIfPresent(gl_renderer_, *graphics, "gl_renderer");    // audit PCP-08
+    AssignIfPresent(gpu_vendor_, *graphics, "webgpu_vendor");   // audit PCP-08
+    AssignIfPresent(gpu_arch_, *graphics, "webgpu_arch");       // audit PCP-08
+    AssignIfPresent(gpu_device_, *graphics, "webgpu_device");   // audit PCP-08
     if (const auto* exts = graphics->FindList("webgl_extensions")) {
       webgl_extensions_.clear();
       for (const auto& v : *exts) {
@@ -184,7 +202,7 @@ void GhostShellConfig::Initialize() {
 
   // ─── Timezone ──────────────────────────────────────────
   if (const auto* tz = dict.FindDict("timezone")) {
-    timezone_id_         = ToBlinkString(tz->FindString("id"));
+    AssignIfPresent(timezone_id_, *tz, "id");  // audit PCP-08
     timezone_offset_min_ = tz->FindInt("offset_min").value_or(timezone_offset_min_);
   }
 
@@ -202,11 +220,11 @@ void GhostShellConfig::Initialize() {
 
   // ─── Connection ────────────────────────────────────────
   if (const auto* conn = dict.FindDict("connection")) {
-    connection_effective_type_ = ToBlinkString(conn->FindString("effective_type"));
+    AssignIfPresent(connection_effective_type_, *conn, "effective_type");  // audit PCP-08
     connection_downlink_       = conn->FindDouble("downlink").value_or(connection_downlink_);
     connection_rtt_            = conn->FindInt("rtt").value_or(connection_rtt_);
     connection_save_data_      = conn->FindBool("save_data").value_or(connection_save_data_);
-    connection_type_           = ToBlinkString(conn->FindString("type"));
+    AssignIfPresent(connection_type_, *conn, "type");  // audit PCP-08
   }
 
   // ─── Fonts ─────────────────────────────────────────────
@@ -234,7 +252,8 @@ void GhostShellConfig::Initialize() {
     rect_offset_            = noise->FindDouble("rect_offset").value_or(rect_offset_);
     font_width_offset_      = noise->FindDouble("font_width_offset").value_or(font_width_offset_);
     screen_avail_jitter_    = noise->FindInt("screen_avail_jitter").value_or(screen_avail_jitter_);
-    timezone_offset_jitter_ = noise->FindInt("timezone_offset_jitter").value_or(timezone_offset_jitter_);
+    // audit PCP-09: timezone_offset_jitter parse removed — field deleted; tz
+    // offset jitter is intentionally not applied (reduces realism).
   }
 
   // ─── WebRTC Media ──────────────────────────────────────
@@ -249,13 +268,13 @@ void GhostShellConfig::Initialize() {
 
   // ─── UserAgentMetadata ─────────────────────────────────
   if (const auto* uam = dict.FindDict("ua_metadata")) {
-    ua_full_version_     = ToBlinkString(uam->FindString("full_version"));
-    ua_major_version_    = ToBlinkString(uam->FindString("major_version"));
-    ua_platform_         = ToBlinkString(uam->FindString("platform"));
-    ua_platform_version_ = ToBlinkString(uam->FindString("platform_version"));
-    ua_architecture_     = ToBlinkString(uam->FindString("architecture"));
-    ua_bitness_          = ToBlinkString(uam->FindString("bitness"));
-    ua_model_            = ToBlinkString(uam->FindString("model"));
+    AssignIfPresent(ua_full_version_, *uam, "full_version");          // audit PCP-08
+    AssignIfPresent(ua_major_version_, *uam, "major_version");        // audit PCP-08
+    AssignIfPresent(ua_platform_, *uam, "platform");                  // audit PCP-08
+    AssignIfPresent(ua_platform_version_, *uam, "platform_version");  // audit PCP-08
+    AssignIfPresent(ua_architecture_, *uam, "architecture");         // audit PCP-08
+    AssignIfPresent(ua_bitness_, *uam, "bitness");                    // audit PCP-08
+    AssignIfPresent(ua_model_, *uam, "model");                        // audit PCP-08
     ua_wow64_            = uam->FindBool("wow64").value_or(false);
     ua_mobile_           = uam->FindBool("mobile").value_or(false);
 
@@ -421,6 +440,14 @@ struct GhostShellBridgeData {
       ALLOW_DISCOURAGED_TYPE("non-Blink-process bridge: WTF unavailable");
   std::vector<unsigned short> tls_supported_groups
       ALLOW_DISCOURAGED_TYPE("non-Blink-process bridge: WTF unavailable");
+  // audit TLS-03/04: signature_algorithms + key_shares per-profile lists,
+  // and aes_hw (TLS-02: -1=no override, 0/1=force AES-HW off/on for the
+  // TLS1.3 AES-vs-ChaCha cipher ordering). Same WTF-free constraint.
+  std::vector<unsigned short> tls_key_shares
+      ALLOW_DISCOURAGED_TYPE("non-Blink-process bridge: WTF unavailable");
+  std::vector<unsigned short> tls_sig_algs
+      ALLOW_DISCOURAGED_TYPE("non-Blink-process bridge: WTF unavailable");
+  int tls_aes_hw = -1;
 };
 
 // Returns a process-local singleton. base::NoDestructor doesn't pull WTF.
@@ -466,6 +493,26 @@ void EnsureBridgeInitialized() {
           }
         }
       }
+      // audit TLS-04: per-profile key_shares (PQ-first ordering).
+      if (const auto* ks = tls->FindList("key_shares")) {
+        for (const auto& v : *ks) {
+          if (v.is_int()) {
+            d.tls_key_shares.push_back(
+                static_cast<unsigned short>(v.GetInt() & 0xFFFF));
+          }
+        }
+      }
+      // audit TLS-03: per-profile signature_algorithms.
+      if (const auto* sa = tls->FindList("signature_algorithms")) {
+        for (const auto& v : *sa) {
+          if (v.is_int()) {
+            d.tls_sig_algs.push_back(
+                static_cast<unsigned short>(v.GetInt() & 0xFFFF));
+          }
+        }
+      }
+      // audit TLS-02: aes_hw override for the TLS1.3 cipher order.
+      d.tls_aes_hw = tls->FindInt("aes_hw").value_or(-1);
     }
   });
 }
@@ -509,6 +556,43 @@ int GhostShell_GetTLSSupportedGroups(unsigned short* out, int max) {
     out[n++] = v;
   }
   return n;
+}
+
+// audit TLS-04: per-profile key_shares (strong def overrides the weak stub
+// in boringssl/ssl/extensions.cc, activating the override).
+int GhostShell_GetTLSKeyShares(unsigned short* out, int max) {
+  EnsureBridgeInitialized();
+  if (!out || max <= 0) return 0;
+  const auto& d = GhostShellBridge();
+  if (!d.active) return 0;
+  int n = 0;
+  for (auto v : d.tls_key_shares) {
+    if (n >= max) break;
+    out[n++] = v;
+  }
+  return n;
+}
+
+// audit TLS-03: per-profile signature_algorithms.
+int GhostShell_GetTLSSigAlgs(unsigned short* out, int max) {
+  EnsureBridgeInitialized();
+  if (!out || max <= 0) return 0;
+  const auto& d = GhostShellBridge();
+  if (!d.active) return 0;
+  int n = 0;
+  for (auto v : d.tls_sig_algs) {
+    if (n >= max) break;
+    out[n++] = v;
+  }
+  return n;
+}
+
+// audit TLS-02: aes_hw override (-1 = leave genuine host AES-NI status).
+int GhostShell_GetTLSAesHw() {
+  EnsureBridgeInitialized();
+  const auto& d = GhostShellBridge();
+  if (!d.active) return -1;
+  return d.tls_aes_hw;
 }
 
 }  // extern "C"

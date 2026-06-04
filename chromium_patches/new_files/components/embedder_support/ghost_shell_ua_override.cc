@@ -7,6 +7,7 @@
 #include "base/json/json_reader.h"
 #include "base/logging.h"
 #include "base/no_destructor.h"
+#include "base/strings/string_util.h"  // audit PCP-03: base::ToLowerASCII
 #include "base/values.h"
 
 namespace embedder_support {
@@ -96,6 +97,39 @@ void GhostShellUAOverride::Initialize() {
   }
   if (const auto* full_brands = uam->FindList("full_version_list")) {
     brand_full_version_list_ = ParseBrandList(*full_brands);
+  }
+
+  // audit PCP-03: parse ua_metadata.form_factor (singular string) and map it
+  // to the plural blink form-factor vector. Previously this key had NO consumer
+  // and GhostBrowserConfig hardcoded {"Desktop"} regardless of the payload, so
+  // a mobile/tablet profile reported mobile=true with form factor "Desktop" —
+  // an internal contradiction CreepJS/FingerprintJS flag. Mapping it here, in
+  // the single consolidated UA parser, makes Sec-CH-UA-Form-Factors coherent
+  // with the mobile bit and the platform.
+  if (const std::string* ff = uam->FindString("form_factor")) {
+    const std::string ff_lower = base::ToLowerASCII(*ff);
+    if (ff_lower == "mobile") {
+      form_factors_ = {blink::kMobileFormFactor};
+    } else if (ff_lower == "tablet") {
+      form_factors_ = {blink::kTabletFormFactor};
+    } else if (ff_lower == "xr") {
+      form_factors_ = {blink::kXRFormFactor};
+    } else {
+      form_factors_ = {blink::kDesktopFormFactor};
+    }
+  } else {
+    // No explicit form_factor — derive from the mobile bit so it can never
+    // contradict it (mobile→Mobile, else Desktop), matching native default
+    // behaviour in GetFormFactorsClientHint().
+    form_factors_ = {mobile_ ? blink::kMobileFormFactor
+                             : blink::kDesktopFormFactor};
+  }
+
+  // audit PCP-06: the q-weighted Accept-Language string lives under the
+  // top-level "languages" block, not ua_metadata. Cache it so the network
+  // layer can enforce the exact header (matching navigator.languages order).
+  if (const auto* langs = root.FindDict("languages")) {
+    accept_language_ = StringOrEmpty(langs->FindString("accept_language"));
   }
 
   is_active_ = true;

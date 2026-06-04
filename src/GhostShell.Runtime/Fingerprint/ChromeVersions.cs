@@ -17,15 +17,21 @@ namespace GhostShell.Runtime.Fingerprint;
 public static class ChromeVersions
 {
     /// <summary>(major, full, weight). Weights are uniform-arbitrary —
-    /// the absolute scale doesn't matter, only the ratio.</summary>
+    /// the absolute scale doesn't matter, only the ratio.
+    ///
+    /// audit PCP-04: the claimed major MUST NOT trail the real engine. The
+    /// patched binary is Chromium 149.0.7805.0, so reporting 147 created an
+    /// engine-vs-UA skew (a 149-only Blink/JS feature present under a 147 UA
+    /// is a hard lie behavioral feature-detection catches). Weighted toward
+    /// the real build; no entry exceeds the engine major. Keep max(major)
+    /// == the engine major from chrome/VERSION whenever Chromium is rolled.</summary>
     public static readonly IReadOnlyList<(string Major, string Full, int Weight)> Versions =
     new (string, string, int)[]
     {
-        ("147", "147.0.7780.88",  55),
-        ("146", "146.0.7715.130", 25),
-        ("145", "145.0.7665.162", 12),
-        ("144", "144.0.7615.185",  5),
-        ("143", "143.0.7556.210",  3),
+        ("149", "149.0.7805.0",   52),
+        ("148", "148.0.7793.42",  30),
+        ("147", "147.0.7780.88",  12),
+        ("146", "146.0.7715.130",  6),
     };
 
     /// <summary>
