@@ -1,0 +1,121 @@
+<!--
+  SPDX-License-Identifier: MIT
+  Copyright (c) 2026 Mykola Kovhanko <thuesdays@gmail.com>
+
+  Redesign 2026-06 — vector icon library ("Lucide"-style).
+
+  Replaces the Segoe MDL2 Assets glyph font (Win10-only, dated) with
+  stroke-based vector geometries authored on a 24×24 grid. Rendered by
+  the GhostShell.App.Controls.Icon control (implicit style below): a
+  Viewbox scales the 24×24 Path uniformly to Icon.Size, so icons are
+  razor-sharp at any DPI and recolour via Icon.Stroke (per-page hue).
+
+  Usage:
+    <ctrl:Icon Data="{StaticResource Icon.Profiles}"
+               Stroke="{DynamicResource HueGreen}" Size="18"/>
+
+  Add an icon = one PathGeometry below. Migrate a glyph usage =
+  swap the <TextBlock FontFamily="Segoe MDL2 Assets" .../> for an
+  <ctrl:Icon Data="{StaticResource Icon.X}" .../>.
+-->
+<ResourceDictionary
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:ctrl="clr-namespace:GhostShell.App.Controls">
+
+    <!-- ── Implicit template for the Icon control ─────────────────── -->
+    <Style TargetType="{x:Type ctrl:Icon}">
+        <Setter Property="Focusable" Value="False"/>
+        <Setter Property="IsHitTestVisible" Value="False"/>
+        <Setter Property="Stroke" Value="{DynamicResource Text}"/>
+        <Setter Property="Width"  Value="{Binding Size, RelativeSource={RelativeSource Self}}"/>
+        <Setter Property="Height" Value="{Binding Size, RelativeSource={RelativeSource Self}}"/>
+        <Setter Property="SnapsToDevicePixels" Value="True"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="{x:Type ctrl:Icon}">
+                    <Viewbox Stretch="Uniform">
+                        <Path Width="24" Height="24"
+                              Data="{TemplateBinding Data}"
+                              Stroke="{TemplateBinding Stroke}"
+                              StrokeThickness="{TemplateBinding StrokeThickness}"
+                              StrokeLineJoin="Round"
+                              StrokeStartLineCap="Round"
+                              StrokeEndLineCap="Round"/>
+                    </Viewbox>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- ── Navigation / concepts ──────────────────────────────────── -->
+    <PathGeometry x:Key="Icon.Home"        Figures="M3,12 L12,4 L21,12 M6,10 V20 H18 V10"/>
+    <PathGeometry x:Key="Icon.Profiles"    Figures="M8.5,8 A3.5,3.5 0 1 1 15.5,8 A3.5,3.5 0 1 1 8.5,8 Z M5,20 C5,15 8,13 12,13 C16,13 19,15 19,20"/>
+    <PathGeometry x:Key="Icon.Globe"       Figures="M3,12 A9,9 0 1 1 21,12 A9,9 0 1 1 3,12 Z M3,12 H21 M12,3 C8.5,6 8.5,18 12,21 C15.5,18 15.5,6 12,3"/>
+    <PathGeometry x:Key="Icon.Runs"        Figures="M8,5 L19,12 L8,19 Z"/>
+    <PathGeometry x:Key="Icon.Queue"       Figures="M8,7 H20 M8,12 H20 M8,17 H20 M4,7 H4.4 M4,12 H4.4 M4,17 H4.4"/>
+    <PathGeometry x:Key="Icon.Sessions"    Figures="M3,5 H21 V16 H3 Z M9,20 H15 M12,16 V20"/>
+    <PathGeometry x:Key="Icon.Fingerprint" Figures="M12,3 L19,6 V11 C19,16 12,21 12,21 C12,21 5,16 5,11 V6 Z M9.5,12 L11.5,14 L15,9.5"/>
+    <PathGeometry x:Key="Icon.Scripts"     Figures="M9,8 L5,12 L9,16 M15,8 L19,12 L15,16 M13,6 L11,18"/>
+    <PathGeometry x:Key="Icon.Cookies"     Figures="M3,12 A9,9 0 1 1 21,12 A9,9 0 1 1 3,12 Z M9,9 H9.3 M14.5,10.5 H14.8 M10,15 H10.3 M15,15 H15.3"/>
+    <PathGeometry x:Key="Icon.Vault"       Figures="M6,11 H18 V20 H6 Z M8.5,11 V8 A3.5,3.5 0 0 1 15.5,8 V11 M12,14 V17"/>
+    <PathGeometry x:Key="Icon.Extensions"  Figures="M4,4 H10 V10 H4 Z M14,4 H20 V10 H14 Z M4,14 H10 V20 H4 Z M14,14 H20 V20 H14 Z"/>
+    <PathGeometry x:Key="Icon.Competitors" Figures="M4,20 H20 M7,20 V11 M12,20 V5 M17,20 V14"/>
+    <PathGeometry x:Key="Icon.Traffic"     Figures="M3,12 H7 L10,5 L14,19 L17,12 H21"/>
+    <PathGeometry x:Key="Icon.Logs"        Figures="M7,3 H14 L19,8 V21 H7 Z M14,3 V8 H19 M9,13 H15 M9,17 H15"/>
+    <PathGeometry x:Key="Icon.Settings"    Figures="M4,8 H20 M4,16 H20 M7,8 A2,2 0 1 1 11,8 A2,2 0 1 1 7,8 Z M13,16 A2,2 0 1 1 17,16 A2,2 0 1 1 13,16 Z"/>
+    <PathGeometry x:Key="Icon.Groups"      Figures="M3,7 H9 L11,9 H21 V19 H3 Z"/>
+    <PathGeometry x:Key="Icon.Scheduler"   Figures="M5,6 H19 V20 H5 Z M5,10 H19 M9,4 V7 M15,4 V7"/>
+    <PathGeometry x:Key="Icon.Domains"     Figures="M3,12 A9,9 0 1 1 21,12 A9,9 0 1 1 3,12 Z M3,12 H21 M12,3 C8.5,6 8.5,18 12,21 C15.5,18 15.5,6 12,3"/>
+
+    <!-- ── Window chrome ──────────────────────────────────────────── -->
+    <PathGeometry x:Key="Icon.Minimize"    Figures="M5,12 H19"/>
+    <PathGeometry x:Key="Icon.Maximize"    Figures="M5,5 H19 V19 H5 Z"/>
+    <PathGeometry x:Key="Icon.Restore"     Figures="M8,8 H18 V18 H8 Z M8,8 V6 H20 V18 H18"/>
+    <PathGeometry x:Key="Icon.Close"       Figures="M6,6 L18,18 M18,6 L6,18"/>
+
+    <!-- ── Chevrons / arrows ──────────────────────────────────────── -->
+    <PathGeometry x:Key="Icon.ChevronLeft"  Figures="M15,6 L9,12 L15,18"/>
+    <PathGeometry x:Key="Icon.ChevronRight" Figures="M9,6 L15,12 L9,18"/>
+    <PathGeometry x:Key="Icon.ChevronDown"  Figures="M6,9 L12,15 L18,9"/>
+    <PathGeometry x:Key="Icon.Back"         Figures="M19,12 H5 M11,6 L5,12 L11,18"/>
+
+    <!-- ── Actions ────────────────────────────────────────────────── -->
+    <PathGeometry x:Key="Icon.Plus"     Figures="M12,5 V19 M5,12 H19"/>
+    <PathGeometry x:Key="Icon.Trash"    Figures="M5,7 H19 M9,7 V5 H15 V7 M7,7 L8,20 H16 L17,7 M10.5,11 V17 M13.5,11 V17"/>
+    <PathGeometry x:Key="Icon.Search"   Figures="M11,4 A7,7 0 1 1 11,18 A7,7 0 1 1 11,4 Z M16,16 L21,21"/>
+    <PathGeometry x:Key="Icon.Check"    Figures="M5,13 L10,18 L19,6"/>
+    <PathGeometry x:Key="Icon.Refresh"  Figures="M20,11 A8,8 0 1 0 19,15 M20,5 V11 H14"/>
+    <PathGeometry x:Key="Icon.Stop"     Figures="M9,6 V18 M15,6 V18"/>
+    <PathGeometry x:Key="Icon.Edit"     Figures="M5,19 H9 L19,9 L15,5 L5,15 Z M13,7 L17,11"/>
+    <PathGeometry x:Key="Icon.Bell"     Figures="M7,11 A5,5 0 0 1 17,11 V16 L19,19 H5 L7,16 Z M10,19 A2,2 0 0 0 14,19"/>
+
+    <!-- ── Status / feedback ──────────────────────────────────────── -->
+    <PathGeometry x:Key="Icon.Info"     Figures="M3,12 A9,9 0 1 1 21,12 A9,9 0 1 1 3,12 Z M12,11 V16 M12,7.5 H12.01"/>
+    <PathGeometry x:Key="Icon.Warning"  Figures="M12,4 L21,19 H3 Z M12,10 V14 M12,16.5 H12.01"/>
+    <PathGeometry x:Key="Icon.Error"    Figures="M3,12 A9,9 0 1 1 21,12 A9,9 0 1 1 3,12 Z M9,9 L15,15 M15,9 L9,15"/>
+    <PathGeometry x:Key="Icon.Success"  Figures="M3,12 A9,9 0 1 1 21,12 A9,9 0 1 1 3,12 Z M8,12 L11,15 L16,9"/>
+    <PathGeometry x:Key="Icon.Dot"      Figures="M12,7 A5,5 0 1 1 12,17 A5,5 0 1 1 12,7 Z"/>
+
+    <!-- ── Actions (extended) ─────────────────────────────────────── -->
+    <PathGeometry x:Key="Icon.Play"      Figures="M8,5 L19,12 L8,19 Z"/>
+    <PathGeometry x:Key="Icon.Pause"     Figures="M9,5 V19 M15,5 V19"/>
+    <PathGeometry x:Key="Icon.Copy"      Figures="M8,8 H19 V20 H8 Z M5,16 V4 H16"/>
+    <PathGeometry x:Key="Icon.Eye"       Figures="M2,12 C5,6.5 19,6.5 22,12 C19,17.5 5,17.5 2,12 Z M9.5,12 A2.5,2.5 0 1 1 14.5,12 A2.5,2.5 0 1 1 9.5,12 Z"/>
+    <PathGeometry x:Key="Icon.EyeOff"    Figures="M2,12 C5,6.5 19,6.5 22,12 C21,13.8 19.5,15.2 17.8,16.1 M9.5,12 A2.5,2.5 0 1 1 14.5,12 M4,4 L20,20"/>
+    <PathGeometry x:Key="Icon.Download"  Figures="M12,4 V15 M7,11 L12,16 L17,11 M5,20 H19"/>
+    <PathGeometry x:Key="Icon.Upload"    Figures="M12,20 V9 M7,13 L12,8 L17,13 M5,4 H19"/>
+    <PathGeometry x:Key="Icon.External"  Figures="M14,5 H19 V10 M19,5 L11,13 M18,14 V19 H5 V6 H10"/>
+    <PathGeometry x:Key="Icon.Filter"    Figures="M4,5 H20 L14,12 V19 L10,17 V12 Z"/>
+    <PathGeometry x:Key="Icon.More"      Figures="M6,12 H6.01 M12,12 H12.01 M18,12 H18.01"/>
+    <PathGeometry x:Key="Icon.Save"      Figures="M5,5 H16 L19,8 V19 H5 Z M8,5 V9 H15 V5 M8,13 H16 V19 H8 Z"/>
+    <PathGeometry x:Key="Icon.FolderOpen" Figures="M3,7 H9 L11,9 H21 V11 M3,7 V19 H19 L22,11 H6 L3,19"/>
+    <PathGeometry x:Key="Icon.Link"      Figures="M9.5,14.5 L14.5,9.5 M10,7.5 L12,5.5 A3,3 0 0 1 16.5,10 L14.5,12 M14,16.5 L12,18.5 A3,3 0 0 1 7.5,14 L9.5,12"/>
+    <PathGeometry x:Key="Icon.Star"      Figures="M12,4 L14.6,9.3 L20.5,10.1 L16.2,14.2 L17.2,20 L12,17.3 L6.8,20 L7.8,14.2 L3.5,10.1 L9.4,9.3 Z"/>
+    <PathGeometry x:Key="Icon.Power"     Figures="M12,4 V12 M7.5,7 A8,8 0 1 0 16.5,7"/>
+    <PathGeometry x:Key="Icon.Import"    Figures="M12,4 V15 M7,11 L12,16 L17,11 M5,20 H19"/>
+    <PathGeometry x:Key="Icon.Wallet"    Figures="M4,7 H18 V11 H15 A2,2 0 0 0 15,15 H18 V19 H4 Z M14,11 H20 V15 H14 Z"/>
+    <PathGeometry x:Key="Icon.Key"       Figures="M14,10 A4,4 0 1 1 10,14 L4,20 M7,17 L9,19"/>
+    <PathGeometry x:Key="Icon.Shield"    Figures="M12,3 L19,6 V11 C19,16 12,21 12,21 C12,21 5,16 5,11 V6 Z"/>
+
+</ResourceDictionary>

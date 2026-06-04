@@ -35,7 +35,7 @@ public class LogParserTests
     [InlineData("VRB")]
     [InlineData("DBG")]
     [InlineData("INF")]
-    [InlineData("WAR")]
+    [InlineData("WRN")]   // Serilog {Level:u3} emits WRN for Warning, not WAR
     [InlineData("ERR")]
     [InlineData("FTL")]
     public void Parse_AcceptsAllLevelTags(string lvl)
@@ -98,7 +98,7 @@ public class LogParserTests
             ("VRB", LogLevel.Trace),
             ("DBG", LogLevel.Debug),
             ("INF", LogLevel.Information),
-            ("WAR", LogLevel.Warning),
+            ("WRN", LogLevel.Warning),
             ("ERR", LogLevel.Error),
             ("FTL", LogLevel.Error),
         };

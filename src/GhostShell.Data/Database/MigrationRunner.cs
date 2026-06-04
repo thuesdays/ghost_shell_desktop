@@ -76,7 +76,10 @@ public sealed class MigrationRunner
         foreach (var (version, sql) in Migrations)
         {
             if (applied.Contains(version)) continue;
-            ApplyMigration(conn, version, sql, tolerateDuplicateColumn: false);
+            // audit DATA-06: ApplyMigration no longer takes a tolerate flag.
+            // Non-tolerant migrations are strictly all-or-nothing — any error
+            // rolls back the transaction without stamping __schema_version.
+            ApplyMigration(conn, version, sql);
         }
 
         // V11 — uses the tolerant statement-list path. The version
@@ -212,9 +215,17 @@ public sealed class MigrationRunner
         }
     }
 
+    // audit DATA-06: dropped the dead `tolerateDuplicateColumn` parameter and
+    // its always-false catch filter. No caller ever passed true, so the catch
+    // was unreachable dead code that could only invite a future change to stamp
+    // a version whose DDL had silently failed/skipped. Non-tolerant migrations
+    // are now unambiguously all-or-nothing: the migration SQL and the version
+    // stamp share one transaction, and ANY error propagates without committing.
+    // Per-statement duplicate-column tolerance lives solely in
+    // ApplyTolerantStatements, keeping the two error-handling stories distinct.
     private void ApplyMigration(
         Microsoft.Data.Sqlite.SqliteConnection conn,
-        int version, string sql, bool tolerateDuplicateColumn)
+        int version, string sql)
     {
         _log.LogInformation("Applying migration v{Version}", version);
 
@@ -223,12 +234,7 @@ public sealed class MigrationRunner
         {
             cmd.Transaction = tx;
             cmd.CommandText = sql;
-            try { cmd.ExecuteNonQuery(); }
-            catch (Microsoft.Data.Sqlite.SqliteException ex)
-                when (tolerateDuplicateColumn && IsDuplicateColumn(ex))
-            {
-                _log.LogInformation("Migration v{V} statement skipped (already applied)", version);
-            }
+            cmd.ExecuteNonQuery();
         }
         using (var cmd = conn.CreateCommand())
         {
@@ -247,6 +253,22 @@ public sealed class MigrationRunner
     /// ALTER TABLE statements that aren't natively idempotent in
     /// SQLite. Stamping __schema_version happens once all statements
     /// have either succeeded or harmlessly skipped.
+    ///
+    /// audit DATA-04: the whole group (every statement PLUS the version
+    /// stamp) now runs inside a single BeginTransaction/Commit, mirroring
+    /// ApplyMigration. Previously these statements ran one-by-one on the
+    /// bare connection with no enclosing transaction, so a crash / kill /
+    /// power-loss mid-migration left the schema half-applied and the version
+    /// unstamped — and the next boot would re-enter here and throw on any
+    /// non-duplicate-column error (e.g. V23's DROP+CREATE colliding with a
+    /// half-dropped table, permanently losing data). Wrapping in one
+    /// transaction makes each migration atomic: it either fully applies and
+    /// stamps, or rolls back cleanly for a safe retry.
+    ///
+    /// Per-statement duplicate-column tolerance is preserved inside the
+    /// transaction. SQLite surfaces "duplicate column" as a statement-level
+    /// error that does NOT abort the surrounding transaction, so catching it
+    /// and continuing within the same tx is safe.
     /// </summary>
     private void ApplyTolerantStatements(
         Microsoft.Data.Sqlite.SqliteConnection conn,
@@ -255,9 +277,12 @@ public sealed class MigrationRunner
         _log.LogInformation("Applying migration v{V} (tolerant, {Count} stmts)",
             version, statements.Count);
 
+        using var tx = conn.BeginTransaction();
+
         foreach (var sql in statements)
         {
             using var cmd = conn.CreateCommand();
+            cmd.Transaction = tx;
             cmd.CommandText = sql;
             try { cmd.ExecuteNonQuery(); }
             catch (Microsoft.Data.Sqlite.SqliteException ex)
@@ -267,11 +292,16 @@ public sealed class MigrationRunner
             }
         }
 
-        using var stamp = conn.CreateCommand();
-        stamp.CommandText = "INSERT INTO __schema_version (version, applied_at) VALUES ($v, $t);";
-        stamp.Parameters.AddWithValue("$v", version);
-        stamp.Parameters.AddWithValue("$t", DateTime.UtcNow.ToString("O"));
-        stamp.ExecuteNonQuery();
+        using (var stamp = conn.CreateCommand())
+        {
+            stamp.Transaction = tx;
+            stamp.CommandText = "INSERT INTO __schema_version (version, applied_at) VALUES ($v, $t);";
+            stamp.Parameters.AddWithValue("$v", version);
+            stamp.Parameters.AddWithValue("$t", DateTime.UtcNow.ToString("O"));
+            stamp.ExecuteNonQuery();
+        }
+
+        tx.Commit();
     }
 
     private static bool IsDuplicateColumn(Microsoft.Data.Sqlite.SqliteException ex)

@@ -140,6 +140,17 @@ public sealed class ConditionEvaluator
             case "random":
             {
                 var p = ParamDouble(cond.Params, "probability", 0.5);
+                // audit SCRIPTSUPPORT-07: the documented contract is a
+                // 0–1 uniform probability, but authors commonly write a
+                // percentage (e.g. 70 meaning 70%). Unclamped, a value
+                // > 1 makes the gate always-true and a negative value
+                // always-false — silently defeating the randomised-branch
+                // realism this condition exists to provide. Interpret a
+                // clearly-percentage value (1 < p <= 100) as a percent,
+                // then clamp to [0,1] (mirrors the Math.Clamp used for
+                // step Probability in GraphTraverser.ParseStep).
+                if (p > 1.0 && p <= 100.0) p /= 100.0;
+                p = Math.Clamp(p, 0.0, 1.0);
                 return Random.Shared.NextDouble() < p;
             }
 
@@ -178,7 +189,20 @@ public sealed class ConditionEvaluator
                 //     ends up clicking their own ad.
                 if (kind == "ad_is_mine")
                 {
-                    return AdHostMatches(ctx, ctx.MyDomains);
+                    if (AdHostMatches(ctx, ctx.MyDomains)) return true;
+                    // audit SCRIPTSUPPORT-06: when MyDomains is empty (a
+                    // common default — profile configured no owned
+                    // domains) AdHostMatches can never match, so the
+                    // owned-domain list alone cannot answer "is this my
+                    // ad?". Fall back to comparing the ad's click/display
+                    // host against the LIVE page host — the same own-host
+                    // signal the legacy own_domain path uses — so the
+                    // self-click guards still fire on the profile's own
+                    // ads. With a non-empty MyDomains this fallback is a
+                    // no-op when the host already failed the list.
+                    if (ctx.MyDomains.Count == 0)
+                        return await AdHostMatchesPageAsync(ctx, session, ct);
+                    return false;
                 }
                 var href = ParamString(cond.Params, "href")
                     ?? ctx.CurrentAdHref;  // fall back to current ad
@@ -212,7 +236,18 @@ public sealed class ConditionEvaluator
                 // one host is in MyDomains we treat the ad as ours —
                 // this is the affiliate-tracker fix.
                 var hostInMine = AdHostMatches(ctx, ctx.MyDomains);
-                return !hostInMine;
+                if (hostInMine) return false;
+                // audit SCRIPTSUPPORT-06: an empty MyDomains makes
+                // AdHostMatches unconditionally false, which previously
+                // reported EVERY ad — including the profile's own ads —
+                // as external. Don't assume external purely because the
+                // owned-domain list is empty: consult the live page host
+                // (own-domain comparison) and treat a page-host match as
+                // ours (not external) before falling back to true.
+                if (ctx.MyDomains.Count == 0
+                    && await AdHostMatchesPageAsync(ctx, session, ct))
+                    return false;
+                return true;
             }
             case "ad_is_competitor":
             {
@@ -252,6 +287,30 @@ public sealed class ConditionEvaluator
         if (!string.IsNullOrEmpty(dispHost) && DomainMatches(dispHost, set))
             return true;
         return false;
+    }
+
+    /// <summary>
+    /// audit SCRIPTSUPPORT-06: "Either ad host equals the live page
+    /// host" — the fallback own-domain signal used when
+    /// <c>ctx.MyDomains</c> is empty and the owned-domain list therefore
+    /// cannot decide whether an ad belongs to the profile. Mirrors the
+    /// host-equality test the legacy <c>own_domain</c> path performs, so
+    /// own-ad self-click guards keep firing even with no configured
+    /// MyDomains. Returns false on any URL/page-resolution failure
+    /// (fail-open is unacceptable here, but a false negative just means
+    /// the caller falls through to its prior behaviour).
+    /// </summary>
+    private static async Task<bool> AdHostMatchesPageAsync(
+        RunContext ctx, IBrowserSession session, CancellationToken ct)
+    {
+        var clickHost = ExtractHost(ctx.CurrentAdHref);
+        var dispHost  = ExtractHost(ctx.CurrentAdDisplayUrl);
+        if (string.IsNullOrEmpty(clickHost) && string.IsNullOrEmpty(dispHost))
+            return false;
+        var pageHost = ExtractHost(await GetUrlAsync(session, ct));
+        if (string.IsNullOrEmpty(pageHost)) return false;
+        return string.Equals(clickHost, pageHost, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(dispHost,  pageHost, StringComparison.OrdinalIgnoreCase);
     }
 
     // ─── Domain helpers (mirrors ScriptRunner) ─────────────────────

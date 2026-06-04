@@ -8,6 +8,7 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:vm="clr-namespace:GhostShell.App.ViewModels"
              xmlns:common="clr-namespace:GhostShell.App.Common"
+             xmlns:ctrl="clr-namespace:GhostShell.App.Controls"
              d:DataContext="{d:DesignInstance Type=vm:GroupsViewModel}"
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
@@ -100,7 +101,7 @@
                     <TextBlock FontSize="48" HorizontalAlignment="Center"
                                Foreground="{StaticResource TextDim}" Text="∅"/>
                     <TextBlock Margin="0,14,0,6" HorizontalAlignment="Center"
-                               Style="{StaticResource PageTitle}" FontSize="16"
+                               Style="{StaticResource PageTitle}" FontSize="18"
                                Text="No groups yet"/>
                     <TextBlock HorizontalAlignment="Center" Style="{StaticResource MutedText}"
                                Margin="0,0,0,16"
@@ -176,9 +177,9 @@
                                             <ColumnDefinition Width="Auto"/>
                                         </Grid.ColumnDefinitions>
                                         <StackPanel Grid.Column="0" Orientation="Horizontal">
-                                            <TextBlock Text="📁"
-                                                       FontSize="16"
-                                                       Foreground="{StaticResource HueIndigo}"
+                                            <ctrl:Icon Data="{StaticResource Icon.FolderOpen}"
+                                                       Size="22"
+                                                       Stroke="{StaticResource HueIndigo}"
                                                        Margin="0,0,8,0"
                                                        VerticalAlignment="Center"/>
                                             <TextBlock Text="{Binding Name}"
@@ -236,8 +237,9 @@
                                                           Source={x:Reference PageRoot}}"
                                                 CommandParameter="{Binding}">
                                             <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                                                <TextBlock FontFamily="Segoe MDL2 Assets" FontSize="12"
-                                                           Text="&#xE768;" Margin="0,0,6,0"
+                                                <ctrl:Icon Data="{StaticResource Icon.Play}" Size="17"
+                                                           Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                                                           Margin="0,0,6,0"
                                                            VerticalAlignment="Center"/>
                                                 <TextBlock Text="Start group" VerticalAlignment="Center"/>
                                             </StackPanel>
@@ -249,8 +251,9 @@
                                                           Source={x:Reference PageRoot}}"
                                                 CommandParameter="{Binding}">
                                             <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                                                <TextBlock FontFamily="Segoe MDL2 Assets" FontSize="12"
-                                                           Text="&#xE71A;" Margin="0,0,6,0"
+                                                <ctrl:Icon Data="{StaticResource Icon.Stop}" Size="17"
+                                                           Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                                                           Margin="0,0,6,0"
                                                            VerticalAlignment="Center"/>
                                                 <TextBlock VerticalAlignment="Center">
                                                     <Run Text="Stop "/>
@@ -264,8 +267,8 @@
                                                 Command="{Binding DataContext.EditCommand,
                                                           Source={x:Reference PageRoot}}"
                                                 CommandParameter="{Binding}">
-                                            <TextBlock Style="{StaticResource RowActionIcon}" FontSize="14"
-                                                       Text="&#xE70F;"/>
+                                            <ctrl:Icon Data="{StaticResource Icon.Edit}" Size="20"
+                                                       Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
                                         </Button>
                                         <Button Grid.Column="3"
                                                 Style="{StaticResource RowActionDanger}"
@@ -273,9 +276,8 @@
                                                 Command="{Binding DataContext.DeleteCommand,
                                                           Source={x:Reference PageRoot}}"
                                                 CommandParameter="{Binding}">
-                                            <TextBlock Style="{StaticResource RowActionIcon}" FontSize="14"
-                                                       Foreground="{StaticResource ErrBrush}"
-                                                       Text="&#xE74D;"/>
+                                            <ctrl:Icon Data="{StaticResource Icon.Trash}" Size="20"
+                                                       Stroke="{StaticResource ErrBrush}"/>
                                         </Button>
                                     </Grid>
                                 </Grid>

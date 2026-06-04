@@ -32,6 +32,10 @@ namespace GhostShell.Runtime.Scripts;
 ///   • Cycles: capped at <see cref="MaxNodeVisits"/> to prevent
 ///     pathological graphs from spinning forever. Hitting the cap
 ///     logs a warning and aborts the run with status=partial.
+///   • A second, wall-clock guard (<see cref="MaxRunDuration"/>) bounds
+///     the *time* a single graph run may take so a tight productive
+///     cycle (each visit a real browser action) aborts in seconds
+///     rather than after thousands of live navigations/clicks.
 /// </summary>
 public sealed class GraphTraverser
 {
@@ -40,6 +44,58 @@ public sealed class GraphTraverser
     /// removal. 10000 is enough for any reasonable script — typical
     /// runs visit &lt; 100 nodes.</summary>
     public const int MaxNodeVisits = 10_000;
+
+    /// <summary>
+    /// audit SCRIPTSUPPORT-10: wall-clock budget for a single graph run.
+    /// The visit cap alone (<see cref="MaxNodeVisits"/>) lets a tight
+    /// cycle where every node performs a real browser action run for a
+    /// very long time before the count trips — wasting proxy bandwidth
+    /// and producing high-frequency, bot-like traffic. This time bound
+    /// lets the runner abort a pathological graph in seconds. The
+    /// caller starts a <see cref="RunBudget"/> at the top of traversal
+    /// and checks it each iteration alongside the visit counter.
+    /// 30 minutes is far above any realistic legitimate run while still
+    /// killing a runaway loop long before the 10000-visit cap.
+    /// </summary>
+    public static readonly TimeSpan MaxRunDuration = TimeSpan.FromMinutes(30);
+
+    /// <summary>
+    /// audit SCRIPTSUPPORT-10: lightweight per-run wall-clock guard.
+    /// Pairs with the <see cref="MaxNodeVisits"/> counter so a graph
+    /// run is bounded by *both* visit count and elapsed time. Stateless
+    /// apart from a start timestamp — cheap to create per run and safe
+    /// to query every iteration. Defaults to <see cref="MaxRunDuration"/>
+    /// but accepts a caller-supplied budget for tests / future config.
+    /// </summary>
+    public readonly struct RunBudget
+    {
+        private readonly long _startTicks;
+        private readonly TimeSpan _limit;
+
+        private RunBudget(long startTicks, TimeSpan limit)
+        {
+            _startTicks = startTicks;
+            _limit      = limit;
+        }
+
+        /// <summary>Start a budget that expires after <paramref name="limit"/>
+        /// (defaults to <see cref="MaxRunDuration"/>). Uses a monotonic
+        /// clock so it is immune to wall-clock/NTP adjustments mid-run.</summary>
+        public static RunBudget Start(TimeSpan? limit = null)
+            => new(Environment.TickCount64, limit ?? MaxRunDuration);
+
+        /// <summary>Time elapsed since the budget started.</summary>
+        public TimeSpan Elapsed
+            => TimeSpan.FromMilliseconds(Environment.TickCount64 - _startTicks);
+
+        /// <summary>True once the run has exceeded its wall-clock budget;
+        /// the caller should log a warning and abort traversal
+        /// (status=partial), mirroring the visit-cap bail-out.</summary>
+        public bool IsExpired => Elapsed > _limit;
+
+        /// <summary>The configured limit for this budget.</summary>
+        public TimeSpan Limit => _limit;
+    }
 
     public sealed class GraphNode
     {

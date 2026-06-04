@@ -388,13 +388,20 @@ public class CaptchaRecoveryServiceTests
 
         public void SeedCaptchas(string slug, int count)
         {
+            // audit CAPTCHA-02: the recovery service now derives a TRUE
+            // per-profile captcha count by matching a "profile='<name>'"
+            // token in the event Detail (proxy-sibling captchas no longer
+            // exhaust a healthy profile). These fixtures use profile
+            // name == proxy slug, so stamp the token here too — otherwise
+            // the profile-scoped count stays 0 and the L5/Exhausted ladder
+            // can never trigger.
             for (int i = 0; i < count; i++)
                 RecordedEvents.Add(new ProxyHealthEvent
                 {
                     ProxySlug = slug,
                     Kind      = ProxyHealthEventKind.Captcha,
                     At        = DateTime.UtcNow.AddMinutes(-i * 5),
-                    Detail    = $"seed #{i}",
+                    Detail    = $"seed #{i}; profile='{slug}'",
                 });
         }
 

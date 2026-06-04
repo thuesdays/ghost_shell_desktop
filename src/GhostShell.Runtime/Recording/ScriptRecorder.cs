@@ -481,16 +481,33 @@ public sealed class ScriptRecorder : IScriptRecorder, IAsyncDisposable
                 var typeSel = item.TryGetProperty("sel", out var tsEl) ? tsEl.GetString() ?? "" : "";
                 var value = item.TryGetProperty("value", out var vEl) ? vEl.GetString() ?? "" : "";
                 if (string.IsNullOrEmpty(typeSel)) return null;
+                // audit SCRIPTSUPPORT-04 — never persist secret-field values
+                // into the scripts table (it lives outside the encrypted
+                // vault). The agent flags password / one-time-code / card /
+                // seed fields with secret=true and already strips the value;
+                // here we substitute a vault placeholder and keep the raw
+                // value out of the human-readable Label entirely. The
+                // placeholder is wired to the secrets vault at replay time.
+                var isSecret = item.TryGetProperty("secret", out var secEl)
+                               && secEl.ValueKind == JsonValueKind.True;
+                var storedValue = isSecret ? "{{vault.replace_me}}" : value;
                 return new ScriptStep
                 {
                     Type = "type",
                     Params = new Dictionary<string, object?>
                     {
                         ["selector"] = typeSel,
-                        ["value"] = value,
+                        ["value"] = storedValue,
                         ["clear_first"] = true,
+                        ["secret"] = isSecret,
                     },
-                    Label = $"type '{Truncate(value, 30)}'",
+                    // Do NOT echo the typed value into the Label — for
+                    // non-secret fields it can still hold PII (emails,
+                    // usernames) that surfaces in the editor UI. Label the
+                    // step by its target field instead of its contents.
+                    Label = isSecret
+                        ? $"type secret → {Truncate(typeSel, 40)}"
+                        : $"type → {Truncate(typeSel, 40)}",
                 };
 
             case "navigate":
@@ -558,7 +575,9 @@ public sealed class ScriptRecorder : IScriptRecorder, IAsyncDisposable
     /// </summary>
     private const string RecorderAgentScript = """
         window.__gsRec = window.__gsRec || (function() {
-          var state = { q: [], paused: false, typingBuffer: {}, typingTimer: null,
+          // audit SCRIPTSUPPORT-04 — secretFields tracks which buffered
+          // inputs are password/secret so flush can redact their values.
+          var state = { q: [], paused: false, typingBuffer: {}, secretFields: {}, typingTimer: null,
                         lastScrollY: window.scrollY, scrollAccum: 0, scrollTimer: null,
                         lastUrl: location.href, navInterval: null,
                         // Phase 66 — store named handler refs so unregister()
@@ -576,6 +595,26 @@ public sealed class ScriptRecorder : IScriptRecorder, IAsyncDisposable
           }
           function escapeAttr(v) {
             return String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+          }
+          // audit SCRIPTSUPPORT-04 — a field whose value must never be
+          // captured into a recorded step (it would land in cleartext in
+          // the scripts table, outside the encrypted vault). Covers
+          // password inputs, one-time-code / autocomplete hints, and
+          // common secret field names (card numbers, cvv, totp seeds).
+          function isSecretField(el) {
+            if (!el || el.nodeType !== 1) return false;
+            try {
+              var type = (el.type || '').toLowerCase();
+              if (type === 'password') return true;
+              var ac = (el.getAttribute('autocomplete') || '').toLowerCase();
+              if (/(current-password|new-password|one-time-code|cc-number|cc-csc)/.test(ac)) return true;
+              var hint = ((el.name || '') + ' ' + (el.id || '') + ' '
+                          + (el.getAttribute('aria-label') || '')).toLowerCase();
+              if (/(password|passwd|pwd|secret|otp|totp|mfa|2fa|seed|mnemonic|private[-_]?key|cvv|cvc|card[-_]?number|ssn|pin)/.test(hint)) {
+                return true;
+              }
+            } catch (e) {}
+            return false;
           }
           function selectorFor(el) {
             if (!el || el.nodeType !== 1) return '';
@@ -628,27 +667,38 @@ public sealed class ScriptRecorder : IScriptRecorder, IAsyncDisposable
 
           function flushTyping(elKey, sel) {
             if (state.typingBuffer[elKey] !== undefined) {
+              // audit SCRIPTSUPPORT-04 — never emit the buffered value for a
+              // secret field; emit a vault placeholder + secret flag so the
+              // recorded step is replayable structurally but holds no secret.
+              var secret = !!state.secretFields[elKey];
               state.q.push({
                 kind: 'type',
                 sel: sel,
-                value: state.typingBuffer[elKey],
+                value: secret ? '' : state.typingBuffer[elKey],
+                secret: secret,
                 ts: Date.now(),
               });
               delete state.typingBuffer[elKey];
+              delete state.secretFields[elKey];
             }
           }
           function flushAllTyping() {
             for (var key in state.typingBuffer) {
               if (state.typingBuffer.hasOwnProperty(key)) {
+                // audit SCRIPTSUPPORT-04 — same redaction on the bulk flush
+                // path (triggered by clicks / navigation).
+                var secret = !!state.secretFields[key];
                 state.q.push({
                   kind: 'type',
                   sel: key.split('||')[0],
-                  value: state.typingBuffer[key],
+                  value: secret ? '' : state.typingBuffer[key],
+                  secret: secret,
                   ts: Date.now(),
                 });
               }
             }
             state.typingBuffer = {};
+            state.secretFields = {};
           }
 
           // ── Phase 66 — named handler functions stored on state.handlers
@@ -687,6 +737,9 @@ public sealed class ScriptRecorder : IScriptRecorder, IAsyncDisposable
             var sel = selectorFor(el);
             if (!sel) return;
             var key = sel + '||' + (el.id || el.name || '');
+            // audit SCRIPTSUPPORT-04 — flag secret fields so flushTyping
+            // redacts their value rather than persisting it in cleartext.
+            if (isSecretField(el)) state.secretFields[key] = true;
             state.typingBuffer[key] = (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')
               ? el.value : (el.innerText || el.textContent || '');
             if (state.typingTimer) clearTimeout(state.typingTimer);

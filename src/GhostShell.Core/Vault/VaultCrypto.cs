@@ -30,11 +30,34 @@ public static class VaultCrypto
     public const int TagSizeBytes      = 16; // AES-GCM auth tag
     public const int SaltSizeBytes     = 16;
     /// <summary>OWASP 2023 baseline for PBKDF2-HMAC-SHA256 — 600k.
-    /// Audit fix from Phase 24 review. Old vaults written with
-    /// 200k still unlock because the iteration count is hard-coded
-    /// per derive call; bumping it only affects fresh setups. A
-    /// migration step (re-derive on next unlock) lands later.</summary>
+    /// Used for vaults initialised at/after the Phase 24 audit, and
+    /// the target count we re-wrap legacy vaults to on unlock.
+    ///
+    /// audit VAULT-02: this is the *current* count for NEW vaults, but
+    /// it is no longer the only count we can derive at — see
+    /// <see cref="LegacyPbkdf2Iterations"/> and the 3-arg
+    /// <see cref="DeriveKey(string,byte[],int)"/> overload. The number
+    /// of iterations a given vault actually used must be persisted
+    /// (vault_config.kdf_iter) and fed back into DeriveKey, otherwise a
+    /// vault written at 200k can never be unlocked at 600k.</summary>
     public const int Pbkdf2Iterations  = 600_000;
+
+    /// <summary>audit VAULT-02: PBKDF2 iteration count used by the
+    /// pre-Phase-24 ("200k") builds. Vaults created before the bump
+    /// stored NO kdf_iter, so callers must treat "kdf_iter absent" as
+    /// this value and derive with it — bumping the compile-time
+    /// constant alone permanently bricks those vaults (the verifier
+    /// GCM tag never matches a 600k key). Kept as a named constant so
+    /// the unlock/migration path can fall back to it explicitly.</summary>
+    public const int LegacyPbkdf2Iterations = 200_000;
+
+    /// <summary>audit VAULT-02: the iteration count to assume when a
+    /// vault has no persisted kdf_iter. MUST be the legacy count so
+    /// existing on-disk vaults keep opening; new vaults persist
+    /// <see cref="Pbkdf2Iterations"/> explicitly and so never rely on
+    /// this default.</summary>
+    public static int ResolveIterations(int? storedIterations)
+        => storedIterations is int n && n > 0 ? n : LegacyPbkdf2Iterations;
 
     /// <summary>Plaintext that gets encrypted on initialise() and re-
     /// decrypted on unlock(). Successful decryption == password match.
@@ -55,18 +78,39 @@ public static class VaultCrypto
     /// <summary>Derive the 32-byte AES key from the user's passphrase.
     /// Phase 24 audit fix — wipes the intermediate UTF-8 byte buffer
     /// so the passphrase doesn't linger in the managed heap any longer
-    /// than the KDF computation needs it.</summary>
+    /// than the KDF computation needs it.
+    ///
+    /// audit VAULT-02: this 2-arg form keeps the original signature
+    /// (callers depend on it) but no longer hard-codes 600k. It now
+    /// derives at <see cref="LegacyPbkdf2Iterations"/> (200k) — the
+    /// count every pre-bump on-disk vault was actually written with —
+    /// so existing vaults keep unlocking. New vaults and re-wrapped
+    /// vaults MUST call the 3-arg overload with
+    /// <see cref="Pbkdf2Iterations"/> and persist that count
+    /// (vault_config.kdf_iter) so a later derive can reproduce the key.
+    /// See <see cref="DeriveKey(string,byte[],int)"/>.</summary>
     public static byte[] DeriveKey(string passphrase, byte[] salt)
+        => DeriveKey(passphrase, salt, LegacyPbkdf2Iterations);
+
+    /// <summary>audit VAULT-02: iteration-count-aware derive. The count
+    /// is a per-vault parameter (persisted as vault_config.kdf_iter)
+    /// rather than a compile-time constant, so a vault created at 200k
+    /// and a vault created at 600k both reproduce their original key.
+    /// Use <see cref="ResolveIterations"/> to map an absent stored
+    /// count to the legacy default before calling this.</summary>
+    public static byte[] DeriveKey(string passphrase, byte[] salt, int iterations)
     {
         if (salt is null || salt.Length == 0)
             throw new ArgumentException("salt is required", nameof(salt));
+        if (iterations <= 0)
+            throw new ArgumentOutOfRangeException(nameof(iterations), "iterations must be positive");
         var phraseBytes = Encoding.UTF8.GetBytes(passphrase ?? "");
         try
         {
             using var kdf = new Rfc2898DeriveBytes(
                 phraseBytes,
                 salt,
-                Pbkdf2Iterations,
+                iterations,
                 HashAlgorithmName.SHA256);
             return kdf.GetBytes(KeySizeBytes);
         }

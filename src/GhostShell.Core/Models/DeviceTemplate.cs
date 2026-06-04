@@ -22,6 +22,26 @@ public sealed class DeviceTemplate
     public FormFactor FormFactor { get; init; } = FormFactor.Desktop;
     public bool IsLaptop { get; init; }
 
+    /// <summary>
+    /// Operating system this template emulates. Audit FINGERPRINT-01/03:
+    /// OS used to be inferred from <see cref="FormFactor"/> alone, which
+    /// produced impossible devices (Apple/Mac desktops emitting a Windows
+    /// UA, every phone reporting a Pixel UA). The OS is now an EXPLICIT
+    /// single source of truth that drives the user agent, navigator.platform,
+    /// Sec-CH-UA platform hints, the GPU/WebGL renderer family, and the
+    /// installed-font list — so every OS-derived field agrees.
+    /// Defaults to <see cref="DeviceOs.Windows"/> so existing Windows
+    /// templates need no change.
+    /// </summary>
+    public DeviceOs Os { get; init; } = DeviceOs.Windows;
+
+    /// <summary>
+    /// Marketing model token placed in the Android user agent
+    /// (e.g. "Pixel 8 Pro", "SM-S928B"). Null → derived/fallback.
+    /// Only consulted for <see cref="DeviceOs.Android"/>.
+    /// </summary>
+    public string? UaModel { get; init; }
+
     public int CpuCores { get; init; }
     public double RamGb { get; init; }
     public string? GpuModel { get; init; }
@@ -63,4 +83,17 @@ public enum FormFactor
     Desktop,
     Mobile,
     Tablet,
+}
+
+/// <summary>
+/// OS family a template emulates. Drives every OS-coherent fingerprint
+/// field (UA, navigator.platform, Sec-CH-UA, GPU/WebGL renderer, fonts).
+/// </summary>
+public enum DeviceOs
+{
+    Windows,
+    MacOs,
+    Android,
+    IOs,
+    Linux,
 }

@@ -101,10 +101,15 @@ public sealed class BrowserLauncher : IBrowserLauncher
         // `--no-proxy-server` so Chromium ignores any system proxy
         // (which would otherwise leak corp/IT settings into runs).
         string? proxyUrl = null;
+        // audit LAUNCH-01: carry the proxy's geo-probed exit country to the
+        // options builder so the spoofed JS timezone matches the IP's
+        // country (timezone-vs-IP coherence), not just the profile language.
+        string? proxyCountryCode = null;
         if (!string.IsNullOrWhiteSpace(profile.ProxySlug))
         {
             var proxy = await _proxies.GetAsync(profile.ProxySlug, ct);
             proxyUrl = proxy?.Url;
+            proxyCountryCode = proxy?.CountryCode;
             if (proxyUrl is null)
                 _log.LogWarning(
                     "Profile '{Name}' references proxy '{Slug}' which is missing from DB " +
@@ -139,17 +144,38 @@ public sealed class BrowserLauncher : IBrowserLauncher
             }
             catch (Exception ex)
             {
+                // audit LAUNCH-07 / PROXY-05: FAIL CLOSED. The previous
+                // behaviour stripped credentials and launched anyway,
+                // which silently degraded an authenticated-proxy profile:
+                //   • a schemed http://user:pass@host gets StripAuth'd and
+                //     every upstream request 407s (and may fall through to
+                //     a real-IP path), and
+                //   • a bare "user:pass@host:port" is returned UNCHANGED by
+                //     StripAuth (it only strips when '://' is present), so
+                //     Chromium receives credentials in --proxy-server and
+                //     dies silently at boot ("DevToolsActivePort file
+                //     doesn't exist").
+                // Either way the runner is handed a broken-but-"healthy"
+                // session that cannot reach the network through its assigned
+                // proxy and risks a real-IP leak. The proxy was REQUIRED
+                // (it carried embedded creds), so we abort the launch with a
+                // clear error instead of degrading. Dispose any partial
+                // forwarder first so its listening socket / upstream
+                // connection isn't leaked.
                 _log.LogError(ex,
-                    "Failed to start auth-proxy forwarder for '{Name}'; " +
-                    "falling back to credential-stripped direct connection " +
-                    "(authenticated requests will fail)",
+                    "Failed to start auth-proxy forwarder for '{Name}' — aborting launch " +
+                    "rather than degrading to an unauthenticated proxy (would 407 or leak)",
                     profile.Name);
                 if (forwarder is not null)
                 {
                     try { await forwarder.DisposeAsync(); } catch { /* swallow */ }
                     forwarder = null;
                 }
-                chromiumProxyUrl = ChromeOptionsBuilder.StripAuth(proxyUrl!);
+                throw new InvalidOperationException(
+                    $"Cannot launch profile '{profile.Name}': the auth-proxy forwarder for its " +
+                    "assigned credentialed proxy failed to start. Refusing to launch over an " +
+                    "unauthenticated/credential-bearing proxy to avoid a broken session or " +
+                    "real-IP leak.", ex);
             }
         }
         else if (!string.IsNullOrWhiteSpace(proxyUrl)
@@ -228,7 +254,8 @@ public sealed class BrowserLauncher : IBrowserLauncher
         }
 
         var options = ChromeOptionsBuilder.Build(
-            profile, template, status.ChromePath!, chromiumProxyUrl, extPaths);
+            profile, template, status.ChromePath!, chromiumProxyUrl, extPaths,
+            proxyCountryCode); // audit LAUNCH-01: timezone follows the proxy exit country
 
         // ChromeDriverService takes the directory + filename so we can
         // ship a chromedriver.exe with a non-default name (vendored
@@ -394,36 +421,75 @@ public sealed class BrowserLauncher : IBrowserLauncher
             throw;
         }
 
-        // Phase 30 — apply network-layer URL blocking via CDP. Reads
-        // the user's blocking toggles + custom patterns from settings,
-        // composes a deduped list, and calls Network.setBlockedURLs.
-        // Set ONCE per session; static for the session lifetime
-        // (matches the legacy web's behaviour). Failure here is non-
-        // fatal — the browser launches, just without blocking.
-        try { await ApplyResourceBlockingAsync(driver, profile.Name, ct); }
+        // audit LAUNCH-05: the ChromeDriver ctor has now succeeded, so we
+        // OWN a live driver + chromedriver.exe + chrome.exe (holding the
+        // profile's --user-data-dir) and possibly the auth-proxy forwarder
+        // (a listening socket + upstream connection). Everything below —
+        // resource blocking, the logger-factory call, and the
+        // SeleniumBrowserSession ctor — runs OUTSIDE the ctor's own
+        // try/catch cleanup. If any of it throws (a session null-guard, a
+        // traffic-hook ctor failure, the logger factory, or ct being
+        // cancelled), those processes/sockets would leak: an orphaned
+        // chrome.exe holding the user-data-dir is exactly the orphan the
+        // next launch's preflight must reap, and the leaked forwarder
+        // socket is precisely what the rest of this zone fights to avoid.
+        // Wrap the whole post-ctor handoff so any throw tears the live
+        // resources down (driver.Quit → service.Dispose → forwarder
+        // dispose, mirroring SeleniumBrowserSession's teardown order)
+        // before rethrowing. Once the session is constructed it OWNS these
+        // resources and we hand off cleanly.
+        try
+        {
+            // Phase 30 — apply network-layer URL blocking via CDP. Reads
+            // the user's blocking toggles + custom patterns from settings,
+            // composes a deduped list, and calls Network.setBlockedURLs.
+            // Set ONCE per session; static for the session lifetime
+            // (matches the legacy web's behaviour). Failure here is non-
+            // fatal — the browser launches, just without blocking.
+            try { await ApplyResourceBlockingAsync(driver, profile.Name, ct); }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex,
+                    "Resource blocking setup failed for '{Name}' — browser will load all resources",
+                    profile.Name);
+            }
+
+            // PID tracking for orphan-reap is intentionally omitted in
+            // Phase 3. ChromeDriverService.Dispose() + driver.Quit()
+            // handle the standard teardown; killing arbitrary chrome.exe
+            // by name would clobber the user's normal Chrome. Phase 5
+            // swaps in proper PPID-walking via WMI / System.Management.
+            var session = new SeleniumBrowserSession(
+                profileName: profile.Name,
+                runId:       0, // RealProfileRunner stamps this with the DB run id
+                driver:      driver,
+                service:     service,
+                ownedPids:   Array.Empty<int>(),
+                forwarder:   forwarder,
+                log:         _loggerFactory.CreateLogger<SeleniumBrowserSession>(),
+                traffic:     _traffic);
+
+            return session;
+        }
         catch (Exception ex)
         {
-            _log.LogWarning(ex,
-                "Resource blocking setup failed for '{Name}' — browser will load all resources",
+            // audit LAUNCH-05: dispose the now-live driver/service/forwarder
+            // so we don't leave an orphaned chrome.exe holding the
+            // user-data-dir (→ "DevToolsActivePort file doesn't exist" on
+            // the next launch) or a dangling forwarder socket.
+            _log.LogError(ex,
+                "Session handoff failed for '{Name}' after a successful ChromeDriver ctor — " +
+                "tearing down driver/service/forwarder to avoid an orphaned chrome.exe / socket leak",
                 profile.Name);
+            try { driver.Quit(); }   catch { /* swallow */ }
+            try { driver.Dispose(); } catch { /* swallow */ }
+            try { service.Dispose(); } catch { /* swallow */ }
+            if (forwarder is not null)
+            {
+                try { await forwarder.DisposeAsync(); } catch { /* swallow */ }
+            }
+            throw;
         }
-
-        // PID tracking for orphan-reap is intentionally omitted in
-        // Phase 3. ChromeDriverService.Dispose() + driver.Quit()
-        // handle the standard teardown; killing arbitrary chrome.exe
-        // by name would clobber the user's normal Chrome. Phase 5
-        // swaps in proper PPID-walking via WMI / System.Management.
-        var session = new SeleniumBrowserSession(
-            profileName: profile.Name,
-            runId:       0, // RealProfileRunner stamps this with the DB run id
-            driver:      driver,
-            service:     service,
-            ownedPids:   Array.Empty<int>(),
-            forwarder:   forwarder,
-            log:         _loggerFactory.CreateLogger<SeleniumBrowserSession>(),
-            traffic:     _traffic);
-
-        return session;
     }
 
     /// <summary>Phase 30 — read blocking toggles + custom patterns

@@ -78,7 +78,7 @@ public class LogTailTests : IDisposable
         // advance path runs (not just backfill).
         await Task.Delay(200);
         await File.AppendAllTextAsync(path,
-            MakeLine("WAR", "Test.Source", "second line") + "\n",
+            MakeLine("WRN", "Test.Source", "second line") + "\n",
             Encoding.UTF8);
 
         await gate.WaitAsync(TimeSpan.FromSeconds(5));
@@ -89,7 +89,7 @@ public class LogTailTests : IDisposable
             Assert.Contains(received, e =>
                 e.Level == "INF" && e.Message == "first line");
             Assert.Contains(received, e =>
-                e.Level == "WAR" && e.Message == "second line");
+                e.Level == "WRN" && e.Message == "second line");
         }
     }
 

@@ -213,6 +213,11 @@ public static class ChromeProfileHealer
     /// and return true. If it's healthy, missing, or unreadable,
     /// return false. Never throws — a heal that itself crashes would
     /// be worse than the original symptom.
+    ///
+    /// audit LAUNCH-09: returns false when the file was broken but
+    /// could only be truncated (not moved aside) — the bad file
+    /// survives under its original name, so reporting it as healed
+    /// would mislead the launcher's heal+retry logic.
     /// </summary>
     private static bool QuarantineIfBroken(string path, ILogger? log)
     {
@@ -226,10 +231,16 @@ public static class ChromeProfileHealer
             // 0-byte file — the dominant failure mode. Chrome aborted
             // mid-write or an antivirus zeroed it. Skip the JSON-parse
             // path; we know the answer.
+            //
+            // audit LAUNCH-09: only report a successful heal when the
+            // file was actually moved aside. A truncate-only fallback
+            // leaves a fresh 0-byte file at the ORIGINAL name (still
+            // bad), so it must NOT count toward `healed` — otherwise the
+            // launcher's retry proceeds on an unchanged-bad file and
+            // burns its single retry budget on a no-op.
             if (info.Length == 0)
             {
-                Quarantine(path, "zero-length", log);
-                return true;
+                return Quarantine(path, "zero-length", log);
             }
 
             // Tiny size guard before reading: Chrome's smallest valid
@@ -238,8 +249,7 @@ public static class ChromeProfileHealer
             // need to bother round-tripping it through JsonDocument.
             if (info.Length < 2)
             {
-                Quarantine(path, $"impossibly small ({info.Length} B)", log);
-                return true;
+                return Quarantine(path, $"impossibly small ({info.Length} B)", log);
             }
 
             // Full parse. JsonDocument streams from the file so we don't
@@ -270,8 +280,10 @@ public static class ChromeProfileHealer
 
             if (parseError is not null)
             {
-                Quarantine(path, $"invalid JSON ({parseError})", log);
-                return true;
+                // audit LAUNCH-09: propagate the real move-vs-truncate
+                // outcome so a truncate-only fallback isn't counted as
+                // healed (see the zero-length branch above).
+                return Quarantine(path, $"invalid JSON ({parseError})", log);
             }
             return false;
         }
@@ -292,8 +304,14 @@ public static class ChromeProfileHealer
     /// <c>&lt;name&gt;.broken-&lt;yyyyMMdd-HHmmss&gt;</c> so Chrome
     /// regenerates a clean copy on its next launch (and the user can
     /// inspect the original after the fact if they want).
+    ///
+    /// Returns <c>true</c> only when the file was actually moved aside
+    /// (so the caller can count it as a real heal). A truncate-only
+    /// fallback returns <c>false</c>: the original filename still
+    /// exists and is still bad, so it must not advance the launcher's
+    /// heal+retry logic (audit LAUNCH-09).
     /// </summary>
-    private static void Quarantine(string path, string reason, ILogger? log)
+    private static bool Quarantine(string path, string reason, ILogger? log)
     {
         try
         {
@@ -311,6 +329,8 @@ public static class ChromeProfileHealer
             log?.LogWarning(
                 "ChromeProfileHealer: quarantined '{Path}' → '{Dest}' (reason: {Reason})",
                 path, Path.GetFileName(dest), reason);
+            // The bad file is gone from its original name — genuine heal.
+            return true;
         }
         catch (Exception ex)
         {
@@ -336,6 +356,16 @@ public static class ChromeProfileHealer
                     "this profile will continue to fail until the file can be replaced manually",
                     path);
             }
+
+            // audit LAUNCH-09: the file still lives under its ORIGINAL
+            // name (now 0 bytes, or unchanged if the truncate also
+            // failed). Report this as NOT healed so the launcher's
+            // retry doesn't proceed on a file that is still bad and
+            // would fail identically — wasting its single retry budget
+            // on a no-op heal. The next full heal pass (or a successful
+            // reaper kill of the locking handle) can quarantine it for
+            // real once the lock clears.
+            return false;
         }
     }
 }

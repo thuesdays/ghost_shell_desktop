@@ -126,13 +126,27 @@ public static class NativeMouse
 
     private static void SetAbsolute(int x, int y)
     {
-        // Convert pixel coordinates to "normalised absolute"
-        // (0..65535 over the primary monitor's logical size).
-        var sw = GetSystemMetrics(SM_CXSCREEN);
-        var sh = GetSystemMetrics(SM_CYSCREEN);
-        if (sw <= 0 || sh <= 0) return;
-        var nx = (int)(x * 65535.0 / sw);
-        var ny = (int)(y * 65535.0 / sh);
+        // audit SCRIPTSUPPORT-03: SendInput's normalised-absolute space
+        // (0..65535) is mapped over the PRIMARY monitor unless
+        // MOUSEEVENTF_VIRTUALDESK is set — and when it is, the divisor
+        // must be the VIRTUAL screen extent, with the origin shifted by
+        // the virtual screen's top-left (which can be negative on a
+        // multi-monitor layout where a secondary monitor sits left/above
+        // the primary). The previous code divided by SM_CX/CYSCREEN and
+        // omitted VIRTUALDESK, so on any multi-monitor or off-origin
+        // layout the cursor landed at the wrong on-screen position.
+        var vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        var vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        var vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        var vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        if (vw <= 0 || vh <= 0) return;
+        // Normalise relative to the virtual-desktop origin. The +1 on the
+        // extent matches Windows' own absolute mapping (coordinate N of
+        // (extent-1) maps to round(N * 65535 / (extent-1))); using the
+        // raw extent here is the conventional, off-by-≤1px approximation
+        // SendInput callers use.
+        var nx = (int)((x - vx) * 65535.0 / vw);
+        var ny = (int)((y - vy) * 65535.0 / vh);
         var inp = new INPUT
         {
             type = INPUT_MOUSE,
@@ -142,7 +156,10 @@ public static class NativeMouse
                 {
                     dx          = nx,
                     dy          = ny,
-                    dwFlags     = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE,
+                    // VIRTUALDESK makes the absolute coords span the whole
+                    // virtual desktop, matching the normalisation above
+                    // and the class XML comment.
+                    dwFlags     = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
                     time        = 0,
                     dwExtraInfo = IntPtr.Zero,
                 },
@@ -166,8 +183,19 @@ public static class NativeMouse
     private const uint MOUSEEVENTF_LEFTDOWN    = 0x0002;
     private const uint MOUSEEVENTF_LEFTUP      = 0x0004;
     private const uint MOUSEEVENTF_ABSOLUTE    = 0x8000;
+    // audit SCRIPTSUPPORT-03: MOUSEEVENTF_VIRTUALDESK maps absolute
+    // coordinates across the whole virtual desktop rather than the
+    // primary monitor.
+    private const uint MOUSEEVENTF_VIRTUALDESK = 0x4000;
     private const int  SM_CXSCREEN             = 0;
     private const int  SM_CYSCREEN             = 1;
+    // audit SCRIPTSUPPORT-03: virtual-screen extent + origin. The origin
+    // (SM_X/YVIRTUALSCREEN) can be negative when a secondary monitor is
+    // positioned left of / above the primary.
+    private const int  SM_XVIRTUALSCREEN       = 76;
+    private const int  SM_YVIRTUALSCREEN       = 77;
+    private const int  SM_CXVIRTUALSCREEN      = 78;
+    private const int  SM_CYVIRTUALSCREEN      = 79;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct POINT { public int X; public int Y; }

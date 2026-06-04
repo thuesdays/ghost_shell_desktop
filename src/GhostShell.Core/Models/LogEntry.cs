@@ -20,7 +20,7 @@ namespace GhostShell.Core.Models;
 /// </summary>
 public sealed record LogEntry(
     DateTime  Timestamp,
-    string    Level,        // VRB / DBG / INF / WAR / ERR / FTL / RAW
+    string    Level,        // VRB / DBG / INF / WRN / ERR / FTL / RAW
     int?      Pid,
     string?   Source,       // "GhostShell.Runtime.Browser.RealProfileRunner"
     string    Message)
@@ -30,6 +30,11 @@ public sealed record LogEntry(
     {
         "FTL" => LogLevel.Error,
         "ERR" => LogLevel.Error,
+        // Serilog's {Level:u3} emits "WRN" for Warning — LogParser was
+        // updated to that (Phase 71cc) but this mapping was not, so real
+        // Warning lines silently fell to the Information default (wrong
+        // colour + wrong min-level filtering). Accept both forms.
+        "WRN" => LogLevel.Warning,
         "WAR" => LogLevel.Warning,
         "INF" => LogLevel.Information,
         "DBG" => LogLevel.Debug,

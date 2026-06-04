@@ -119,15 +119,12 @@ internal static class LaunchPreflight
     /// </summary>
     private static int KillProcessesUsingDir(string userDataDir, ILogger log)
     {
-        // Match needles — Chrome quotes / wraps the path in different
-        // ways depending on whether shell-spawn or direct CreateProcess,
-        // so search both an unquoted and a quoted form.
-        var needles = new[]
-        {
-            $"--user-data-dir={userDataDir}",
-            $"--user-data-dir=\"{userDataDir}\"",
-        };
-
+        // audit LAUNCH-08: a raw substring match on `--user-data-dir={path}`
+        // collides with sibling profiles whose name is a prefix of ours
+        // (e.g. profile 'acme' matches 'acme2'), which would reap an
+        // unrelated live session. Instead of substring-matching, we parse
+        // the actual --user-data-dir argument value out of each command
+        // line and compare it to the target for exact path equality.
         var killed = 0;
         // WMI query gives us each process plus its full command line —
         // standard Process API on Windows only exposes the file name
@@ -144,7 +141,9 @@ internal static class LaunchPreflight
             var pidObj = mo["ProcessId"];
             var cmd    = mo["CommandLine"] as string ?? "";
             if (pidObj is null) continue;
-            if (!needles.Any(n => cmd.Contains(n, StringComparison.OrdinalIgnoreCase)))
+            // audit LAUNCH-08: exact, separator-normalized path equality
+            // on the parsed argument value — not a prefix-prone substring.
+            if (!CommandLineTargetsDir(cmd, userDataDir))
                 continue;
 
             var pid = Convert.ToInt32(pidObj);
@@ -166,6 +165,98 @@ internal static class LaunchPreflight
             }
         }
         return killed;
+    }
+
+    /// <summary>
+    /// audit LAUNCH-08: returns true only when <paramref name="cmd"/> contains a
+    /// <c>--user-data-dir</c> switch whose value resolves to the SAME directory as
+    /// <paramref name="userDataDir"/>. We extract the argument value (handling both
+    /// quoted and unquoted forms, with the value either inline as
+    /// <c>--user-data-dir=VALUE</c> or in the following token) and compare with
+    /// separator-/case-normalized path equality, so a sibling profile whose name is
+    /// a prefix of ours (e.g. 'acme' vs 'acme2') no longer matches.
+    /// </summary>
+    private static bool CommandLineTargetsDir(string cmd, string userDataDir)
+    {
+        if (string.IsNullOrEmpty(cmd)) return false;
+
+        const string flag = "--user-data-dir";
+        var search = 0;
+        while (true)
+        {
+            var idx = cmd.IndexOf(flag, search, StringComparison.OrdinalIgnoreCase);
+            if (idx < 0) return false;
+
+            var after = idx + flag.Length;
+            // The switch may legitimately appear as a substring of a longer,
+            // unrelated token (none ship today, but be defensive): the real
+            // flag is terminated by '=' (inline value) or whitespace (next-token
+            // value). Anything else is a false positive — skip and keep scanning.
+            string? value = null;
+            if (after < cmd.Length && cmd[after] == '=')
+            {
+                value = ReadArgValue(cmd, after + 1);
+            }
+            else if (after >= cmd.Length || char.IsWhiteSpace(cmd[after]))
+            {
+                // value is the next whitespace-delimited token
+                var p = after;
+                while (p < cmd.Length && char.IsWhiteSpace(cmd[p])) p++;
+                if (p < cmd.Length) value = ReadArgValue(cmd, p);
+            }
+
+            if (value is not null && PathsEqual(value, userDataDir))
+                return true;
+
+            search = after;
+        }
+    }
+
+    /// <summary>
+    /// Reads a single command-line argument value starting at <paramref name="start"/>.
+    /// Honors a leading double-quote (value runs to the closing quote); otherwise the
+    /// value runs to the next whitespace.
+    /// </summary>
+    private static string ReadArgValue(string cmd, int start)
+    {
+        if (start >= cmd.Length) return string.Empty;
+        if (cmd[start] == '"')
+        {
+            var end = cmd.IndexOf('"', start + 1);
+            if (end < 0) end = cmd.Length;
+            return cmd.Substring(start + 1, end - (start + 1));
+        }
+
+        var p = start;
+        while (p < cmd.Length && !char.IsWhiteSpace(cmd[p])) p++;
+        return cmd.Substring(start, p - start);
+    }
+
+    /// <summary>
+    /// Case-insensitive, separator-normalized path equality. Trailing separators
+    /// and forward/back slash differences are ignored. Falls back to a normalized
+    /// string compare if the path cannot be canonicalized (e.g. malformed argv).
+    /// </summary>
+    private static bool PathsEqual(string a, string b)
+    {
+        static string Normalize(string p)
+        {
+            p = p.Trim().Trim('"');
+            try
+            {
+                // GetFullPath resolves relative segments and unifies separators;
+                // it does not require the path to exist on disk.
+                p = Path.GetFullPath(p);
+            }
+            catch
+            {
+                // best-effort: unify separators manually
+                p = p.Replace('/', '\\');
+            }
+            return p.TrimEnd('\\', '/');
+        }
+
+        return string.Equals(Normalize(a), Normalize(b), StringComparison.OrdinalIgnoreCase);
     }
 
     private static void TryDelete(string path, ILogger log)

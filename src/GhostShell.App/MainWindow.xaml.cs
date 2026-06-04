@@ -83,11 +83,12 @@ public partial class MainWindow : Window
 
     private void OnWindowStateChanged(object? sender, EventArgs e)
     {
-        // Swap the inner TextBlock's text so the icon reflects state.
-        if (FindName("MaxIcon") is TextBlock tb)
-            tb.Text = WindowState == WindowState.Maximized
-                ? GlyphRestore
-                : GlyphMaximize;
+        // Redesign 2026-06 — MaxIcon is now a vector Icon control, so swap
+        // its Geometry (not a glyph string) to reflect maximize/restore.
+        if (FindName("MaxIcon") is GhostShell.App.Controls.Icon ic)
+            ic.Data = Application.Current?.TryFindResource(
+                WindowState == WindowState.Maximized ? "Icon.Restore" : "Icon.Maximize")
+                as System.Windows.Media.Geometry;
     }
 
     /// <summary>

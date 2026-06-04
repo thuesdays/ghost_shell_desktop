@@ -32,69 +32,20 @@ public static class Humanizer
     /// (navigated away, replaced by SPA re-render), the next char
     /// throws — caller decides recovery.
     /// </summary>
-    public static async Task TypeAsync(
+    public static Task TypeAsync(
         IBrowserSession session, string selector, string text,
         int minMs = 40, int maxMs = 180, CancellationToken ct = default)
     {
-        if (text.Length == 0) return;
-        // Focus + clear up front. Stamp the element with a unique
-        // marker so we can detect staleness on each subsequent
-        // keystroke without re-running the user's selector (which
-        // might match a sibling element under SPA re-render).
-        var marker = "gs-type-" + Guid.NewGuid().ToString("N")[..12];
-        var focusJs = $$"""
-            (function() {
-              var el = document.querySelector({{JsonSerializer.Serialize(selector)}});
-              if (!el) return false;
-              el.focus();
-              if ('value' in el) el.value = '';
-              else el.textContent = '';
-              el.setAttribute('data-gs-typing', {{JsonSerializer.Serialize(marker)}});
-              return true;
-            })()
-        """;
-        var ok = await session.ExecuteScriptAsync(focusJs, null, ct);
-        if (ok is not true)
-            throw new InvalidOperationException($"selector not found: {selector}");
-
-        foreach (var ch in text)
-        {
-            ct.ThrowIfCancellationRequested();
-            var charJs = $$"""
-                (function() {
-                  var el = document.querySelector(
-                    '[data-gs-typing="' + {{JsonSerializer.Serialize(marker)}} + '"]');
-                  if (!el) return false;          // element gone (navigation / re-render)
-                  if (document.activeElement !== el) el.focus();
-                  var c = {{JsonSerializer.Serialize(ch.ToString())}};
-                  if ('value' in el) el.value += c;
-                  else el.textContent += c;
-                  el.dispatchEvent(new InputEvent('input', {bubbles: true, data: c}));
-                  return true;
-                })()
-            """;
-            var alive = await session.ExecuteScriptAsync(charJs, null, ct);
-            if (alive is not true)
-                throw new InvalidOperationException(
-                    $"typing target disappeared mid-input (selector: {selector})");
-            // Keystroke gap. Random.Shared is process-wide thread-safe.
-            var gap = Random.Shared.Next(minMs, maxMs + 1);
-            await Task.Delay(gap, ct);
-        }
-
-        // Cleanup: drop the marker so we leave the DOM in the same
-        // shape as a normal user-typed input.
-        try
-        {
-            await session.ExecuteScriptAsync($$"""
-                (function() {
-                  var el = document.querySelector(
-                    '[data-gs-typing="' + {{JsonSerializer.Serialize(marker)}} + '"]');
-                  if (el) el.removeAttribute('data-gs-typing');
-                })()
-            """, null, ct);
-        }
-        catch { /* best-effort */ }
+        if (string.IsNullOrEmpty(text)) return Task.CompletedTask;
+        // audit SCRIPTSUPPORT-01: route typing through the session's TRUSTED
+        // input path. On the Selenium session this uses WebDriver SendKeys,
+        // which fires real keydown/keypress/input/keyup with isTrusted=true
+        // (the old code wrote el.value+=c and dispatched a synthetic
+        // InputEvent — isTrusted=false, and it fired NO keyboard events at
+        // all, a strong bot signature). Per-key jitter (variable, not
+        // uniform) lives in the session impl. Element-staleness across SPA
+        // re-renders is handled there too (re-find on each keystroke).
+        return session.TrustedTypeAsync(selector, text, minMs, maxMs, ct);
     }
 
     /// <summary>
@@ -135,43 +86,15 @@ public static class Humanizer
             throw new InvalidOperationException(
                 $"selector not found after {waitTimeoutMs}ms: {selector}");
 
-        var hoverJs = $$"""
-            return (function() {
-              var el = document.querySelector({{JsonSerializer.Serialize(selector)}});
-              if (!el) return false;
-              // Scroll the element into view so the click hits a real
-              // viewport coordinate (off-screen elements have rect
-              // values outside the visible area).
-              try { el.scrollIntoView({block: 'center', inline: 'center', behavior: 'instant'}); } catch (e) {}
-              var rect = el.getBoundingClientRect();
-              var cx = rect.left + rect.width / 2;
-              var cy = rect.top + rect.height / 2;
-              var ev = new MouseEvent('mouseover',
-                {bubbles: true, cancelable: true, clientX: cx, clientY: cy});
-              el.dispatchEvent(ev);
-              return true;
-            })();
-        """;
-        var ok = await session.ExecuteScriptAsync(hoverJs, null, ct);
-        if (ok is not true)
-            throw new InvalidOperationException($"selector not found: {selector}");
+        // audit SCRIPTRUNNER-01 / SCRIPTSUPPORT-08: hover then click through
+        // the session's TRUSTED input path (CDP Input.dispatchMouseEvent on
+        // the Selenium session) so the events carry isTrusted=true and a
+        // real pointer trail (move → press → release), not a single
+        // synthetic dispatchEvent at dead-centre. Keep the human
+        // hover-then-click dwell between the two.
+        await session.TrustedHoverAsync(selector, ct);
         await Task.Delay(Random.Shared.Next(hoverMinMs, hoverMaxMs + 1), ct);
-
-        var clickJs = $$"""
-            (function() {
-              var el = document.querySelector({{JsonSerializer.Serialize(selector)}});
-              if (!el) return false;
-              var r = el.getBoundingClientRect();
-              var cx = r.left + r.width / 2;
-              var cy = r.top + r.height / 2;
-              ['mousedown','mouseup','click'].forEach(function(name) {
-                el.dispatchEvent(new MouseEvent(name,
-                  {bubbles: true, cancelable: true, clientX: cx, clientY: cy, button: 0}));
-              });
-              return true;
-            })()
-        """;
-        await session.ExecuteScriptAsync(clickJs, null, ct);
+        await session.TrustedClickAsync(selector, ct: ct);
     }
 
     /// <summary>

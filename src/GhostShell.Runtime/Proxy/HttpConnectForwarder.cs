@@ -92,7 +92,11 @@ public sealed class HttpConnectForwarder : IProxyAuthForwarder
                 $"Cannot parse upstream proxy URL '{upstreamProxyUrl}'.",
                 nameof(upstreamProxyUrl));
 
-        _upstreamHost = uri.Host;
+        // audit PROXY-03: Uri.Host returns IPv6 literals in bracketed
+        // form (e.g. "[::1]"), but Socket.ConnectAsync/IPAddress.Parse
+        // expect a bare host or IP. Strip the brackets so IPv6 upstream
+        // proxies connect instead of throwing on the bracketed string.
+        _upstreamHost = uri.Host.Trim('[', ']');
         _upstreamPort = uri.Port > 0 ? uri.Port : 8080;
 
         if (!string.IsNullOrEmpty(uri.UserInfo))
@@ -178,10 +182,16 @@ public sealed class HttpConnectForwarder : IProxyAuthForwarder
             client.NoDelay = true;
             using var clientStream = client.GetStream();
 
+            // audit PROXY-01: buffer the client socket so bytes we read
+            // past a header terminator (the start of a body, or the next
+            // pipelined request) are preserved rather than lost. The
+            // legacy single-read path silently dropped any such over-read.
+            var clientReader = new BufferedSocketReader(clientStream);
+
             // Read request headers up to the first blank line. Cap at
             // 64 KiB — anything bigger than that on a CONNECT/proxy
             // request is malformed.
-            var headers = await ReadHeadersAsync(clientStream, 64 * 1024, ct);
+            var headers = await clientReader.ReadHeadersAsync(64 * 1024, ct);
             if (headers.Length == 0)
             {
                 _log.LogDebug("Empty request — client disconnected before sending headers");
@@ -189,6 +199,7 @@ public sealed class HttpConnectForwarder : IProxyAuthForwarder
             }
 
             var targetHost = ExtractTargetHost(headers);
+            var isConnect  = IsConnectRequest(headers);
 
             // Connect to the real proxy.
             upstream = new TcpClient { NoDelay = true };
@@ -197,23 +208,42 @@ public sealed class HttpConnectForwarder : IProxyAuthForwarder
             await upstream.ConnectAsync(_upstreamHost, _upstreamPort, upstreamCts.Token);
             using var upstreamStream = upstream.GetStream();
 
-            var modified = InjectAuth(headers);
-            await upstreamStream.WriteAsync(modified, ct);
-            await upstreamStream.FlushAsync(ct);
+            HostCounter? counter =
+                string.IsNullOrEmpty(targetHost) ? null : GetCounter(targetHost);
 
-            _log.LogTrace(
-                "Forwarding {Bytes}B header block (target={Target})",
-                modified.Length, string.IsNullOrEmpty(targetHost) ? "?" : targetHost);
-
-            // Phase 28 — count this connection as one request against
-            // the resolved target host, and bill the request-line +
-            // headers we already wrote upstream (they're real bytes).
-            HostCounter? counter = null;
-            if (!string.IsNullOrEmpty(targetHost))
+            if (isConnect)
             {
-                counter = GetCounter(targetHost);
-                Interlocked.Increment(ref counter.Requests);
-                Interlocked.Add(ref counter.Bytes, modified.Length);
+                // ── CONNECT (HTTPS tunnel) ───────────────────────────
+                // Exactly one request needs auth; after the upstream's
+                // 200 response everything is opaque TLS. Inject once,
+                // then raw-pump in both directions (the original design).
+                var modified = InjectAuth(headers);
+                await upstreamStream.WriteAsync(modified, ct);
+                await upstreamStream.FlushAsync(ct);
+
+                _log.LogTrace(
+                    "Forwarding CONNECT {Bytes}B header block (target={Target})",
+                    modified.Length, string.IsNullOrEmpty(targetHost) ? "?" : targetHost);
+
+                if (counter is not null)
+                {
+                    Interlocked.Increment(ref counter.Requests);
+                    Interlocked.Add(ref counter.Bytes, modified.Length);
+                }
+            }
+            else
+            {
+                // ── Plain HTTP (keep-alive / pipelined) ──────────────
+                // audit PROXY-01: a single HTTP keep-alive connection
+                // carries many requests (GET http://a/, GET http://b/…).
+                // Every one needs Proxy-Authorization, not just the
+                // first — otherwise the upstream answers 407 for all but
+                // the first resource. We forward the already-read first
+                // request here (auth-injected + body) and then loop in
+                // PumpHttpRequestsAsync for the rest until the client
+                // half-closes or the connection upgrades.
+                await ForwardHttpRequestAsync(
+                    clientReader, upstreamStream, headers, counter, ct);
             }
 
             // Bidirectional pump. Either side hitting EOF / error
@@ -222,7 +252,14 @@ public sealed class HttpConnectForwarder : IProxyAuthForwarder
             // length to the host counter. counter==null = direct
             // proxy without an upstream host header (rare); the copy
             // still works, we just don't bill it.
-            var c2u = CountingCopyAsync(clientStream, upstreamStream, counter, ct);
+            //
+            // audit PROXY-01: for plain HTTP the client→upstream
+            // direction goes through PumpHttpRequestsAsync (re-injects
+            // auth + counts each request); the upstream→client direction
+            // is always a transparent byte copy.
+            var c2u = isConnect
+                ? CountingCopyAsync(clientReader.AsStream(), upstreamStream, counter, ct)
+                : PumpHttpRequestsAsync(clientReader, upstreamStream, counter, ct);
             var u2c = CountingCopyAsync(upstreamStream, clientStream, counter, ct);
             await Task.WhenAny(c2u, u2c);
 
@@ -274,24 +311,44 @@ public sealed class HttpConnectForwarder : IProxyAuthForwarder
         }
     }
 
-    /// <summary>Phase 28 — atomically swap out the per-host counter
-    /// table and return the OLD one. The collector thread is the only
-    /// reader; per-connection writers contend on the new (empty) table
-    /// from this point. Returns a snapshot keyed by hostname (lowercase).</summary>
+    /// <summary>Phase 28 — drain the per-host counter table and return
+    /// a snapshot keyed by hostname (lowercase). The collector thread is
+    /// the only reader; per-connection writers keep Interlocked-adding
+    /// into the same HostCounter objects.</summary>
+    /// <remarks>
+    /// audit PROXY-07: we do NOT swap or Clear() the dictionary (the old
+    /// doc comment claimed a Clear()-swap that never happened). We
+    /// atomically Interlocked.Exchange each counter's Bytes/Requests to
+    /// zero, copying the previous values into the snapshot — so values
+    /// are billed exactly once and writes landing mid-drain are counted
+    /// on the NEXT drain.
+    ///
+    /// To stop the dictionary growing unboundedly for long-lived
+    /// sessions that touch tens of thousands of hosts (CDNs, trackers),
+    /// we TryRemove entries that were already at zero before this drain
+    /// (i.e. idle since the last drain). We accept the documented tiny
+    /// race: a writer can re-add a host concurrently with TryRemove —
+    /// worst case we drop a handful of bytes that get re-counted under a
+    /// fresh HostCounter on the next request, which is fine for hourly
+    /// bucket aggregation.
+    /// </remarks>
     public IReadOnlyDictionary<string, (long Bytes, long Requests)> DrainCounters()
     {
-        // We don't expose the live ConcurrentDictionary — that would let
-        // a worker mutate it while the caller iterates. Instead we
-        // *swap* by Clear()-ing after copying out a snapshot. The window
-        // between snapshot and Clear is tiny (microseconds); any writes
-        // landing inside that window get counted on the NEXT drain,
-        // which is fine for hourly bucket aggregation.
         var snapshot = new Dictionary<string, (long, long)>(StringComparer.OrdinalIgnoreCase);
         foreach (var kv in _counters)
         {
             var bytes = Interlocked.Exchange(ref kv.Value.Bytes, 0);
             var reqs  = Interlocked.Exchange(ref kv.Value.Requests, 0);
-            if (bytes == 0 && reqs == 0) continue;
+            if (bytes == 0 && reqs == 0)
+            {
+                // audit PROXY-07: idle host (no traffic since the prior
+                // drain) — evict it so the table doesn't grow forever.
+                // TryRemove is keyed by value reference, so a concurrent
+                // GetOrAdd that replaced the HostCounter won't be dropped.
+                ((ICollection<KeyValuePair<string, HostCounter>>)_counters)
+                    .Remove(new KeyValuePair<string, HostCounter>(kv.Key, kv.Value));
+                continue;
+            }
             snapshot[kv.Key] = (bytes, reqs);
         }
         return snapshot;
@@ -302,44 +359,217 @@ public sealed class HttpConnectForwarder : IProxyAuthForwarder
     // ─────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Read the byte stream up to and including the first blank line
-    /// (\r\n\r\n) — that's the end of the HTTP request-line + headers
-    /// block. Returns whatever was buffered if the cap is hit first.
+    /// audit PROXY-01: true when the first request-line is a CONNECT
+    /// (i.e. an HTTPS tunnel). CONNECT gets auth injected once and then
+    /// raw-pumped; plain HTTP needs per-request auth injection.
     /// </summary>
-    private static async Task<byte[]> ReadHeadersAsync(
-        NetworkStream stream, int maxBytes, CancellationToken ct)
+    private static bool IsConnectRequest(byte[] headers)
     {
-        var buf = new byte[8192];
-        using var ms = new MemoryStream(capacity: 4096);
-        var terminator = "\r\n\r\n"u8.ToArray();
-
-        while (ms.Length < maxBytes)
-        {
-            var read = await stream.ReadAsync(buf, ct);
-            if (read == 0) break;
-            ms.Write(buf, 0, read);
-
-            // Scan for terminator; cheap because requests are tiny.
-            if (ContainsSequence(ms.GetBuffer(), (int)ms.Length, terminator))
-                break;
-        }
-        return ms.ToArray();
+        // "CONNECT " is 8 bytes; compare ASCII, case-sensitive (the
+        // method token is always upper-case per RFC 7231).
+        ReadOnlySpan<byte> connect = "CONNECT "u8;
+        if (headers.Length < connect.Length) return false;
+        for (var i = 0; i < connect.Length; i++)
+            if (headers[i] != connect[i]) return false;
+        return true;
     }
 
-    private static bool ContainsSequence(byte[] haystack, int length, byte[] needle)
+    /// <summary>
+    /// audit PROXY-01: keep-alive HTTP request loop for the
+    /// client→upstream direction. Frames each successive HTTP request
+    /// on the connection, injects <c>Proxy-Authorization</c> into every
+    /// one (not just the first), bills it (audit PROXY-06: one Requests
+    /// increment per real request, not per TCP connection), and forwards
+    /// it upstream. Exits when the client half-closes, the request can't
+    /// be parsed, or the connection upgrades to an opaque protocol
+    /// (WebSocket / CONNECT), after which we fall back to a raw copy.
+    /// </summary>
+    private async Task PumpHttpRequestsAsync(
+        BufferedSocketReader reader, Stream upstream, HostCounter? counter, CancellationToken ct)
     {
-        if (length < needle.Length) return false;
-        var last = length - needle.Length;
-        for (var i = 0; i <= last; i++)
+        while (true)
         {
-            var ok = true;
-            for (var j = 0; j < needle.Length; j++)
+            var headers = await reader.ReadHeadersAsync(64 * 1024, ct);
+            if (headers.Length == 0) return; // client half-closed — done.
+
+            // A second CONNECT or an Upgrade turns the stream opaque;
+            // stop framing and let the caller's raw copy take over the
+            // remaining bytes (we've already consumed exactly this
+            // header block, the rest stays buffered in the reader).
+            if (IsConnectRequest(headers) || HasHeader(headers, "upgrade:"u8.ToArray()))
             {
-                if (haystack[i + j] != needle[j]) { ok = false; break; }
+                var passthrough = InjectAuth(headers);
+                await upstream.WriteAsync(passthrough, ct);
+                await upstream.FlushAsync(ct);
+                if (counter is not null)
+                {
+                    Interlocked.Increment(ref counter.Requests);
+                    Interlocked.Add(ref counter.Bytes, passthrough.Length);
+                }
+                await CountingCopyAsync(reader.AsStream(), upstream, counter, ct);
+                return;
             }
-            if (ok) return true;
+
+            await ForwardHttpRequestAsync(reader, upstream, headers, counter, ct);
         }
-        return false;
+    }
+
+    /// <summary>
+    /// audit PROXY-01 / PROXY-06: inject auth into one already-read HTTP
+    /// header block, forward it upstream, then forward exactly that
+    /// request's body (Content-Length or chunked Transfer-Encoding) so we
+    /// stay byte-framed for the next pipelined request. Counts one
+    /// request and bills every byte written upstream.
+    /// </summary>
+    private async Task ForwardHttpRequestAsync(
+        BufferedSocketReader reader, Stream upstream, byte[] headers, HostCounter? counter, CancellationToken ct)
+    {
+        var modified = InjectAuth(headers);
+        await upstream.WriteAsync(modified, ct);
+
+        if (counter is not null)
+        {
+            Interlocked.Increment(ref counter.Requests);
+            Interlocked.Add(ref counter.Bytes, modified.Length);
+        }
+
+        // Forward the request body, if any, so the byte stream stays
+        // aligned to request boundaries for the next iteration.
+        if (IsChunkedTransfer(headers))
+        {
+            await ForwardChunkedBodyAsync(reader, upstream, counter, ct);
+        }
+        else
+        {
+            var contentLength = GetContentLength(headers);
+            if (contentLength > 0)
+                await ForwardFixedBodyAsync(reader, upstream, contentLength, counter, ct);
+        }
+
+        await upstream.FlushAsync(ct);
+    }
+
+    /// <summary>Forward exactly <paramref name="length"/> body bytes
+    /// from the buffered client reader to upstream.</summary>
+    private static async Task ForwardFixedBodyAsync(
+        BufferedSocketReader reader, Stream upstream, long length, HostCounter? counter, CancellationToken ct)
+    {
+        var buf = new byte[16 * 1024];
+        var remaining = length;
+        while (remaining > 0)
+        {
+            var want = (int)Math.Min(remaining, buf.Length);
+            var n = await reader.ReadAsync(buf.AsMemory(0, want), ct);
+            if (n <= 0) return; // client closed mid-body — bail.
+            await upstream.WriteAsync(buf.AsMemory(0, n), ct);
+            if (counter is not null) Interlocked.Add(ref counter.Bytes, n);
+            remaining -= n;
+        }
+    }
+
+    /// <summary>Forward a chunked-transfer body verbatim (chunk-size
+    /// lines + data + trailing CRLF) up to and including the
+    /// zero-length terminating chunk, so the next pipelined request is
+    /// correctly framed.</summary>
+    private static async Task ForwardChunkedBodyAsync(
+        BufferedSocketReader reader, Stream upstream, HostCounter? counter, CancellationToken ct)
+    {
+        while (true)
+        {
+            // chunk-size line, e.g. "1a3\r\n" (may carry chunk-ext).
+            var sizeLine = await reader.ReadLineAsync(ct);
+            if (sizeLine.Length == 0) return; // closed mid-body.
+
+            await upstream.WriteAsync(sizeLine, ct);
+            if (counter is not null) Interlocked.Add(ref counter.Bytes, sizeLine.Length);
+
+            var chunkSize = ParseChunkSize(sizeLine);
+            if (chunkSize == 0)
+            {
+                // Last chunk — forward trailers up to the final blank
+                // line, then the body is complete.
+                while (true)
+                {
+                    var trailer = await reader.ReadLineAsync(ct);
+                    if (trailer.Length == 0) return;
+                    await upstream.WriteAsync(trailer, ct);
+                    if (counter is not null) Interlocked.Add(ref counter.Bytes, trailer.Length);
+                    // A bare CRLF line ("\r\n") terminates the trailer section.
+                    if (trailer.Length == 2 && trailer[0] == (byte)'\r' && trailer[1] == (byte)'\n')
+                        return;
+                }
+            }
+
+            // Forward chunkSize data bytes plus the trailing CRLF.
+            await ForwardFixedBodyAsync(reader, upstream, chunkSize + 2, counter, ct);
+        }
+    }
+
+    private static int ParseChunkSize(byte[] line)
+    {
+        // Hex up to the first ';' (chunk extension) or CR.
+        var value = 0;
+        foreach (var b in line)
+        {
+            int d;
+            if (b >= (byte)'0' && b <= (byte)'9') d = b - (byte)'0';
+            else if (b >= (byte)'a' && b <= (byte)'f') d = b - (byte)'a' + 10;
+            else if (b >= (byte)'A' && b <= (byte)'F') d = b - (byte)'A' + 10;
+            else break; // ';', '\r', whitespace — end of size token.
+            value = (value << 4) | d;
+        }
+        return value;
+    }
+
+    /// <summary>Parse the Content-Length header value (decimal) from a
+    /// request header block; 0 when absent or unparseable.</summary>
+    private static long GetContentLength(byte[] headers)
+    {
+        var value = ReadHeaderValue(headers, "content-length:"u8.ToArray());
+        if (value is null) return 0;
+        return long.TryParse(value.Trim(), out var len) && len > 0 ? len : 0;
+    }
+
+    private static bool IsChunkedTransfer(byte[] headers)
+    {
+        var value = ReadHeaderValue(headers, "transfer-encoding:"u8.ToArray());
+        return value is not null &&
+               value.Contains("chunked", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Return the (Latin1-decoded) value of the first header
+    /// whose name matches <paramref name="needleLower"/> (lower-case,
+    /// includes the trailing colon), or null if absent.</summary>
+    private static string? ReadHeaderValue(byte[] data, byte[] needleLower)
+    {
+        var firstNl = IndexOfSequence(data, "\r\n"u8.ToArray());
+        if (firstNl < 0) return null;
+
+        var i = firstNl + 2;
+        while (i < data.Length)
+        {
+            var lineEnd = IndexOfSequence(data.AsSpan(i), "\r\n"u8.ToArray());
+            var lineLen = lineEnd < 0 ? data.Length - i : lineEnd;
+            if (lineLen == 0) break; // blank line — end of headers.
+
+            if (lineLen > needleLower.Length)
+            {
+                var match = true;
+                for (var j = 0; j < needleLower.Length; j++)
+                {
+                    var b = data[i + j];
+                    if (b >= (byte)'A' && b <= (byte)'Z') b = (byte)(b + 32);
+                    if (b != needleLower[j]) { match = false; break; }
+                }
+                if (match)
+                    return Encoding.Latin1.GetString(
+                        data, i + needleLower.Length, lineLen - needleLower.Length);
+            }
+
+            if (lineEnd < 0) break;
+            i += lineEnd + 2;
+        }
+        return null;
     }
 
     /// <summary>
@@ -456,6 +686,152 @@ public sealed class HttpConnectForwarder : IProxyAuthForwarder
         }
         catch { /* ignore — diagnostics only */ }
         return "";
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // Buffered socket reader (audit PROXY-01)
+    // ─────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// audit PROXY-01: a thin read-side buffer over a NetworkStream.
+    /// The legacy header read went straight to the socket, so any bytes
+    /// it read past the <c>\r\n\r\n</c> terminator (the body, or a
+    /// pipelined follow-up request) were dropped. To re-frame and re-auth
+    /// each request on a keep-alive HTTP connection we must keep that
+    /// over-read around. This reader buffers it and serves it back before
+    /// touching the socket again. It also exposes a <see cref="Stream"/>
+    /// view (<see cref="AsStream"/>) so the raw-tunnel fallback drains the
+    /// buffer first, then the live socket.
+    /// </summary>
+    private sealed class BufferedSocketReader
+    {
+        private readonly Stream _inner;
+        private byte[] _buffer = Array.Empty<byte>();
+        private int _start;
+        private int _end;
+
+        public BufferedSocketReader(Stream inner) => _inner = inner;
+
+        private int Buffered => _end - _start;
+
+        /// <summary>Fill the buffer from the socket when empty. Returns
+        /// the number of bytes now buffered (0 == socket EOF).</summary>
+        private async ValueTask<int> FillAsync(CancellationToken ct)
+        {
+            if (Buffered > 0) return Buffered;
+            if (_buffer.Length == 0) _buffer = new byte[16 * 1024];
+            _start = 0;
+            _end = await _inner.ReadAsync(_buffer, ct);
+            if (_end < 0) _end = 0;
+            return _end;
+        }
+
+        /// <summary>Read body/opaque bytes — buffered leftovers first,
+        /// then a single socket read. Mirrors Stream.ReadAsync semantics
+        /// (0 == EOF).</summary>
+        public async ValueTask<int> ReadAsync(Memory<byte> dst, CancellationToken ct)
+        {
+            if (Buffered == 0)
+            {
+                // Bypass the buffer for large reads once it's drained.
+                if (await FillAsync(ct) == 0) return 0;
+            }
+            var n = Math.Min(Buffered, dst.Length);
+            _buffer.AsMemory(_start, n).CopyTo(dst);
+            _start += n;
+            return n;
+        }
+
+        /// <summary>
+        /// Read up to and including the first blank line (\r\n\r\n) — the
+        /// end of an HTTP request-line + headers block. Returns whatever
+        /// is buffered if <paramref name="maxBytes"/> is hit first, or an
+        /// empty array on a clean EOF before any bytes arrive.
+        /// </summary>
+        public async Task<byte[]> ReadHeadersAsync(int maxBytes, CancellationToken ct)
+        {
+            using var ms = new MemoryStream(capacity: 4096);
+            // Terminator is CRLF CRLF = {13,10,13,10}. We track how many
+            // bytes have matched so far. (Kept as plain bytes rather than
+            // a ReadOnlySpan local because a ref struct cannot stay alive
+            // across the awaits below.)
+            const byte CR = 13, LF = 10;
+            var matched = 0;
+
+            while (ms.Length < maxBytes)
+            {
+                if (await FillAsync(ct) == 0) break; // EOF.
+
+                // Consume buffered bytes one at a time, tracking the
+                // terminator so we stop the instant it completes and
+                // leave the remainder in the buffer for the next read.
+                while (_start < _end)
+                {
+                    var b = _buffer[_start++];
+                    ms.WriteByte(b);
+                    // matched: 0,2 expect CR; 1,3 expect LF.
+                    var expected = (matched & 1) == 0 ? CR : LF;
+                    matched = b == expected ? matched + 1 : (b == CR ? 1 : 0);
+                    if (matched == 4)
+                        return ms.ToArray();
+                    if (ms.Length >= maxBytes)
+                        return ms.ToArray();
+                }
+            }
+            return ms.ToArray();
+        }
+
+        /// <summary>Read a single CRLF-terminated line, inclusive of the
+        /// CRLF. Returns an empty array on EOF.</summary>
+        public async Task<byte[]> ReadLineAsync(CancellationToken ct)
+        {
+            using var ms = new MemoryStream(capacity: 64);
+            var sawCr = false;
+            while (true)
+            {
+                if (await FillAsync(ct) == 0) break;
+                while (_start < _end)
+                {
+                    var b = _buffer[_start++];
+                    ms.WriteByte(b);
+                    if (sawCr && b == (byte)'\n') return ms.ToArray();
+                    sawCr = b == (byte)'\r';
+                }
+            }
+            return ms.ToArray();
+        }
+
+        /// <summary>Expose the reader as a forward-only Stream so the
+        /// raw-tunnel pump (CONNECT / upgraded connections) drains any
+        /// buffered bytes before reading the live socket.</summary>
+        public Stream AsStream() => new ReaderStream(this);
+
+        private sealed class ReaderStream : Stream
+        {
+            private readonly BufferedSocketReader _r;
+            public ReaderStream(BufferedSocketReader r) => _r = r;
+
+            public override async ValueTask<int> ReadAsync(
+                Memory<byte> buffer, CancellationToken ct = default) =>
+                await _r.ReadAsync(buffer, ct);
+
+            public override int Read(byte[] buffer, int offset, int count) =>
+                ReadAsync(buffer.AsMemory(offset, count)).AsTask().GetAwaiter().GetResult();
+
+            public override bool CanRead  => true;
+            public override bool CanSeek  => false;
+            public override bool CanWrite => false;
+            public override long Length   => throw new NotSupportedException();
+            public override long Position
+            {
+                get => throw new NotSupportedException();
+                set => throw new NotSupportedException();
+            }
+            public override void Flush() { }
+            public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+            public override void SetLength(long value) => throw new NotSupportedException();
+            public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        }
     }
 
     // ─────────────────────────────────────────────────────────

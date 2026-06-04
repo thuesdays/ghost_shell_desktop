@@ -55,6 +55,13 @@ public static class ScriptSecurityGuards
     public static string SanitiseExtensionPage(string raw)
     {
         if (string.IsNullOrWhiteSpace(raw)) return "popup.html";
+        // Reject path-ish input BEFORE taking the leaf. Path.GetFileName
+        // collapses "../../manifest.json" → "manifest.json", which would
+        // silently accept a traversal attempt — yet a plain "manifest.json"
+        // is itself a legitimately allowed page, so the leaf check alone
+        // cannot distinguish them. Reject on the raw separators / "..".
+        if (raw.IndexOfAny(new[] { '/', '\\', ':' }) >= 0 || raw.Contains(".."))
+            return "popup.html";
         var leaf = System.IO.Path.GetFileName(raw);
         if (string.IsNullOrEmpty(leaf)) return "popup.html";
         if (leaf.IndexOfAny(new[] { '/', '\\', ':', ' ' }) >= 0

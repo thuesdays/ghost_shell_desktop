@@ -8,6 +8,7 @@
         xmlns:vm="clr-namespace:GhostShell.App.ViewModels"
         xmlns:nav="clr-namespace:GhostShell.App.Navigation"
         xmlns:common="clr-namespace:GhostShell.App.Common"
+        xmlns:ctrl="clr-namespace:GhostShell.App.Controls"
         d:DataContext="{d:DesignInstance Type=vm:MainViewModel}"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
@@ -139,18 +140,12 @@
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
-                        <TextBlock Grid.Column="0"
-                                   Text="{Binding Icon}"
-                                   FontFamily="Segoe MDL2 Assets"
-                                   FontSize="20"
-                                   Foreground="{Binding IconBrush}"
-                                   Opacity="1"
+                        <ctrl:Icon Grid.Column="0"
+                                   Data="{Binding Icon, Converter={StaticResource IconKeyToGeometry}}"
+                                   Stroke="{Binding IconBrush}"
+                                   Size="21"
                                    HorizontalAlignment="Center"
-                                   VerticalAlignment="Center"
-                                   UseLayoutRounding="True"
-                                   SnapsToDevicePixels="True"
-                                   TextOptions.TextRenderingMode="ClearType"
-                                   TextOptions.TextFormattingMode="Ideal"/>
+                                   VerticalAlignment="Center"/>
                         <TextBlock Grid.Column="1"
                                    Text="{Binding Label}"
                                    Foreground="{StaticResource Text}"
@@ -168,11 +163,10 @@
                         <!-- Chevron rotates 90° when popup is open
                              so the user has a clear "expanded" cue
                              beyond the active accent bar. -->
-                        <TextBlock Grid.Column="2"
-                                   Text="&#xE76C;"
-                                   FontFamily="Segoe MDL2 Assets"
-                                   FontSize="10"
-                                   Foreground="{StaticResource TextDim}"
+                        <ctrl:Icon Grid.Column="2"
+                                   Data="{StaticResource Icon.ChevronRight}"
+                                   Stroke="{StaticResource TextDim}"
+                                   Size="13"
                                    VerticalAlignment="Center"
                                    Margin="0,0,8,0"
                                    Visibility="{Binding ElementName=SidebarBorder, Path=IsMouseOver,
@@ -278,19 +272,13 @@
                                     <ColumnDefinition Width="56"/>
                                     <ColumnDefinition Width="*"/>
                                 </Grid.ColumnDefinitions>
-                                <TextBlock Grid.Column="0"
+                                <ctrl:Icon Grid.Column="0"
                                            x:Name="IconText"
-                                           Text="{Binding Icon}"
-                                           FontFamily="Segoe MDL2 Assets"
-                                           FontSize="20"
-                                           Foreground="{Binding IconBrush}"
-                                           Opacity="1"
+                                           Data="{Binding Icon, Converter={StaticResource IconKeyToGeometry}}"
+                                           Stroke="{Binding IconBrush}"
+                                           Size="21"
                                            HorizontalAlignment="Center"
-                                           VerticalAlignment="Center"
-                                           UseLayoutRounding="True"
-                                           SnapsToDevicePixels="True"
-                                           TextOptions.TextRenderingMode="ClearType"
-                                           TextOptions.TextFormattingMode="Ideal"/>
+                                           VerticalAlignment="Center"/>
                                 <TextBlock Grid.Column="1"
                                            x:Name="LabelText"
                                            Text="{Binding Label}"
@@ -391,8 +379,9 @@
                             </Style>
                         </Button.Style>
                         <StackPanel Orientation="Horizontal">
-                            <TextBlock FontFamily="Segoe MDL2 Assets" FontSize="10"
-                                       Text="&#xE72B;"
+                            <ctrl:Icon Data="{StaticResource Icon.Back}"
+                                       Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                                       Size="15"
                                        VerticalAlignment="Center"
                                        Margin="0,0,6,0"/>
                             <TextBlock Text="Back" VerticalAlignment="Center"/>
@@ -414,8 +403,9 @@
                             ToolTip="Notifications"
                             Padding="12,0">
                         <Grid>
-                            <TextBlock FontFamily="Segoe MDL2 Assets" FontSize="13"
-                                       Text="&#xEA8F;"/>
+                            <ctrl:Icon Data="{StaticResource Icon.Bell}"
+                                       Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                                       Size="18"/>
                             <Border CornerRadius="8" MinWidth="14" Height="14"
                                     Padding="3,0"
                                     HorizontalAlignment="Right" VerticalAlignment="Top"
@@ -450,19 +440,22 @@
                          render as empty boxes on Win10. -->
                     <Button Style="{StaticResource ChromeButton}"
                             Click="OnMinimize" ToolTip="Minimize">
-                        <TextBlock FontFamily="Segoe MDL2 Assets" FontSize="10"
-                                   Text="&#xE921;"/>
+                        <ctrl:Icon Data="{StaticResource Icon.Minimize}"
+                                   Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                                   Size="15"/>
                     </Button>
                     <Button Style="{StaticResource ChromeButton}"
                             Click="OnToggleMaximize"
                             ToolTip="Maximize / Restore">
-                        <TextBlock x:Name="MaxIcon" FontFamily="Segoe MDL2 Assets"
-                                   FontSize="10" Text="&#xE922;"/>
+                        <ctrl:Icon x:Name="MaxIcon" Data="{StaticResource Icon.Maximize}"
+                                   Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                                   Size="14"/>
                     </Button>
                     <Button Style="{StaticResource ChromeButtonClose}"
                             Click="OnClose" ToolTip="Close">
-                        <TextBlock FontFamily="Segoe MDL2 Assets" FontSize="10"
-                                   Text="&#xE8BB;"/>
+                        <ctrl:Icon Data="{StaticResource Icon.Close}"
+                                   Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                                   Size="15"/>
                     </Button>
                 </StackPanel>
             </Grid>

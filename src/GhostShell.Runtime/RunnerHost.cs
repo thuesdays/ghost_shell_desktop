@@ -299,27 +299,11 @@ public sealed class RunnerHost : IHostedService, IDisposable
             return;
         }
 
-        // Phase 71cc — persistent daily-fire cap (Simple trigger).
-        // The counter lives in the schedules.fires_today column so it
-        // survives app restarts. Pre-fix: in-memory counter reset to
-        // zero on every relaunch and the user could blow past the cap
-        // by relaunching mid-day.
-        if (s.TriggerKind == ScheduleTriggerKind.Simple
-            && s.RunsPerDay is { } cap and > 0)
-        {
-            var todayCount = await _schedules.GetFiresTodayAsync(
-                s.Id, DateOnly.FromDateTime(localNow), ct);
-            if (todayCount >= cap)
-            {
-                var tomorrow = ComputeTomorrowStart(s, localNow);
-                var nextUtc = DateTime.SpecifyKind(tomorrow, DateTimeKind.Local).ToUniversalTime();
-                await _schedules.RecordDeferralAsync(s.Id, nextUtc, ct);
-                _log.LogInformation(
-                    "Schedule #{Id} '{Name}' hit daily cap {Cap} — defer to {Next}",
-                    s.Id, s.Name, cap, nextUtc);
-                return;
-            }
-        }
+        // audit DATA-05 — the persistent daily-fire cap is now CONSUMED
+        // atomically just before the launch (below, after the capacity
+        // gate), not read here. The old read-here / increment-after-fire
+        // split let two interleaved ticks both observe fires_today < cap
+        // and fire cap+1 times. See the TryConsumeDailyFireAsync block.
 
         // Concurrency cap. ActiveProfileNames returns a snapshot;
         // we re-check inside Fire*Async right before StartAsync to
@@ -333,6 +317,31 @@ public sealed class RunnerHost : IHostedService, IDisposable
                 "Schedule #{Id} '{Name}' deferred — runner cap {Cap} reached",
                 s.Id, s.Name, MaxParallelLaunches);
             return;
+        }
+
+        // audit DATA-05 — atomically consume a daily-cap slot immediately
+        // before launching. Placed AFTER the capacity gate so a
+        // runner-full deferral never burns a daily slot; the consume
+        // itself is one gated check-and-increment SQL statement, so two
+        // interleaved ticks can't both pass under cap. If the launch then
+        // fails or is deferred (target busy), we refund the slot below.
+        bool consumedDailyFire = false;
+        if (s.TriggerKind == ScheduleTriggerKind.Simple
+            && s.RunsPerDay is { } cap and > 0)
+        {
+            var consumed = await _schedules.TryConsumeDailyFireAsync(
+                s.Id, DateOnly.FromDateTime(localNow), cap, ct);
+            if (consumed is null)
+            {
+                var tomorrow = ComputeTomorrowStart(s, localNow);
+                var nextUtc = DateTime.SpecifyKind(tomorrow, DateTimeKind.Local).ToUniversalTime();
+                await _schedules.RecordDeferralAsync(s.Id, nextUtc, ct);
+                _log.LogInformation(
+                    "Schedule #{Id} '{Name}' hit daily cap {Cap} — defer to {Next}",
+                    s.Id, s.Name, cap, nextUtc);
+                return;
+            }
+            consumedDailyFire = true;
         }
 
         var outcome = FireOutcome.Failed;
@@ -399,6 +408,11 @@ public sealed class RunnerHost : IHostedService, IDisposable
             // bump fire_count or fail_count. Pre-fix: hitting an
             // already-running profile incremented fire_count which
             // inflated stats and spammed the activity log.
+            // audit DATA-05: no launch happened, so return the daily slot
+            // we consumed pre-fire — otherwise a repeatedly-busy target
+            // would silently drain the day's quota without ever running.
+            if (consumedDailyFire)
+                await _schedules.RefundDailyFireAsync(s.Id, DateOnly.FromDateTime(localNow), ct);
             await _schedules.RecordDeferralAsync(s.Id, nextFire, ct);
             _log.LogDebug(
                 "Schedule #{Id} '{Name}' deferred — target busy, retry at {Next}",
@@ -408,13 +422,10 @@ public sealed class RunnerHost : IHostedService, IDisposable
 
         if (outcome == FireOutcome.Launched)
         {
-            // Phase 71cc — persistent counter bump for Simple schedules.
-            // Atomic UPSERT in the SQL — handles the day-rollover case
-            // (yesterday's row → today gets reset to 1 instead of N+1).
-            if (s.TriggerKind == ScheduleTriggerKind.Simple)
-                await _schedules.IncrementFiresTodayAsync(
-                    s.Id, DateOnly.FromDateTime(localNow), ct);
-
+            // audit DATA-05: the daily slot was already consumed atomically
+            // before the launch (TryConsumeDailyFireAsync) — no separate
+            // post-fire increment here, which is what created the
+            // check/increment race in the first place.
             await _schedules.RecordFiredAsync(s.Id, utcNow, nextFire, ct);
             // Phase 71ll — stamp the in-memory last-fire tracker so
             // the min-gap guard at the top of FireAsync can reject
@@ -426,6 +437,12 @@ public sealed class RunnerHost : IHostedService, IDisposable
         }
         else
         {
+            // audit DATA-05: a real failure didn't launch either — refund
+            // the consumed slot so transient failures don't quietly eat
+            // the day's quota (matches the old "increment only on Launched"
+            // semantics, now race-free).
+            if (consumedDailyFire)
+                await _schedules.RefundDailyFireAsync(s.Id, DateOnly.FromDateTime(localNow), ct);
             // Real failure path — bump fail_count and apply
             // exponential back-off (×2, ×4, ×8…) capped at 1h. Bit-
             // shift instead of Math.Pow → avoids any double→int

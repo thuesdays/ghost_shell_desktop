@@ -197,31 +197,34 @@ public sealed partial class MainViewModel : ObservableObject
 
     private static ObservableCollection<SidebarRow> BuildNavItems() => new()
     {
+        // Redesign 2026-06 — Icon is now a vector-icon KEY (resolved to a
+        // Geometry in Icons.xaml via IconKeyToGeometryConverter), not an
+        // MDL2 glyph char. Keys map 1:1 to <PathGeometry x:Key="Icon.<Key>">.
         SidebarRow.Section("Workspace"),
-        new SidebarRow { PageKey = "overview",  Label = "Overview",  Icon = Glyph(0xE80F), IconBrush = Hue("HueBlue")   }, // Home
-        new SidebarRow { PageKey = "profiles",  Label = "Profiles",  Icon = Glyph(0xE77B), IconBrush = Hue("HueGreen")  }, // Contact
-        new SidebarRow { PageKey = "groups",    Label = "Groups",    Icon = Glyph(0xE902), IconBrush = Hue("HueIndigo") }, // FolderHorizontal
+        new SidebarRow { PageKey = "overview",  Label = "Overview",  Icon = "Home",     IconBrush = Hue("HueBlue")   },
+        new SidebarRow { PageKey = "profiles",  Label = "Profiles",  Icon = "Profiles", IconBrush = Hue("HueGreen")  },
+        new SidebarRow { PageKey = "groups",    Label = "Groups",    Icon = "Groups",   IconBrush = Hue("HueIndigo") },
 
         // Scripts is automation territory — pulled out of Workspace
         // so the sidebar groups by what each section does (Workspace
         // = entities, Automation = behaviour, Identity = stealth,
         // Monitoring = observation).
         SidebarRow.Section("Automation"),
-        new SidebarRow { PageKey = "scripts",   Label = "Scripts",   Icon = Glyph(0xE7C3), IconBrush = Hue("HueAmber")  }, // Page
+        new SidebarRow { PageKey = "scripts",   Label = "Scripts",   Icon = "Scripts",  IconBrush = Hue("HueAmber")  },
 
         SidebarRow.Section("Identity"),
-        new SidebarRow { PageKey = "proxy",       Label = "Proxy",        Icon = Glyph(0xE968), IconBrush = Hue("HueTeal")   }, // Globe
-        new SidebarRow { PageKey = "fingerprint", Label = "Fingerprint",  Icon = Glyph(0xE8FD), IconBrush = Hue("HueGreen")  }, // Identity
-        new SidebarRow { PageKey = "sessions",    Label = "Sessions",     Icon = Glyph(0xE81C), IconBrush = Hue("HueViolet") }, // Library
-        new SidebarRow { PageKey = "packs",       Label = "Cookie packs", Icon = Glyph(0xE7B8), IconBrush = Hue("HuePink")   }, // Package
+        new SidebarRow { PageKey = "proxy",       Label = "Proxy",        Icon = "Globe",       IconBrush = Hue("HueTeal")   },
+        new SidebarRow { PageKey = "fingerprint", Label = "Fingerprint",  Icon = "Fingerprint", IconBrush = Hue("HueGreen")  },
+        new SidebarRow { PageKey = "sessions",    Label = "Sessions",     Icon = "Sessions",    IconBrush = Hue("HueViolet") },
+        new SidebarRow { PageKey = "packs",       Label = "Cookie packs", Icon = "Cookies",     IconBrush = Hue("HuePink")   },
         // Phase 25 — credential vault. Lives in Identity because it's
         // identity-adjacent (logins for sites the profile pretends to be).
-        new SidebarRow { PageKey = "vault",       Label = "Vault",        Icon = Glyph(0xE192), IconBrush = Hue("HueAmber")  }, // Lock
+        new SidebarRow { PageKey = "vault",       Label = "Vault",        Icon = "Vault",       IconBrush = Hue("HueAmber")  },
         // Phase 27 — browser extensions. Sits in Identity because the
         // set of extensions a profile loads is part of how that profile
         // looks to sites (uBlock blocking trackers, MetaMask leaking
         // wallet-specific JS APIs, etc.).
-        new SidebarRow { PageKey = "extensions",  Label = "Extensions",   Icon = Glyph(0xECAA), IconBrush = Hue("HuePink")   }, // Puzzle
+        new SidebarRow { PageKey = "extensions",  Label = "Extensions",   Icon = "Extensions",  IconBrush = Hue("HuePink")   },
 
         // Phase 71q — Competitors and Monitoring (group) merged into
         // Identity for a tighter, single-section feel. The legacy
@@ -229,21 +232,21 @@ public sealed partial class MainViewModel : ObservableObject
         // dividers visually, all secondary surfaces live under one
         // umbrella. Settings moves out entirely (now in FooterItems
         // pinned to the sidebar bottom).
-        new SidebarRow { PageKey = "competitors", Label = "Competitors", Icon = Glyph(0xE9F9), IconBrush = Hue("HueOrange") }, // BankBuilding
+        new SidebarRow { PageKey = "competitors", Label = "Competitors", Icon = "Competitors", IconBrush = Hue("HueOrange") },
 
         new SidebarRow
         {
             PageKey   = null,                    // group has no page of its own
             Label     = "Monitoring",
-            Icon      = Glyph(0xE9D9),           // BarChart4Legend
+            Icon      = "Traffic",
             IconBrush = Hue("HueBlue"),
             Children  = new[]
             {
-                new SidebarRow { PageKey = "scheduler", Label = "Scheduler", Icon = Glyph(0xE787), IconBrush = Hue("HueAmber")  }, // Calendar
-                new SidebarRow { PageKey = "runs",      Label = "Runs",      Icon = Glyph(0xE823), IconBrush = Hue("HueOrange") }, // History
-                new SidebarRow { PageKey = "queue",     Label = "Queue",     Icon = Glyph(0xE71D), IconBrush = Hue("HueTeal")   }, // Boards
-                new SidebarRow { PageKey = "traffic",   Label = "Traffic",   Icon = Glyph(0xE9D9), IconBrush = Hue("HueBlue")   }, // BarChart4Legend
-                new SidebarRow { PageKey = "logs",      Label = "Logs",      Icon = Glyph(0xE7C3), IconBrush = Hue("HueAmber")  }, // Page
+                new SidebarRow { PageKey = "scheduler", Label = "Scheduler", Icon = "Scheduler", IconBrush = Hue("HueAmber")  },
+                new SidebarRow { PageKey = "runs",      Label = "Runs",      Icon = "Runs",      IconBrush = Hue("HueOrange") },
+                new SidebarRow { PageKey = "queue",     Label = "Queue",     Icon = "Queue",     IconBrush = Hue("HueTeal")   },
+                new SidebarRow { PageKey = "traffic",   Label = "Traffic",   Icon = "Traffic",   IconBrush = Hue("HueBlue")   },
+                new SidebarRow { PageKey = "logs",      Label = "Logs",      Icon = "Logs",      IconBrush = Hue("HueAmber")  },
             },
         },
     };
@@ -254,7 +257,7 @@ public sealed partial class MainViewModel : ObservableObject
     /// land here too.</summary>
     private static ObservableCollection<SidebarRow> BuildFooterItems() => new()
     {
-        new SidebarRow { PageKey = "settings", Label = "Settings", Icon = Glyph(0xE713), IconBrush = Hue("HueSlate") },
+        new SidebarRow { PageKey = "settings", Label = "Settings", Icon = "Settings", IconBrush = Hue("HueSlate") },
     };
 }
 

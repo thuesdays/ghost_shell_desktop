@@ -39,6 +39,16 @@ public sealed class DeviceTemplateBuilder
     public string ChromeMajor { get; }
     public string ChromeFull { get; }
 
+    /// <summary>
+    /// Effective OS used to drive every OS-coherent field. Normally equals
+    /// the template's own <c>Os</c>, but coerces an impossible combination — a
+    /// <see cref="FormFactor.Mobile"/> template left at the default
+    /// <see cref="DeviceOs.Windows"/> — to <see cref="DeviceOs.Android"/>
+    /// (there is no Windows phone). Callers that set FormFactor only (no
+    /// explicit Os) therefore still get a coherent mobile fingerprint.
+    /// </summary>
+    public DeviceOs Os { get; }
+
     private readonly Random _rng;       // seeds main payload fields
     private readonly Random _noiseRng;  // seeds noise.* fields only
     private Dictionary<string, object?>? _cached;
@@ -69,6 +79,7 @@ public sealed class DeviceTemplateBuilder
     {
         ProfileName = profileName;
         Template    = template;
+        Os          = ResolveOs(template);
         Language    = string.IsNullOrWhiteSpace(language) ? "en-US" : language;
         TimezoneId  = string.IsNullOrWhiteSpace(timezoneId) ? "Europe/Kyiv" : timezoneId;
 
@@ -84,6 +95,16 @@ public sealed class DeviceTemplateBuilder
         var (major, full) = ChromeVersions.PickWeighted(_rng, chromeMin, chromeMax);
         ChromeMajor = major;
         ChromeFull  = full;
+    }
+
+    private static DeviceOs ResolveOs(DeviceTemplate t)
+    {
+        // A phone is never Windows. If a caller set FormFactor.Mobile but
+        // left Os at its Windows default, treat it as Android. (Tablets are
+        // left alone — Windows tablets like the Surface genuinely exist.)
+        if (t.Os == DeviceOs.Windows && t.FormFactor == FormFactor.Mobile)
+            return DeviceOs.Android;
+        return t.Os;
     }
 
     private static Random MakeRng(string seedSrc)
@@ -170,32 +191,70 @@ public sealed class DeviceTemplateBuilder
         ["platform"]              = TemplatePlatform(),
         ["hardware_concurrency"]  = ClampCpu(Template.CpuCores),
         ["device_memory"]         = ClampMemory(Template.RamGb),
-        ["max_touch_points"]      = Template.FormFactor == FormFactor.Mobile ? 5 : 0,
+        // audit FINGERPRINT-11: touch-capable form factors (phones AND
+        // tablets) report touch points; desktops/laptops report 0.
+        ["max_touch_points"]      = (Template.FormFactor is FormFactor.Mobile or FormFactor.Tablet) ? 5 : 0,
         ["pdf_viewer_enabled"]    = true,
     };
 
     private string BuildUserAgent()
     {
-        // Modern Chromium UA shape (≥ 100). Mobile gets a different OS
-        // string. The C++ patches read this verbatim and override
-        // navigator.userAgent at the V8 level; we don't need to also
-        // pass --user-agent= because the patched binary already does
-        // its own override-from-payload step.
+        // audit FINGERPRINT-01/03: UA is now driven by the explicit
+        // Os single source of truth — NOT by FormFactor alone.
+        // Previously every non-mobile template emitted a Windows UA (so
+        // MacBooks/iPads looked like Windows) and every mobile template
+        // emitted a hardcoded "Android 14; Pixel 7" UA (so iPhones became
+        // Androids and all Samsung/Xiaomi reported a Pixel). The C++
+        // patches read this verbatim and override navigator.userAgent.
         var maj = ChromeMajor;
-        if (Template.FormFactor == FormFactor.Mobile)
+        return Os switch
         {
-            return $"Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 " +
-                   $"(KHTML, like Gecko) Chrome/{maj}.0.0.0 Mobile Safari/537.36";
-        }
-        return $"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-               $"(KHTML, like Gecko) Chrome/{maj}.0.0.0 Safari/537.36";
+            // Chrome on macOS reports "Intel Mac OS X 10_15_7" even on
+            // Apple Silicon — Chrome froze this token years ago. Real.
+            DeviceOs.MacOs =>
+                $"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
+                $"(KHTML, like Gecko) Chrome/{maj}.0.0.0 Safari/537.36",
+
+            DeviceOs.Android =>
+                $"Mozilla/5.0 (Linux; Android 14; {AndroidModel()}) AppleWebKit/537.36 " +
+                $"(KHTML, like Gecko) Chrome/{maj}.0.0.0 Mobile Safari/537.36",
+
+            // iOS browsers are WebKit; Chrome-for-iOS uses the CriOS token.
+            // NOTE: fully emulating iOS on a Blink engine is only partially
+            // coherent (real iOS lacks navigator.userAgentData and exposes a
+            // WebKit WebGL stack). We keep UA/platform/GPU/fonts internally
+            // consistent so the gross "three OSes in one fingerprint" tell is
+            // gone; deeper iOS parity needs a WebKit engine. See README/audit.
+            DeviceOs.IOs => Template.FormFactor == FormFactor.Tablet
+                ? $"Mozilla/5.0 (iPad; CPU OS 17_5 like Mac OS X) AppleWebKit/605.1.15 " +
+                  $"(KHTML, like Gecko) CriOS/{maj}.0.0.0 Mobile/15E148 Safari/604.1"
+                : $"Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 " +
+                  $"(KHTML, like Gecko) CriOS/{maj}.0.0.0 Mobile/15E148 Safari/604.1",
+
+            DeviceOs.Linux =>
+                $"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 " +
+                $"(KHTML, like Gecko) Chrome/{maj}.0.0.0 Safari/537.36",
+
+            _ =>
+                $"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+                $"(KHTML, like Gecko) Chrome/{maj}.0.0.0 Safari/537.36",
+        };
     }
 
-    private string TemplatePlatform() => Template.FormFactor switch
+    /// <summary>Android model token for the UA (e.g. "Pixel 8 Pro", "SM-S928B").</summary>
+    private string AndroidModel() =>
+        !string.IsNullOrWhiteSpace(Template.UaModel) ? Template.UaModel!
+        : !string.IsNullOrWhiteSpace(Template.HumanName) ? Template.HumanName!
+        : "Pixel 7";
+
+    private string TemplatePlatform() => Os switch
     {
-        FormFactor.Mobile => "Linux armv8l",
-        FormFactor.Tablet => "Linux armv8l",
-        _                 => "Win32",
+        // audit FINGERPRINT-01: navigator.platform must agree with the OS.
+        DeviceOs.MacOs   => "MacIntel",        // Chrome reports MacIntel even on ARM Macs
+        DeviceOs.Android => "Linux armv8l",
+        DeviceOs.IOs     => Template.FormFactor == FormFactor.Tablet ? "iPad" : "iPhone",
+        DeviceOs.Linux   => "Linux x86_64",
+        _                => "Win32",
     };
 
     private static int ClampCpu(int requested)
@@ -263,16 +322,35 @@ public sealed class DeviceTemplateBuilder
         var w = Template.ScreenWidth  > 0 ? Template.ScreenWidth  : 1920;
         var h = Template.ScreenHeight > 0 ? Template.ScreenHeight : 1080;
         var dpr = Template.Dpr > 0 ? Template.Dpr : 1.0;
-        var availJitter = _rng.Next(40, 60); // taskbar height variance
+
+        // audit FINGERPRINT-08: only desktop OSes have a taskbar/dock (the
+        // availHeight gap) and a multi-monitor screen offset. Phones and
+        // tablets fill the whole screen — availHeight == height and
+        // screenX/screenY are 0. Emitting a desktop taskbar gap on a
+        // "mobile" profile is an instant inconsistency.
+        var isDesktop = Os is DeviceOs.Windows or DeviceOs.MacOs or DeviceOs.Linux;
+        int availH, screenX, screenY;
+        if (isDesktop)
+        {
+            availH  = h - _rng.Next(40, 60); // taskbar/dock height variance
+            screenX = _rng.Next(0, 50);
+            screenY = _rng.Next(0, 30);
+        }
+        else
+        {
+            availH  = h;
+            screenX = 0;
+            screenY = 0;
+        }
         return new Dictionary<string, object?>
         {
             ["width"]         = w,
             ["height"]        = h,
-            ["avail_height"]  = h - availJitter,
+            ["avail_height"]  = availH,
             ["color_depth"]   = 24,
             ["pixel_ratio"]   = dpr,
-            ["screen_x"]      = _rng.Next(0, 50),
-            ["screen_y"]      = _rng.Next(0, 30),
+            ["screen_x"]      = screenX,
+            ["screen_y"]      = screenY,
             ["orientation"]   = w >= h ? "landscape-primary" : "portrait-primary",
         };
     }
@@ -318,23 +396,85 @@ public sealed class DeviceTemplateBuilder
 
     private (string Vendor, string Renderer, string WebGpu) ResolveGpuStrings()
     {
-        var gpu = (Template.GpuModel ?? "").ToLowerInvariant();
+        var gpu   = (Template.GpuModel ?? "").ToLowerInvariant();
+        var model = string.IsNullOrEmpty(Template.GpuModel) ? "" : Template.GpuModel!;
+
+        // audit FINGERPRINT-10: Apple — distinguish macOS (Blink → ANGLE
+        // Metal backend) from iOS (WebKit → generic "Apple GPU"). The old
+        // code returned "Apple Apple M3 Max" (doubled prefix) for both.
+        if (Os == DeviceOs.MacOs
+            || gpu.Contains("apple") || gpu.Contains("m1") || gpu.Contains("m2") || gpu.Contains("m3"))
+        {
+            if (Os == DeviceOs.IOs)
+                return ("Apple Inc.", "Apple GPU", "apple");
+            var appleName = model.StartsWith("Apple", StringComparison.OrdinalIgnoreCase)
+                ? model : $"Apple {model}".Trim();
+            return ("Google Inc. (Apple)",
+                    $"ANGLE (Apple, ANGLE Metal Renderer: {appleName}, Unspecified Version)",
+                    "apple");
+        }
+        if (Os == DeviceOs.IOs)
+            return ("Apple Inc.", "Apple GPU", "apple");
+
+        // audit FINGERPRINT-02: Android/ARM mobile GPUs render via OpenGL ES
+        // through ANGLE — NEVER Direct3D11 (a Windows-only API). A phone
+        // reporting "...Direct3D11..." is an instant bot signal.
+        if (gpu.Contains("mali"))
+            return ("ARM", $"ANGLE (ARM, {model}, OpenGL ES 3.2)", "mali");
+        if (gpu.Contains("adreno") || gpu.Contains("qualcomm"))
+        {
+            var num = new string(model.Where(char.IsDigit).ToArray());
+            return ("Qualcomm",
+                    $"ANGLE (Qualcomm, Adreno (TM) {(num.Length > 0 ? num : "740")}, OpenGL ES 3.2)",
+                    "adreno");
+        }
+
+        // Desktop discrete / integrated (Windows / Linux, Direct3D11 / GL).
+        // audit FINGERPRINT-06: the PCI device id now varies per GPU model
+        // instead of a single constant shared by every NVIDIA/AMD/Intel card.
         if (gpu.Contains("nvidia") || gpu.Contains("geforce") || gpu.Contains("rtx"))
             return ("Google Inc. (NVIDIA)",
-                    $"ANGLE (NVIDIA, NVIDIA {Template.GpuModel} (0x00002684) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+                    $"ANGLE (NVIDIA, NVIDIA {model} ({GpuDeviceId(gpu)}) Direct3D11 vs_5_0 ps_5_0, D3D11)",
                     "nvidia");
         if (gpu.Contains("amd") || gpu.Contains("radeon"))
             return ("Google Inc. (AMD)",
-                    $"ANGLE (AMD, AMD {Template.GpuModel} (0x000067DF) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+                    $"ANGLE (AMD, AMD {model} ({GpuDeviceId(gpu)}) Direct3D11 vs_5_0 ps_5_0, D3D11)",
                     "amd");
-        if (gpu.Contains("apple") || gpu.Contains("m1") || gpu.Contains("m2") || gpu.Contains("m3"))
-            return ("Apple Inc.", $"Apple {Template.GpuModel}", "apple");
-        if (gpu.Contains("qualcomm") || gpu.Contains("adreno"))
-            return ("Qualcomm Inc.", Template.GpuModel ?? "Adreno 740", "qualcomm");
-        // Default: Intel integrated.
+
+        // audit FINGERPRINT-02: an Android template that didn't match a known
+        // mobile GPU must still resolve to ARM/GLES, never the Intel default.
+        if (Os == DeviceOs.Android)
+            return ("ARM", "ANGLE (ARM, Mali-G715, OpenGL ES 3.2)", "mali");
+
+        // Default: Intel integrated (desktop Windows/Linux only).
+        var intelName = string.IsNullOrEmpty(model) ? "UHD Graphics 770" : model;
         return ("Google Inc. (Intel)",
-                $"ANGLE (Intel, Intel(R) {(string.IsNullOrEmpty(Template.GpuModel) ? "UHD Graphics 770" : Template.GpuModel)} (0x00009A60) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+                $"ANGLE (Intel, Intel(R) {intelName} ({GpuDeviceId(gpu)}) Direct3D11 vs_5_0 ps_5_0, D3D11)",
                 "intel");
+    }
+
+    /// <summary>
+    /// audit FINGERPRINT-06: representative PCI device id per GPU family so
+    /// the WebGL renderer string doesn't betray a single shared constant.
+    /// Values approximate real device ids; fall back to a vendor default.
+    /// </summary>
+    private static string GpuDeviceId(string gpuLower)
+    {
+        var map = new (string Key, string Id)[]
+        {
+            ("rtx 4090",   "0x00002684"), ("rtx 4080",   "0x00002702"),
+            ("rtx 4070 super", "0x00002783"), ("4060 laptop", "0x000028E0"),
+            ("rtx 4070",   "0x00002786"), ("rtx 4060",   "0x00002882"),
+            ("a4000",      "0x000024B0"),
+            ("rx 7900",    "0x0000744C"), ("rx 6600",    "0x000073FF"),
+            ("iris",       "0x00009A49"), ("arc",        "0x00007D55"),
+            ("uhd graphics 770", "0x00004680"), ("uhd graphics", "0x00009BC4"),
+        };
+        foreach (var (key, id) in map)
+            if (gpuLower.Contains(key)) return id;
+        if (gpuLower.Contains("nvidia") || gpuLower.Contains("geforce") || gpuLower.Contains("rtx")) return "0x00002684";
+        if (gpuLower.Contains("amd") || gpuLower.Contains("radeon")) return "0x0000744C";
+        return "0x00009A60";
     }
 
     private static string ResolveWebGpuArch(string vendor) => vendor switch
@@ -348,11 +488,15 @@ public sealed class DeviceTemplateBuilder
 
     private string ResolveGpuTier()
     {
+        // Mobile/tablet (Android/iOS) GPUs are the "mobile" tier regardless
+        // of the marketing model string.
+        if (Os is DeviceOs.Android or DeviceOs.IOs
+            || Template.FormFactor is FormFactor.Mobile or FormFactor.Tablet)
+            return "mobile";
         var gpu = (Template.GpuModel ?? "").ToLowerInvariant();
         if (gpu.Contains("rtx 40") || gpu.Contains("rtx 50")) return "discrete_modern";
         if (gpu.Contains("rtx") || gpu.Contains("rx 7")) return "discrete_modern";
-        if (gpu.Contains("intel")) return "integrated_modern";
-        if (Template.FormFactor == FormFactor.Mobile) return "mobile";
+        if (gpu.Contains("intel") || gpu.Contains("apple")) return "integrated_modern";
         return "integrated_modern";
     }
 
@@ -433,9 +577,14 @@ public sealed class DeviceTemplateBuilder
 
     private object? BuildBattery()
     {
-        // Desktops report null (Battery API blocked / not present);
-        // laptops + mobiles report a charging status.
-        if (Template.FormFactor == FormFactor.Mobile || Template.IsLaptop)
+        // audit FINGERPRINT cluster: the Battery Status API is exposed by
+        // Chrome on Android and by Blink on battery-equipped desktops
+        // (Win/Mac/Linux laptops). It is NOT exposed on iOS (WebKit dropped
+        // it) nor on desktops without a battery. An iPhone reporting a
+        // battery object — or a Mac Studio reporting one — is a tell.
+        var hasBattery = Os == DeviceOs.Android
+                         || (Template.IsLaptop && Os != DeviceOs.IOs);
+        if (hasBattery)
         {
             return new Dictionary<string, object?>
             {
@@ -448,14 +597,24 @@ public sealed class DeviceTemplateBuilder
         return null;
     }
 
-    private Dictionary<string, object?> BuildConnection() => new()
+    private Dictionary<string, object?> BuildConnection()
     {
-        ["effective_type"] = "4g",
-        ["downlink"]       = Math.Round(8 + _rng.NextDouble() * 4, 1),
-        ["rtt"]            = _rng.Next(40, 100),
-        ["save_data"]      = false,
-        ["type"]           = Template.FormFactor == FormFactor.Mobile ? "cellular" : "wifi",
-    };
+        // audit FINGERPRINT-09: Chrome quantises NetworkInformation values
+        // for privacy — rtt to the nearest 25 ms and downlink to the nearest
+        // 0.05 Mbps (capped at 10). Emitting un-rounded values (e.g. rtt=73,
+        // downlink=10.4) is off the grid real Chrome uses and is itself an
+        // entropy tell.
+        var rtt      = (int)(Math.Round(_rng.Next(40, 100) / 25.0) * 25);
+        var downlink = Math.Min(10.0, Math.Round((8 + _rng.NextDouble() * 4) / 0.05) * 0.05);
+        return new Dictionary<string, object?>
+        {
+            ["effective_type"] = "4g",
+            ["downlink"]       = Math.Round(downlink, 2),
+            ["rtt"]            = rtt,
+            ["save_data"]      = false,
+            ["type"]           = Template.FormFactor == FormFactor.Mobile ? "cellular" : "wifi",
+        };
+    }
 
     // ─── media devices ───────────────────────────────────────────
 
@@ -498,31 +657,97 @@ public sealed class DeviceTemplateBuilder
 
     private IReadOnlyList<string> BuildFonts()
     {
-        // Curated allowlist: 27 Windows core fonts + 10-20 extended.
-        // The C++ patches use this to filter the response from the
-        // font-detection JS APIs (document.fonts.check, canvas measure).
-        var core = new[]
+        // audit FINGERPRINT-07: the installed-font list must match the OS.
+        // The old code emitted the Windows core font set for EVERY profile,
+        // so a "MacBook" or "iPhone" advertised Calibri/Segoe UI/MS Gothic —
+        // fonts that don't exist on macOS/iOS/Android and instantly betray
+        // the spoof. The C++ patches use this list to answer the font-probe
+        // JS APIs (document.fonts.check, canvas text-metrics).
+        switch (Os)
         {
-            "Arial", "Arial Black", "Calibri", "Cambria", "Cambria Math",
-            "Candara", "Comic Sans MS", "Consolas", "Constantia", "Corbel",
-            "Courier New", "Ebrima", "Franklin Gothic Medium", "Gabriola",
-            "Georgia", "Impact", "Lucida Console", "Lucida Sans Unicode",
-            "Microsoft Sans Serif", "MS Gothic", "MS PGothic", "Palatino Linotype",
-            "Segoe Print", "Segoe Script", "Segoe UI", "Sylfaen", "Tahoma",
-            "Times New Roman", "Trebuchet MS", "Verdana",
-        };
-        var extended = new[]
-        {
-            "Bahnschrift", "Cascadia Code", "Cascadia Mono", "JetBrains Mono",
-            "Inter", "Roboto", "Open Sans", "Source Sans Pro", "Source Code Pro",
-            "Fira Code", "Fira Sans", "Helvetica Neue", "DejaVu Sans",
-            "DejaVu Serif", "DejaVu Sans Mono",
-        };
-        // Sample 10-20 extended fonts deterministically.
+            case DeviceOs.MacOs:
+                return SampleFonts(MacCoreFonts, MacExtendedFonts);
+            case DeviceOs.IOs:
+                // iOS ships a fixed system font set — no user-installed fonts.
+                return IosFonts.Distinct().ToList();
+            case DeviceOs.Android:
+                // Android exposes a tiny, fixed font set (Roboto/Noto family).
+                return AndroidFonts.Distinct().ToList();
+            case DeviceOs.Linux:
+                return SampleFonts(LinuxCoreFonts, LinuxExtendedFonts);
+            default:
+                return SampleFonts(WindowsCoreFonts, WindowsExtendedFonts);
+        }
+    }
+
+    /// <summary>core + a deterministic 10-15 sample of extended (desktop only).</summary>
+    private IReadOnlyList<string> SampleFonts(string[] core, string[] extended)
+    {
         var pickCount = _rng.Next(10, 16);
         var picks = extended.OrderBy(_ => _rng.Next()).Take(pickCount);
         return core.Concat(picks).Distinct().ToList();
     }
+
+    private static readonly string[] WindowsCoreFonts =
+    {
+        "Arial", "Arial Black", "Calibri", "Cambria", "Cambria Math",
+        "Candara", "Comic Sans MS", "Consolas", "Constantia", "Corbel",
+        "Courier New", "Ebrima", "Franklin Gothic Medium", "Gabriola",
+        "Georgia", "Impact", "Lucida Console", "Lucida Sans Unicode",
+        "Microsoft Sans Serif", "MS Gothic", "MS PGothic", "Palatino Linotype",
+        "Segoe Print", "Segoe Script", "Segoe UI", "Sylfaen", "Tahoma",
+        "Times New Roman", "Trebuchet MS", "Verdana",
+    };
+    private static readonly string[] WindowsExtendedFonts =
+    {
+        "Bahnschrift", "Cascadia Code", "Cascadia Mono", "JetBrains Mono",
+        "Inter", "Roboto", "Open Sans", "Source Sans Pro", "Source Code Pro",
+        "Fira Code", "Fira Sans", "Helvetica Neue", "DejaVu Sans",
+        "DejaVu Serif", "DejaVu Sans Mono",
+    };
+    private static readonly string[] MacCoreFonts =
+    {
+        "Helvetica", "Helvetica Neue", "Arial", "Arial Black", "Times",
+        "Times New Roman", "Courier", "Courier New", "Georgia", "Verdana",
+        "Trebuchet MS", "Comic Sans MS", "Impact", "Lucida Grande", "Geneva",
+        "Menlo", "Monaco", "Palatino", "Optima", "Gill Sans", "Hoefler Text",
+        "Baskerville", "Didot", "Futura", "Avenir", "Avenir Next",
+        "American Typewriter", "Apple Color Emoji", "Apple SD Gothic Neo",
+        "Hiragino Sans", "PingFang SC",
+    };
+    private static readonly string[] MacExtendedFonts =
+    {
+        "Arial Narrow", "Brush Script MT", "Chalkboard", "Cochin", "Copperplate",
+        "Marker Felt", "Noteworthy", "Papyrus", "Phosphate", "Rockwell",
+        "Savoye LET", "SignPainter", "Snell Roundhand", "Zapfino",
+        "Andale Mono", "Big Caslon", "Bodoni 72", "Charter",
+    };
+    private static readonly string[] IosFonts =
+    {
+        "Helvetica", "Helvetica Neue", "Arial", "Times New Roman", "Georgia",
+        "Courier New", "Verdana", "Trebuchet MS", "Avenir", "Avenir Next",
+        "Palatino", "Marker Felt", "Snell Roundhand", "Apple Color Emoji",
+        "Menlo", "Damascus", "Kohinoor",
+    };
+    private static readonly string[] AndroidFonts =
+    {
+        "Roboto", "Roboto Condensed", "Noto Sans", "Noto Serif",
+        "Noto Sans Mono", "Noto Color Emoji", "Droid Sans", "Droid Serif",
+        "Droid Sans Mono", "sans-serif", "monospace",
+    };
+    private static readonly string[] LinuxCoreFonts =
+    {
+        "DejaVu Sans", "DejaVu Serif", "DejaVu Sans Mono", "Liberation Sans",
+        "Liberation Serif", "Liberation Mono", "Ubuntu", "Ubuntu Mono",
+        "Noto Sans", "Noto Serif", "Cantarell", "FreeSans", "FreeSerif",
+        "FreeMono", "Droid Sans",
+    };
+    private static readonly string[] LinuxExtendedFonts =
+    {
+        "Fira Sans", "Fira Code", "Source Code Pro", "Source Sans Pro",
+        "Roboto", "Open Sans", "Inter", "JetBrains Mono", "Hack",
+        "Cascadia Code", "Inconsolata", "Lato",
+    };
 
     // ─── ua_metadata (Sec-CH-UA-* headers) ───────────────────────
 
@@ -563,9 +788,14 @@ public sealed class DeviceTemplateBuilder
                 new Dictionary<string, object?> { ["brand"] = "Google Chrome",["version"] = ChromeFull },
             },
             ["full_version"]      = ChromeFull,
-            ["platform"]          = Template.FormFactor == FormFactor.Mobile ? "Android" : "Windows",
-            ["platform_version"]  = Template.FormFactor == FormFactor.Mobile ? "14.0.0"  : "15.0.0",
-            ["architecture"]      = Template.FormFactor == FormFactor.Mobile ? "arm"     : "x86",
+            // audit FINGERPRINT-01: Sec-CH-UA platform hints derive from the
+            // OS source of truth so Sec-CH-UA-Platform / -Platform-Version /
+            // -Arch agree with the UA and navigator.platform. (Real iOS does
+            // not send UA-CH at all — emulating it on Blink is a known
+            // residual limitation; we still keep the values self-consistent.)
+            ["platform"]          = UaPlatformName(),
+            ["platform_version"]  = UaPlatformVersion(),
+            ["architecture"]      = Os == DeviceOs.Windows || Os == DeviceOs.Linux ? "x86" : "arm",
             ["bitness"]           = "64",
             ["mobile"]            = Template.FormFactor == FormFactor.Mobile,
             ["form_factor"]       = Template.FormFactor switch
@@ -577,6 +807,24 @@ public sealed class DeviceTemplateBuilder
         };
     }
 
+    private string UaPlatformName() => Os switch
+    {
+        DeviceOs.MacOs   => "macOS",
+        DeviceOs.Android => "Android",
+        DeviceOs.IOs     => "iOS",
+        DeviceOs.Linux   => "Linux",
+        _                => "Windows",
+    };
+
+    private string UaPlatformVersion() => Os switch
+    {
+        DeviceOs.MacOs   => "14.5.0",
+        DeviceOs.Android => "14.0.0",
+        DeviceOs.IOs     => "17.5.0",
+        DeviceOs.Linux   => "6.5.0",
+        _                => "15.0.0",
+    };
+
     // ─── codecs ──────────────────────────────────────────────────
 
     private Dictionary<string, object?> BuildCodecs()
@@ -587,12 +835,15 @@ public sealed class DeviceTemplateBuilder
             ["smooth"]           = supported,
             ["power_efficient"]  = supported,
         };
+        // Apple platforms ship hardware HEVC; Chrome on Windows/Linux/Android
+        // typically reports h265 unsupported. Keep this OS-coherent.
+        var hevc = Os is DeviceOs.MacOs or DeviceOs.IOs;
         return new Dictionary<string, object?>
         {
             ["av1"]  = Probe(true),
             ["vp9"]  = Probe(true),
             ["h264"] = Probe(true),
-            ["h265"] = Probe(false), // Chrome desktop typically lacks HEVC
+            ["h265"] = Probe(hevc),
         };
     }
 

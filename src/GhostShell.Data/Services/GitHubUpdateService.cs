@@ -5,6 +5,8 @@ using System.Diagnostics;
 using System.IO.Compression;
 using System.Net.Http;
 using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography.X509Certificates;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
@@ -373,6 +375,256 @@ internal sealed class GitHubUpdateService : IUpdateService
         }
     }
 
+    // audit DATA-02: single source of truth for the GitHub-asset host
+    // allowlist. CheckAsync validated the API redirect target inline; the
+    // download path in ApplyAsync now reuses the SAME rule so the bytes that
+    // actually get executed can never be fetched from an off-allowlist host
+    // (e.g. a tampered browser_download_url pointing at attacker.example).
+    private static bool IsTrustedGitHubHost(string host)
+    {
+        if (string.IsNullOrWhiteSpace(host)) return false;
+        host = host.ToLowerInvariant();
+        return host == "api.github.com"
+            || host == "github.com"
+            || host.EndsWith(".github.com")
+            || host.EndsWith(".githubusercontent.com")
+            || host.EndsWith(".amazonaws.com"); // GitHub release assets are served from S3-backed CDNs
+    }
+
+    // audit DATA-02: validate a download URL is absolute, HTTPS, and points at
+    // a trusted GitHub-controlled host before we ever fetch its bytes.
+    private static bool IsTrustedDownloadUrl(string? url, out Uri? parsed)
+    {
+        parsed = null;
+        if (string.IsNullOrWhiteSpace(url)) return false;
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)) return false;
+        if (uri.Scheme != Uri.UriSchemeHttps) return false; // never weaken TLS / allow plain HTTP
+        if (!IsTrustedGitHubHost(uri.Host)) return false;
+        parsed = uri;
+        return true;
+    }
+
+    // audit DATA-01: parse a 64-hex-char SHA-256 digest out of arbitrary text.
+    // Accepts a bare hex string, a "<hex>  filename" checksum-file line, or a
+    // digest embedded in the release body (e.g. "SHA256: <hex>"). Returns the
+    // lowercase hex if exactly one well-formed candidate is found, else null.
+    private static string? ExtractSha256Hex(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        var match = Regex.Match(text, @"\b([A-Fa-f0-9]{64})\b");
+        return match.Success ? match.Groups[1].Value.ToLowerInvariant() : null;
+    }
+
+    // audit DATA-01: compute the SHA-256 of the downloaded artifact as a
+    // lowercase hex string. Streamed so a 500 MB zip isn't buffered in memory.
+    private static async Task<string> ComputeFileSha256Async(string path, CancellationToken ct)
+    {
+        await using var fs = File.OpenRead(path);
+        using var sha = System.Security.Cryptography.SHA256.Create();
+        var hash = await sha.ComputeHashAsync(fs, ct);
+        return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    // audit DATA-01: resolve the expected SHA-256 for the portable zip from
+    // release metadata that has ALREADY been fetched/derived, without adding a
+    // public property to UpdateInfo (owned by another file). Two sources, in
+    // order of preference:
+    //   1. A sibling checksum asset (PortableZipUrl + ".sha256"), fetched from
+    //      the same trusted host. This is the canonical, machine-readable form.
+    //   2. A 64-hex digest embedded in the release notes body (ReleaseNotes).
+    // Returns null when no expected hash can be obtained — the caller MUST then
+    // fail closed (abort the update) rather than trusting unverified bytes.
+    private async Task<string?> ResolveExpectedZipSha256Async(
+        UpdateInfo info, HttpClient http, CancellationToken ct)
+    {
+        // (1) Sibling ".sha256" asset next to the zip.
+        if (IsTrustedDownloadUrl(info.PortableZipUrl, out var zipUri) && zipUri is not null)
+        {
+            var checksumUrl = info.PortableZipUrl + ".sha256";
+            if (IsTrustedDownloadUrl(checksumUrl, out _))
+            {
+                try
+                {
+                    using var resp = await http.GetAsync(checksumUrl, ct);
+                    if (resp.IsSuccessStatusCode)
+                    {
+                        // Cap the checksum body — a real .sha256 is < 200 bytes.
+                        var len = resp.Content.Headers.ContentLength ?? 0;
+                        if (len <= 4096)
+                        {
+                            var body = await resp.Content.ReadAsStringAsync(ct);
+                            var fromAsset = ExtractSha256Hex(body);
+                            if (fromAsset is not null)
+                            {
+                                _log.LogInformation("Update integrity: expected SHA-256 sourced from sibling .sha256 asset");
+                                return fromAsset;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        _log.LogDebug("No sibling .sha256 asset ({Status})", resp.StatusCode);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _log.LogDebug(ex, "Failed to fetch sibling .sha256 asset");
+                }
+            }
+        }
+
+        // (2) Digest embedded in the release notes body.
+        var fromNotes = ExtractSha256Hex(info.ReleaseNotes);
+        if (fromNotes is not null)
+        {
+            _log.LogInformation("Update integrity: expected SHA-256 sourced from release notes body");
+            return fromNotes;
+        }
+
+        return null;
+    }
+
+    // ─── audit DATA-01: Authenticode authenticity gate ──────────────────
+    //
+    // Publisher-pin substring matched against the signing certificate's
+    // Subject. EMPTY = "do not pin" (an unsigned binary then only warns).
+    // Set this to your code-signing certificate's subject (e.g. the
+    // organisation/individual CN) to (a) REQUIRE the binary be signed by
+    // exactly that publisher and (b) make an unsigned binary fail closed.
+    private const string ExpectedPublisherSubstring = "";
+
+    private void VerifyExtractedExeAuthenticode(string exePath, string stagingDir)
+    {
+        var trust = WinVerifyTrustFile(exePath);
+        if (trust == 0) // valid signature, intact content, trusted chain
+        {
+            var publisher = "unknown";
+            try
+            {
+                using var c = new X509Certificate2(X509Certificate.CreateFromSignedFile(exePath));
+                publisher = c.Subject;
+            }
+            catch { /* signature valid but cert read failed — non-fatal */ }
+
+            if (!string.IsNullOrEmpty(ExpectedPublisherSubstring)
+                && publisher.IndexOf(ExpectedPublisherSubstring, StringComparison.OrdinalIgnoreCase) < 0)
+            {
+                try { Directory.Delete(stagingDir, recursive: true); } catch { }
+                throw new InvalidOperationException(
+                    $"Update aborted — binary is Authenticode-signed but by an UNEXPECTED publisher ('{publisher}'). " +
+                    $"Expected a certificate whose subject contains '{ExpectedPublisherSubstring}'.");
+            }
+            _log.LogInformation(
+                "Update authenticity: extracted GhostShell.exe has a valid Authenticode signature ({Publisher})",
+                publisher);
+            return;
+        }
+
+        var code = unchecked((uint)trust);
+        const uint TRUST_E_NOSIGNATURE          = 0x800B0100;
+        const uint TRUST_E_SUBJECT_FORM_UNKNOWN = 0x800B0003;
+        const uint TRUST_E_PROVIDER_UNKNOWN     = 0x800B0001;
+        var unsigned = code is TRUST_E_NOSIGNATURE or TRUST_E_SUBJECT_FORM_UNKNOWN or TRUST_E_PROVIDER_UNKNOWN;
+
+        if (unsigned)
+        {
+            if (!string.IsNullOrEmpty(ExpectedPublisherSubstring))
+            {
+                try { Directory.Delete(stagingDir, recursive: true); } catch { }
+                throw new InvalidOperationException(
+                    "Update aborted — a trusted publisher is pinned but the extracted binary is NOT Authenticode-signed.");
+            }
+            _log.LogWarning(
+                "Update authenticity: extracted GhostShell.exe is NOT Authenticode-signed (0x{Code:X8}); " +
+                "proceeding on SHA-256 integrity only. Sign release builds and set ExpectedPublisherSubstring " +
+                "to enforce fail-closed authenticity.", code);
+            return;
+        }
+
+        // Signed but the signature / chain FAILED — tampering, an untrusted
+        // root, or a revoked/expired cert. Strong attack signal: never swap
+        // this binary in.
+        try { Directory.Delete(stagingDir, recursive: true); } catch { }
+        throw new InvalidOperationException(
+            $"Update aborted — extracted binary has an INVALID Authenticode signature (WinVerifyTrust 0x{code:X8}); " +
+            "possible tampering or an untrusted signer.");
+    }
+
+    /// <summary>
+    /// WinVerifyTrust against WINTRUST_ACTION_GENERIC_VERIFY_V2 — the standard
+    /// Windows Authenticode check (embedded signature + content hash + cert
+    /// chain to a trusted root). Returns 0 on success, else the provider
+    /// status/HRESULT. UI suppressed (no prompts).
+    /// </summary>
+    private static int WinVerifyTrustFile(string path)
+    {
+        var actionGuid = new Guid("00AAC56B-CD44-11d0-8CC2-00C04FC295EE"); // GENERIC_VERIFY_V2
+        var fileInfo = new WINTRUST_FILE_INFO
+        {
+            cbStruct       = (uint)Marshal.SizeOf<WINTRUST_FILE_INFO>(),
+            pcwszFilePath  = path,
+            hFile          = IntPtr.Zero,
+            pgKnownSubject = IntPtr.Zero,
+        };
+        var pFile = Marshal.AllocHGlobal(Marshal.SizeOf<WINTRUST_FILE_INFO>());
+        try
+        {
+            Marshal.StructureToPtr(fileInfo, pFile, false);
+            var data = new WINTRUST_DATA
+            {
+                cbStruct            = (uint)Marshal.SizeOf<WINTRUST_DATA>(),
+                pPolicyCallbackData = IntPtr.Zero,
+                pSIPClientData      = IntPtr.Zero,
+                dwUIChoice          = 2, // WTD_UI_NONE
+                fdwRevocationChecks = 0, // WTD_REVOKE_NONE (chain trust still enforced)
+                dwUnionChoice       = 1, // WTD_CHOICE_FILE
+                pFile               = pFile,
+                dwStateAction       = 0, // WTD_STATEACTION_IGNORE
+                hWVTStateData       = IntPtr.Zero,
+                pwszURLReference    = IntPtr.Zero,
+                dwProvFlags         = 0,
+                dwUIContext         = 0,
+            };
+            try { return WinVerifyTrust(IntPtr.Zero, actionGuid, ref data); }
+            catch (DllNotFoundException) { return unchecked((int)0x800B0001); } // provider unknown (non-Windows)
+        }
+        finally
+        {
+            Marshal.DestroyStructure<WINTRUST_FILE_INFO>(pFile);
+            Marshal.FreeHGlobal(pFile);
+        }
+    }
+
+    [DllImport("wintrust.dll", ExactSpelling = true, SetLastError = false)]
+    private static extern int WinVerifyTrust(
+        IntPtr hWnd, [MarshalAs(UnmanagedType.LPStruct)] Guid pgActionID, ref WINTRUST_DATA pWVTData);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct WINTRUST_FILE_INFO
+    {
+        public uint cbStruct;
+        [MarshalAs(UnmanagedType.LPWStr)] public string pcwszFilePath;
+        public IntPtr hFile;
+        public IntPtr pgKnownSubject;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct WINTRUST_DATA
+    {
+        public uint cbStruct;
+        public IntPtr pPolicyCallbackData;
+        public IntPtr pSIPClientData;
+        public uint dwUIChoice;
+        public uint fdwRevocationChecks;
+        public uint dwUnionChoice;
+        public IntPtr pFile;
+        public uint dwStateAction;
+        public IntPtr hWVTStateData;
+        public IntPtr pwszURLReference;
+        public uint dwProvFlags;
+        public uint dwUIContext;
+    }
+
     public async Task<bool> ApplyAsync(UpdateInfo info, IProgress<int>? progress = null, CancellationToken ct = default)
     {
         if (info.LatestVersion.CompareTo(info.CurrentVersion) <= 0)
@@ -384,6 +636,18 @@ internal sealed class GitHubUpdateService : IUpdateService
         {
             throw new InvalidOperationException(
                 "Release does not include a portable .zip. Please download from the release page.");
+        }
+
+        // audit DATA-02: re-validate the download URL host HERE, at the point
+        // the executed bytes are fetched. CheckAsync's redirect check covered
+        // only the API request; browser_download_url comes verbatim from the
+        // (potentially tampered) release JSON and was never constrained. Reject
+        // anything that isn't HTTPS to a trusted GitHub-controlled host.
+        if (!IsTrustedDownloadUrl(info.PortableZipUrl, out _))
+        {
+            _log.LogError("Refusing to download update from untrusted URL: {Url}", info.PortableZipUrl);
+            throw new InvalidOperationException(
+                "Release download URL is not a trusted GitHub asset host. Aborting update.");
         }
 
         // [FIX: concurrent-apply-guard] Guard against concurrent apply operations
@@ -460,6 +724,19 @@ internal sealed class GitHubUpdateService : IUpdateService
                         throw new HttpRequestException($"Download failed: {response.StatusCode}");
                     }
 
+                    // audit DATA-02: re-validate the FINAL redirect target host.
+                    // The named factory client may follow redirects; the initial
+                    // URL passing the allowlist doesn't guarantee the bytes came
+                    // from a trusted host. Reject if a redirect landed off-list.
+                    var finalUri = response.RequestMessage?.RequestUri;
+                    if (finalUri is null || !IsTrustedGitHubHost(finalUri.Host) ||
+                        finalUri.Scheme != Uri.UriSchemeHttps)
+                    {
+                        _log.LogError("Update download redirected to untrusted host: {Host}", finalUri?.Host);
+                        throw new InvalidOperationException(
+                            "Update download redirected to an untrusted host. Aborting update.");
+                    }
+
                     // [FIX: body-size-cap] Cap ZIP download at 500 MB
                     var contentLength = response.Content.Headers.ContentLength ?? 0;
                     if (contentLength > MaxZipFileBytes)
@@ -507,6 +784,55 @@ internal sealed class GitHubUpdateService : IUpdateService
             }
 
             progress?.Report(50);
+
+            // audit DATA-01: integrity verification BEFORE the zip is ever
+            // extracted or any file is swapped over the live install. The
+            // update channel is the most-trusted code path in the app and was
+            // previously completely unauthenticated — a tampered release JSON,
+            // hijacked repo, stolen token, or re-uploaded asset could ship
+            // arbitrary native code that ran on next launch. We now require a
+            // SHA-256 digest from already-fetched release metadata (sibling
+            // .sha256 asset preferred, else a digest in the release notes),
+            // compute the SHA-256 of the downloaded bytes, and compare.
+            //
+            // FAIL CLOSED: if no expected digest can be resolved, or it does
+            // not match, we delete the staging dir and abort. A missing digest
+            // is a HARD failure, never a warning — unverified bytes are never
+            // extracted or executed.
+            //
+            // NOTE: this gives integrity against a tampered/MITM'd asset given
+            // an authentic release-metadata digest. It does NOT yet give full
+            // authenticity (a fully compromised release could publish a
+            // matching digest for malicious bytes). A detached signature over
+            // the digest with an embedded public key, plus Authenticode
+            // verification of the extracted GhostShell.exe, is the stronger
+            // follow-up — see crossFileNeeded, it needs a public key / signed
+            // manifest plumbed through release metadata (UpdateInfo lives in
+            // another file we must not edit here).
+            {
+                var expectedSha = await ResolveExpectedZipSha256Async(info, http, ct);
+                if (string.IsNullOrWhiteSpace(expectedSha))
+                {
+                    try { Directory.Delete(stagingDir, recursive: true); } catch { }
+                    _log.LogError(
+                        "Update aborted: no SHA-256 checksum available for the release artifact (no sibling .sha256 asset and none in release notes). Refusing to apply an unverified update.");
+                    throw new InvalidOperationException(
+                        "Update artifact has no published SHA-256 checksum to verify against. Aborting update for safety.");
+                }
+
+                var actualSha = await ComputeFileSha256Async(zipPath, ct);
+                if (!string.Equals(actualSha, expectedSha, StringComparison.OrdinalIgnoreCase))
+                {
+                    try { Directory.Delete(stagingDir, recursive: true); } catch { }
+                    _log.LogError(
+                        "Update aborted: SHA-256 mismatch. expected={Expected} actual={Actual}. The downloaded artifact is corrupt or tampered.",
+                        expectedSha, actualSha);
+                    throw new InvalidOperationException(
+                        "Update artifact failed SHA-256 integrity verification. Aborting update.");
+                }
+
+                _log.LogInformation("Update integrity verified: SHA-256 {Sha} matches expected digest", actualSha);
+            }
 
             // Extract (50-90%)
             if (Directory.Exists(extractDir))
@@ -568,6 +894,21 @@ internal sealed class GitHubUpdateService : IUpdateService
                 throw new InvalidOperationException(
                     "Release zip is malformed or incomplete (missing or empty GhostShell.exe).");
             }
+
+            // audit DATA-01 (cross-file follow-up): AUTHENTICITY gate on the
+            // binary we're about to swap in and relaunch. The SHA-256 check
+            // above only proves the bytes match a digest taken from the SAME
+            // release metadata — so a fully-compromised release (malicious
+            // zip + matching .sha256) sails through. Authenticode is the
+            // forge-proof gate: it verifies the exe carries a valid
+            // signature whose content hash matches AND whose cert chains to
+            // a trusted root — something an attacker without the publisher's
+            // private key cannot produce. Fails closed on a tampered/invalid
+            // signature; on a genuinely UNSIGNED build it warns and proceeds
+            // (so today's possibly-unsigned releases still self-update on
+            // SHA-256 integrity). Set ExpectedPublisherSubstring to harden
+            // an unsigned binary to fail-closed and to pin the publisher.
+            VerifyExtractedExeAuthenticode(exePath, stagingDir);
 
             // Phase 71 — drain active runs. We've flagged IsUpdatePending=true,
             // so the scheduler stopped firing new ticks. Wait for whatever's in

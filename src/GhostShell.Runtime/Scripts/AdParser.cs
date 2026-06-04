@@ -58,6 +58,16 @@ public static class AdParser
               function stamp(el) {
                 var anchor = el.tagName === 'A' ? el : el.querySelector('a[href]');
                 if (!anchor || !anchor.href) return;
+                // audit SCRIPTSUPPORT-09: de-dupe by the ANCHOR, not the
+                // container. The same anchor can be reached through two
+                // distinct containers matched by different selector passes
+                // (e.g. both [data-ad] and a parent "Sponsored" region).
+                // Guarding only on `el` let the second container pass the
+                // check, mint a new id, and OVERWRITE the anchor's earlier
+                // id — leaving the first AdRecord's stampId dangling so
+                // click_ad's tier-1 lookup silently fell through. Skip if
+                // EITHER the anchor or the container is already stamped.
+                if (anchor.hasAttribute('data-gs-ad-id')) return;
                 if (el.hasAttribute('data-gs-ad-id')) return;
                 el.setAttribute('data-gs-ad-id', String(i));
                 anchor.setAttribute('data-gs-ad-id', String(i));

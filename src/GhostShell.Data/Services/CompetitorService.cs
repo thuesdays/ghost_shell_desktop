@@ -41,7 +41,11 @@ internal sealed class CompetitorService : ICompetitorService
         // a property named "RunId" (PascalCase). Mismatch → "Must add values
         // for the following parameters" exception every time. Spell each
         // parameter explicitly so the names match.
-        var result = await _db.QueueAsync(c => c.ExecuteAsync(sql, new
+        // audit CAPTCHA-10: return the real affected-row count from ExecuteAsync
+        // instead of a hard-coded 1, so callers can detect a silently-dropped
+        // observation (e.g. a future ON CONFLICT/INSERT OR IGNORE variant or a
+        // trigger veto returning 0). The contract is Task<long>, so widen.
+        var affected = await _db.QueueAsync(c => c.ExecuteAsync(sql, new
         {
             runId       = row.RunId,
             profileName = row.ProfileName,
@@ -53,7 +57,7 @@ internal sealed class CompetitorService : ICompetitorService
             cleanUrl    = row.CleanUrl,
             clickUrl    = row.ClickUrl,
         }), ct);
-        return 1; // scalar insert; could return the last insert rowid via ExecuteScalarAsync if needed
+        return affected;
     }
 
     public async Task<int> RecordBatchAsync(IReadOnlyCollection<CompetitorRecord> rows, CancellationToken ct = default)
@@ -68,6 +72,11 @@ internal sealed class CompetitorService : ICompetitorService
         return await _db.QueueAsync(async c =>
         {
             using var tx = c.BeginTransaction();
+            // audit CAPTCHA-10: accumulate the real per-row affected count
+            // rather than blindly returning rows.Count, so the result reflects
+            // how many inserts actually landed (e.g. if a future ON CONFLICT /
+            // trigger silently no-ops a row).
+            var inserted = 0;
             foreach (var row in rows)
             {
                 var capturedAt = row.CapturedAt.ToString("O");
@@ -75,7 +84,7 @@ internal sealed class CompetitorService : ICompetitorService
                 // they match the SQL placeholders. See RecordAsync above
                 // for the full root-cause comment (SQLite is case-
                 // sensitive on parameter names).
-                await c.ExecuteAsync(sql, new
+                inserted += await c.ExecuteAsync(sql, new
                 {
                     runId       = row.RunId,
                     profileName = row.ProfileName,
@@ -89,7 +98,7 @@ internal sealed class CompetitorService : ICompetitorService
                 }, tx);
             }
             tx.Commit();
-            return rows.Count;
+            return inserted;
         }, ct);
     }
 
@@ -148,7 +157,23 @@ internal sealed class CompetitorService : ICompetitorService
         var cutoffIso = cutoff?.ToString("O");
         DateTime? prevCutoff = days == 0 ? null : DateTime.UtcNow.AddDays(-2 * days);
         var prevCutoffIso = prevCutoff?.ToString("O");
-        var searchLike = string.IsNullOrWhiteSpace(search) ? null : $"%{search.ToLower()}%";
+        // audit CAPTCHA-04: build the LIKE pattern defensively.
+        //  - Escape SQLite LIKE metacharacters (\, %, _) so an operator's stray
+        //    '%' or '_' is matched literally instead of becoming a wildcard that
+        //    matches everything/anything and forces a pathological full scan.
+        //    The escape char is '\' and is declared via ESCAPE '\' in the SQL.
+        //  - Fold case with ToLowerInvariant() (NOT culture-sensitive ToLower())
+        //    so it agrees with the SQL-side LOWER(domain) (ASCII/invariant) and
+        //    doesn't silently drop rows under e.g. a Turkish 'I'/'i' locale.
+        string? searchLike = null;
+        if (!string.IsNullOrWhiteSpace(search))
+        {
+            var escaped = search
+                .Replace("\\", "\\\\")
+                .Replace("%", "\\%")
+                .Replace("_", "\\_");
+            searchLike = $"%{escaped.ToLowerInvariant()}%";
+        }
 
         const string sql = """
             WITH current_period AS (
@@ -159,7 +184,7 @@ internal sealed class CompetitorService : ICompetitorService
                 MAX(captured_at) AS lastSeen
               FROM competitor_records
               WHERE (@cutoff IS NULL OR captured_at >= @cutoff)
-                AND (@search IS NULL OR LOWER(domain) LIKE @search)
+                AND (@search IS NULL OR LOWER(domain) LIKE @search ESCAPE '\')
               GROUP BY domain
             ),
             prev_period AS (

@@ -36,6 +36,12 @@ internal sealed class VaultService : IVaultService, IDisposable
     private const string CfgSalt        = "vault.salt";
     private const string CfgVerifier    = "vault.verifier";
     private const string CfgInitAt      = "vault.initialized_at";
+    // audit VAULT-02: PBKDF2 iteration count this vault's key was derived
+    // with. Absent ⇒ a pre-bump (200k) vault — VaultCrypto.ResolveIterations
+    // maps the absence to the legacy count so old vaults keep unlocking.
+    // New vaults persist 600k; legacy vaults are upgraded to 600k on the
+    // first successful unlock (see RewrapAllAsync).
+    private const string CfgKdfIter     = "vault.kdf_iter";
     // Phase 26 — auto-lock idle timeout (minutes). 0 = disabled.
     // Stored as ASCII bytes in vault_config so it survives restarts.
     private const string CfgAutoLockMin = "vault.auto_lock_min";
@@ -97,12 +103,17 @@ internal sealed class VaultService : IVaultService, IDisposable
                 throw new InvalidOperationException(
                     "vault already initialized — use ResetAsync to wipe + re-init");
 
+            // audit VAULT-02: new vaults derive at the 600k OWASP-2023
+            // baseline and persist that count so unlock reproduces the key.
+            var iter     = VaultCrypto.Pbkdf2Iterations;
             var salt     = VaultCrypto.NewSalt();
-            var key      = VaultCrypto.DeriveKey(masterPassphrase, salt);
+            var key      = VaultCrypto.DeriveKey(masterPassphrase, salt, iter);
             var verifier = VaultCrypto.EncryptString(key, VaultCrypto.VerifierPlain);
 
             await WriteConfigBytesAsync(CfgSalt,     salt,                                    ct);
             await WriteConfigBytesAsync(CfgVerifier, verifier,                                ct);
+            await WriteConfigBytesAsync(CfgKdfIter,
+                Encoding.ASCII.GetBytes(iter.ToString()),                                     ct);
             await WriteConfigBytesAsync(CfgInitAt,
                 Encoding.UTF8.GetBytes(DateTime.UtcNow.ToString("O")),                        ct);
 
@@ -134,12 +145,43 @@ internal sealed class VaultService : IVaultService, IDisposable
             else
             {
                 _initialized = true;
-                var key = VaultCrypto.DeriveKey(masterPassphrase ?? "", salt);
+                // audit VAULT-02: derive with the iteration count this vault
+                // was actually written at (absent ⇒ legacy 200k), NOT a
+                // hard-coded constant — otherwise a 200k vault can never be
+                // unlocked once the baseline moved to 600k.
+                var storedIter = VaultCrypto.ResolveIterations(await ReadKdfIterAsync(ct));
+                var key = VaultCrypto.DeriveKey(masterPassphrase ?? "", salt, storedIter);
                 try
                 {
                     var plain = VaultCrypto.DecryptString(key, verifier);
                     if (plain == VaultCrypto.VerifierPlain)
                     {
+                        // audit VAULT-02: transparently upgrade a legacy
+                        // (<600k) vault to the current baseline on first
+                        // unlock. Best-effort — if the re-wrap fails we keep
+                        // the working legacy key so a failed migration can
+                        // never lock the user out.
+                        if (storedIter < VaultCrypto.Pbkdf2Iterations)
+                        {
+                            try
+                            {
+                                var newSalt = VaultCrypto.NewSalt();
+                                var newKey  = VaultCrypto.DeriveKey(
+                                    masterPassphrase ?? "", newSalt, VaultCrypto.Pbkdf2Iterations);
+                                await RewrapAllAsync(key, newKey, newSalt, VaultCrypto.Pbkdf2Iterations, ct);
+                                CryptographicOperations.ZeroMemory(key);
+                                key = newKey;
+                                _log.LogInformation(
+                                    "Vault KDF upgraded {Old}->{New} iterations on unlock",
+                                    storedIter, VaultCrypto.Pbkdf2Iterations);
+                            }
+                            catch (Exception ex)
+                            {
+                                _log.LogWarning(ex,
+                                    "Vault KDF upgrade to {N} failed; continuing at legacy {Old}",
+                                    VaultCrypto.Pbkdf2Iterations, storedIter);
+                            }
+                        }
                         _key = key;
                         unlocked = true;
                         NotifyActivity();
@@ -733,6 +775,66 @@ internal sealed class VaultService : IVaultService, IDisposable
         }), ct);
     }
 
+    /// <summary>audit VAULT-02: read the persisted PBKDF2 iteration count
+    /// (ASCII int in vault_config). Null when the vault predates the count
+    /// being stored — callers pass that to VaultCrypto.ResolveIterations,
+    /// which maps it to the legacy 200k default.</summary>
+    private async Task<int?> ReadKdfIterAsync(CancellationToken ct)
+    {
+        var raw = await ReadConfigBytesAsync(CfgKdfIter, ct);
+        if (raw is null || raw.Length == 0) return null;
+        return int.TryParse(Encoding.ASCII.GetString(raw), out var n) && n > 0 ? n : null;
+    }
+
+    /// <summary>
+    /// audit VAULT-02: re-wrap the whole vault under <paramref name="newKey"/>
+    /// in a single transaction — decrypt every item with <paramref name="oldKey"/>,
+    /// re-encrypt with the new key, and replace salt + verifier + kdf_iter
+    /// atomically. Shared by master-password rotation and the legacy→600k
+    /// KDF upgrade. A row that won't decrypt under the old key aborts the
+    /// whole operation (tx rolls back) so we never strand items behind a
+    /// key we've thrown away.
+    /// </summary>
+    private Task RewrapAllAsync(byte[] oldKey, byte[] newKey, byte[] newSalt, int newIter, CancellationToken ct)
+    {
+        var newVerifier = VaultCrypto.EncryptString(newKey, VaultCrypto.VerifierPlain);
+        return _db.QueueAsync(async c =>
+        {
+            using var tx = c.BeginTransaction();
+            var rows = (await c.QueryAsync<(long Id, byte[]? Blob)>(
+                "SELECT id AS Id, secrets_enc AS Blob FROM vault_items;",
+                transaction: tx)).ToList();
+            foreach (var row in rows)
+            {
+                if (row.Blob is null || row.Blob.Length == 0) continue;
+                string json;
+                try { json = VaultCrypto.DecryptString(oldKey, row.Blob); }
+                catch (CryptographicException ex)
+                {
+                    throw new InvalidOperationException(
+                        $"Vault item #{row.Id} could not be decrypted under the current key " +
+                        $"(possibly corrupt). Re-wrap aborted; the vault is unchanged.", ex);
+                }
+                var rewrapped = VaultCrypto.EncryptString(newKey, json);
+                await c.ExecuteAsync(
+                    "UPDATE vault_items SET secrets_enc = @blob, updated_at = @now WHERE id = @id;",
+                    new { blob = rewrapped, now = DateTime.UtcNow.ToString("O"), id = row.Id },
+                    transaction: tx);
+            }
+            const string upsert = """
+                INSERT INTO vault_config (key, value, updated_at)
+                VALUES (@key, @value, @now)
+                ON CONFLICT(key) DO UPDATE SET value = @value, updated_at = @now;
+            """;
+            var nowIso = DateTime.UtcNow.ToString("O");
+            await c.ExecuteAsync(upsert, new { key = CfgSalt,     value = newSalt,     now = nowIso }, transaction: tx);
+            await c.ExecuteAsync(upsert, new { key = CfgVerifier, value = newVerifier, now = nowIso }, transaction: tx);
+            await c.ExecuteAsync(upsert, new { key = CfgKdfIter,  value = Encoding.ASCII.GetBytes(newIter.ToString()), now = nowIso }, transaction: tx);
+            tx.Commit();
+            return rows.Count;
+        }, ct);
+    }
+
     private void OnLockStateChanged() => LockStateChanged?.Invoke(this, EventArgs.Empty);
 
     // ─── Phase 26 — auto-lock config ─────────────────────────────────
@@ -787,7 +889,10 @@ internal sealed class VaultService : IVaultService, IDisposable
             if (salt is null || verifier is null)
                 throw new InvalidOperationException("vault is not initialized");
 
-            oldKey = VaultCrypto.DeriveKey(oldPassphrase, salt);
+            // audit VAULT-02: verify the OLD passphrase with the iteration
+            // count this vault was actually written at (legacy or 600k).
+            var oldIter = VaultCrypto.ResolveIterations(await ReadKdfIterAsync(ct));
+            oldKey = VaultCrypto.DeriveKey(oldPassphrase, salt, oldIter);
             try
             {
                 var plain = VaultCrypto.DecryptString(oldKey, verifier);
@@ -799,57 +904,12 @@ internal sealed class VaultService : IVaultService, IDisposable
                 throw new UnauthorizedAccessException("current passphrase doesn't match");
             }
 
-            // 2. Derive the NEW key + verifier under a brand-new salt.
-            // Rotating salt forces every rainbow-table-against-old-salt
-            // assumption to start over.
+            // 2. Derive the NEW key under a brand-new salt at the current
+            // 600k baseline (rotating salt restarts any rainbow-table work),
+            // then re-wrap every item + verifier + kdf_iter in one tx.
             var newSalt = VaultCrypto.NewSalt();
-            newKey = VaultCrypto.DeriveKey(newPassphrase, newSalt);
-            var newVerifier = VaultCrypto.EncryptString(newKey, VaultCrypto.VerifierPlain);
-
-            // 3. Read every secrets_enc row, decrypt under old, re-encrypt
-            // under new. Done in a single DB transaction so we never see
-            // a partial-rotation state on disk.
-            await _db.QueueAsync(async c =>
-            {
-                using var tx = c.BeginTransaction();
-                var rows = (await c.QueryAsync<(long Id, byte[]? Blob)>(
-                    "SELECT id AS Id, secrets_enc AS Blob FROM vault_items;",
-                    transaction: tx)).ToList();
-                foreach (var row in rows)
-                {
-                    if (row.Blob is null || row.Blob.Length == 0) continue;
-                    string json;
-                    try { json = VaultCrypto.DecryptString(oldKey, row.Blob); }
-                    catch (CryptographicException ex)
-                    {
-                        // Phase 26 audit fix — partial rotation is WORSE
-                        // than no rotation: a row that won't decrypt under
-                        // the old key would, after rotation, be unreachable
-                        // because the old key is gone. Abort the whole
-                        // rotation; the tx auto-rolls back on throw.
-                        throw new InvalidOperationException(
-                            $"Vault item #{row.Id} could not be decrypted under the current passphrase " +
-                            $"(possibly corrupt or rotated mid-flight). Rotation aborted; the vault is unchanged. " +
-                            $"Repair or delete the offending row, then retry.", ex);
-                    }
-                    var rewrapped = VaultCrypto.EncryptString(newKey, json);
-                    await c.ExecuteAsync(
-                        "UPDATE vault_items SET secrets_enc = @blob, updated_at = @now WHERE id = @id;",
-                        new { blob = rewrapped, now = DateTime.UtcNow.ToString("O"), id = row.Id },
-                        transaction: tx);
-                }
-                // 4. Replace salt + verifier inside the same tx.
-                const string upsert = """
-                    INSERT INTO vault_config (key, value, updated_at)
-                    VALUES (@key, @value, @now)
-                    ON CONFLICT(key) DO UPDATE SET value = @value, updated_at = @now;
-                """;
-                var nowIso = DateTime.UtcNow.ToString("O");
-                await c.ExecuteAsync(upsert, new { key = CfgSalt,     value = newSalt,     now = nowIso }, transaction: tx);
-                await c.ExecuteAsync(upsert, new { key = CfgVerifier, value = newVerifier, now = nowIso }, transaction: tx);
-                tx.Commit();
-                return rows.Count;
-            }, ct);
+            newKey = VaultCrypto.DeriveKey(newPassphrase, newSalt, VaultCrypto.Pbkdf2Iterations);
+            await RewrapAllAsync(oldKey, newKey, newSalt, VaultCrypto.Pbkdf2Iterations, ct);
 
             // 5. Swap in-memory key.
             if (_key is not null) CryptographicOperations.ZeroMemory(_key);

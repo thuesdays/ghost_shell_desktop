@@ -13,6 +13,8 @@
         <ResourceDictionary>
             <ResourceDictionary.MergedDictionaries>
                 <ResourceDictionary Source="Resources/Themes/DarkTheme.xaml"/>
+                <!-- Redesign 2026-06 — vector icon library + Icon control style. -->
+                <ResourceDictionary Source="Resources/Themes/Icons.xaml"/>
             </ResourceDictionary.MergedDictionaries>
 
             <!-- Converters available globally -->
@@ -25,6 +27,8 @@
             <conv:NonEmptyToVisibleConverter        x:Key="NonEmptyToVisibleConverter"/>
             <conv:ResourceKeyToBrushConverter       x:Key="ResourceKeyToBrush"/>
             <conv:StringEqualsConverter             x:Key="StringEqualsConverter"/>
+            <!-- Redesign 2026-06 — sidebar nav icon KEY → vector Geometry. -->
+            <conv:IconKeyToGeometryConverter        x:Key="IconKeyToGeometry"/>
 
             <!-- Logs page: short-level tag → theme brush. Two
                  instances: the level CHIP wants the saturated brush

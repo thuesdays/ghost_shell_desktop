@@ -15,13 +15,13 @@ namespace GhostShell.App.Dialogs;
 /// </summary>
 public partial class ConfirmDialog : Window
 {
-    // Segoe MDL2 Assets code points — kept as numeric values so the
-    // file stays pure-ASCII regardless of editor encoding.
-    private const int GlyphInfo    = 0xE946; // Info
-    private const int GlyphSuccess = 0xE930; // CompletedSolid
-    private const int GlyphWarn    = 0xE7BA; // Warning
-    private const int GlyphError   = 0xEA39; // ErrorBadge
-    private const int GlyphDanger  = 0xE7BA; // Warning (matches "are you sure" tone)
+    // Redesign 2026-06 — vector icon KEYS (resolved to a Geometry from
+    // Icons.xaml) instead of Segoe MDL2 Assets glyph codepoints.
+    private const string IconInfo    = "Info";
+    private const string IconSuccess = "Success";
+    private const string IconWarn    = "Warning";
+    private const string IconError   = "Error";
+    private const string IconDanger  = "Warning"; // matches "are you sure" tone
 
     public ConfirmDialog(
         string title, string message,
@@ -44,26 +44,26 @@ public partial class ConfirmDialog : Window
     private void ApplySeverity(ConfirmSeverity severity)
     {
         Brush  brush;
-        int    glyphCp;
+        string iconKey;
         bool   dangerCta = false;
 
         switch (severity)
         {
             case ConfirmSeverity.Info:
                 brush = (Brush)FindResource("InfoBrush");
-                glyphCp = GlyphInfo;
+                iconKey = IconInfo;
                 break;
             case ConfirmSeverity.Success:
                 brush = (Brush)FindResource("OkBrush");
-                glyphCp = GlyphSuccess;
+                iconKey = IconSuccess;
                 break;
             case ConfirmSeverity.Warning:
                 brush = (Brush)FindResource("WarnBrush");
-                glyphCp = GlyphWarn;
+                iconKey = IconWarn;
                 break;
             case ConfirmSeverity.Error:
                 brush = (Brush)FindResource("ErrBrush");
-                glyphCp = GlyphError;
+                iconKey = IconError;
                 dangerCta = true;
                 break;
             case ConfirmSeverity.Danger:
@@ -71,18 +71,18 @@ public partial class ConfirmDialog : Window
                 // "this is destructive but the user is choosing it" vs
                 // "system-error report".
                 brush = (Brush)FindResource("Accent");
-                glyphCp = GlyphDanger;
+                iconKey = IconDanger;
                 dangerCta = true;
                 break;
             default:
                 brush = (Brush)FindResource("Accent");
-                glyphCp = GlyphInfo;
+                iconKey = IconInfo;
                 break;
         }
 
         AccentStrip.Background = brush;
-        HeaderIcon.Foreground  = brush;
-        HeaderIcon.Text        = char.ConvertFromUtf32(glyphCp);
+        HeaderIcon.Stroke = brush;
+        HeaderIcon.Data   = Application.Current?.TryFindResource("Icon." + iconKey) as Geometry;
 
         if (dangerCta)
             ConfirmBtn.Style = (Style)FindResource("ButtonDanger");

@@ -141,13 +141,24 @@ public static class ProxyParser
                                   parts[2], portB, parts[0], parts[1]);
                     if (portA > 0 && portB > 0)
                     {
-                        // Tie-break: side that looks like a hostname wins
-                        // (contains a dot or all-digit dotted IP).
-                        if (LooksLikeHost(parts[0]))
+                        // audit PROXY-09: when both candidate ports are valid the
+                        // line is ambiguous. Decide by validating the HOST shape
+                        // (IP or DNS name), not by a mere '.' substring — a numeric
+                        // password (e.g. "8081") must not be mistaken for a host.
+                        // If exactly one side has a host-shaped segment, take it.
+                        var leftIsHost  = IsHostShaped(parts[0]);
+                        var rightIsHost = IsHostShaped(parts[2]);
+                        if (leftIsHost && !rightIsHost)
                             return Ok(raw, "host_port_user_pass", defaultScheme,
                                       parts[0], portA, parts[2], parts[3]);
-                        return Ok(raw, "user_pass_host_port", defaultScheme,
-                                  parts[2], portB, parts[0], parts[1]);
+                        if (rightIsHost && !leftIsHost)
+                            return Ok(raw, "user_pass_host_port", defaultScheme,
+                                      parts[2], portB, parts[0], parts[1]);
+                        // Genuinely ambiguous (both or neither look like hosts):
+                        // prefer the documented canonical host:port:user:pass order
+                        // rather than silently guessing the reversed layout.
+                        return Ok(raw, "host_port_user_pass", defaultScheme,
+                                  parts[0], portA, parts[2], parts[3]);
                     }
                     break;
                 }
@@ -209,13 +220,55 @@ public static class ProxyParser
     private static bool LooksLikeHost(string s) =>
         s.Contains('.') || s.Equals("localhost", StringComparison.OrdinalIgnoreCase);
 
+    // audit PROXY-09: stricter host-candidate test used to break 4-part
+    // ambiguity. A segment is "host-shaped" when it is a literal IP address
+    // or a syntactically valid DNS hostname/label — NOT merely something
+    // that contains a dot. This stops numeric passwords or stray tokens from
+    // being mis-assigned as the host.
+    private static bool IsHostShaped(string s)
+    {
+        if (string.IsNullOrWhiteSpace(s)) return false;
+        s = s.Trim();
+
+        // Literal IPv4/IPv6 address.
+        if (System.Net.IPAddress.TryParse(s, out _)) return true;
+
+        // localhost is a valid (dotless) host.
+        if (s.Equals("localhost", StringComparison.OrdinalIgnoreCase)) return true;
+
+        // A purely numeric token is a port/credential, never a hostname.
+        if (s.All(char.IsDigit)) return false;
+
+        // DNS name: dot-separated labels of [A-Za-z0-9-], no leading/trailing
+        // hyphen per label, total length <= 253. At least one label must
+        // contain a non-digit (else it is just digits, handled above).
+        if (s.Length > 253) return false;
+        var labels = s.Split('.');
+        foreach (var label in labels)
+        {
+            if (label.Length is 0 or > 63) return false;
+            if (label[0] == '-' || label[^1] == '-') return false;
+            foreach (var ch in label)
+                if (!(char.IsLetterOrDigit(ch) || ch == '-')) return false;
+        }
+        return true;
+    }
+
     private static ParsedProxy Ok(string raw, string format, string scheme,
                                    string host, int port, string? user, string? pass)
     {
         var creds = string.IsNullOrEmpty(user) ? "" :
                     string.IsNullOrEmpty(pass) ? Uri.EscapeDataString(user) + "@" :
                     $"{Uri.EscapeDataString(user)}:{Uri.EscapeDataString(pass ?? "")}@";
-        var url = $"{scheme}://{creds}{host}:{port}";
+        // audit PROXY-02: IPv6 literals must be bracketed in the URL authority,
+        // otherwise the address colons are indistinguishable from the port
+        // delimiter and every downstream Uri.TryCreate consumer mis-splits
+        // host/port. The stored Host property keeps the raw (unbracketed)
+        // literal, but the canonical Url string brackets it.
+        var hostPart = host.Contains(':') && !host.StartsWith("[")
+            ? $"[{host}]"
+            : host;
+        var url = $"{scheme}://{creds}{hostPart}:{port}";
         return new ParsedProxy
         {
             Ok = true,

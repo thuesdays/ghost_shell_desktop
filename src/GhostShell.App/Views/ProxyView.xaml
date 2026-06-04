@@ -124,7 +124,7 @@
                         <TextBlock FontSize="32" HorizontalAlignment="Center"
                                    Foreground="{StaticResource TextDim}" Text="⌖"/>
                         <TextBlock Margin="0,10,0,4" HorizontalAlignment="Center"
-                                   Style="{StaticResource PageTitle}" FontSize="14"
+                                   Style="{StaticResource PageTitle}" FontSize="15"
                                    Text="No proxies configured"/>
                         <TextBlock HorizontalAlignment="Center" Style="{StaticResource MutedText}"
                                    Margin="0,0,0,16"
@@ -269,9 +269,8 @@
                                                     Command="{Binding DataContext.TestOneCommand,
                                                               Source={x:Reference PageRoot}}"
                                                     CommandParameter="{Binding}">
-                                                <TextBlock Style="{StaticResource RowActionIcon}" FontSize="14"
-                                                       Foreground="{StaticResource WarnBrush}"
-                                                       Text="&#xE945;"/>
+                                                <ctrl:Icon Data="{StaticResource Icon.Info}" Size="20"
+                                                       Stroke="{StaticResource WarnBrush}"/>
                                             </Button>
                                             <Button Style="{StaticResource RowActionButton}"
                                                     ToolTip="Edit"
@@ -279,7 +278,7 @@
                                                     Command="{Binding DataContext.EditCommand,
                                                               Source={x:Reference PageRoot}}"
                                                     CommandParameter="{Binding}">
-                                                <TextBlock Style="{StaticResource RowActionIcon}" FontSize="14" Text="&#xE70F;"/>
+                                                <ctrl:Icon Data="{StaticResource Icon.Edit}" Size="20"/>
                                             </Button>
                                             <Button Style="{StaticResource RowActionDanger}"
                                                     ToolTip="Delete"
@@ -287,9 +286,8 @@
                                                     Command="{Binding DataContext.DeleteCommand,
                                                               Source={x:Reference PageRoot}}"
                                                     CommandParameter="{Binding}">
-                                                <TextBlock Style="{StaticResource RowActionIcon}" FontSize="14"
-                                                       Foreground="{StaticResource ErrBrush}"
-                                                       Text="&#xE74D;"/>
+                                                <ctrl:Icon Data="{StaticResource Icon.Trash}" Size="20"
+                                                       Stroke="{StaticResource ErrBrush}"/>
                                             </Button>
                                         </StackPanel>
                                     </DataTemplate>
@@ -313,7 +311,7 @@
                         </Grid.ColumnDefinitions>
                         <TextBlock Grid.Column="0"
                                    Foreground="{StaticResource Text}"
-                                   FontSize="13" FontWeight="SemiBold"
+                                   FontSize="14" FontWeight="SemiBold"
                                    Text="📅  PROXY HEALTH TIMELINE"/>
                         <TextBlock Grid.Column="1" Margin="12,2,0,0"
                                    Style="{StaticResource MutedText}"

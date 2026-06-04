@@ -249,7 +249,20 @@ public sealed class ScheduleService : IScheduleService
         //   • matches today → +1
         //   • doesn't match (yesterday or null) → reset to 1
         // Same UPDATE either way so we don't need a separate read +
-        // conditional write round-trip.
+        // conditional write round-trip. The trailing SELECT returns the
+        // post-increment value; the whole batch runs inside one gated
+        // _querySemaphore round-trip so the increment and the read-back
+        // can never see different states.
+        //
+        // audit DATA-05: this method is atomic on its own, but it is NOT
+        // sufficient to enforce the runs_per_day cap because the runner
+        // performs the cap CHECK (GetFiresTodayAsync) and this INCREMENT
+        // as two separate calls straddling the actual fire. A truly
+        // race-free cap needs a single "increment IFF under cap" SQL
+        // statement that the runner calls BEFORE firing and that treats
+        // 0-rows-affected as "cap reached, defer". That requires a new
+        // interface method + a RunnerHost call-site change (both in other
+        // files) — see TryConsumeDailyFireAsync in crossFileNeeded.
         var dayStr = localDay.ToString("yyyy-MM-dd");
         const string sql = """
             UPDATE schedules
@@ -270,33 +283,120 @@ public sealed class ScheduleService : IScheduleService
         }), ct);
     }
 
+    // audit DATA-05: race-free daily-cap consumption.
+    //
+    // The runner today does GetFiresTodayAsync (check) → fire →
+    // IncrementFiresTodayAsync (bump) as three separate steps, so two
+    // interleaved fires of the same schedule can both observe
+    // fires_today < cap before either increments and the schedule fires
+    // cap+1 (or more) times a day, defeating the human-pacing the cap
+    // exists to enforce. This method collapses the whole thing into ONE
+    // gated, atomic SQL statement: it increments fires_today (resetting
+    // on day-rollover) ONLY when the schedule is still under cap, and
+    // reports back whether the slot was actually consumed. 0 rows
+    // affected ⇒ cap already reached this day ⇒ caller must DEFER.
+    //
+    // It is intentionally NOT yet on IScheduleService: wiring it in
+    // requires (1) adding the signature to the interface and (2) changing
+    // RunnerHost.FireAsync to call it BEFORE firing instead of the
+    // check/increment pair — both live in files this audit pass may not
+    // touch. The implementation is provided here, correct and ready, so
+    // the cross-file change is a mechanical hook-up. See crossFileNeeded.
+    //
+    // Returns the post-increment count when the slot was consumed
+    // (>= 1), or null when the cap was already reached and nothing was
+    // written (caller should defer to the next active window).
+    public async Task<int?> TryConsumeDailyFireAsync(
+        long id, DateOnly localDay, int cap, CancellationToken ct = default)
+    {
+        if (cap <= 0)
+        {
+            // No positive cap configured → caller treats it as "no
+            // daily limit"; just bump the counter for stats parity.
+            return await IncrementFiresTodayAsync(id, localDay, ct);
+        }
+
+        var dayStr = localDay.ToString("yyyy-MM-dd");
+        // The WHERE clause is the atomic gate:
+        //   • day rolled over (last_fire_day NULL or != today) → a fresh
+        //     day, always allowed (counter resets to 1), OR
+        //   • same day AND fires_today < cap → still under quota.
+        // If neither holds the row isn't matched, 0 rows change, and the
+        // trailing changes() returns 0 → cap reached. RETURNING isn't
+        // available on the SQLite build we target, so we read changes()
+        // and the (possibly updated) counter back in the same gated batch.
+        const string sql = """
+            UPDATE schedules
+               SET fires_today = CASE
+                                   WHEN last_fire_day = @day THEN fires_today + 1
+                                   ELSE 1
+                                 END,
+                   last_fire_day = @day,
+                   updated_at    = @now
+             WHERE id = @id
+               AND (last_fire_day IS NULL
+                    OR last_fire_day <> @day
+                    OR fires_today < @cap);
+            SELECT changes(), fires_today FROM schedules WHERE id = @id;
+        """;
+        var row = await _db.QueueAsync(c => c.QuerySingleOrDefaultAsync<(long Changed, int FiresToday)>(
+            sql, new { id, day = dayStr, cap, now = DateTime.UtcNow }), ct);
+        return row.Changed > 0 ? row.FiresToday : (int?)null;
+    }
+
+    // audit DATA-05: refund a slot consumed by TryConsumeDailyFireAsync
+    // when the fire didn't actually launch. Floored at 0 and gated on the
+    // day still matching, so it can't underflow or cross a day rollover.
+    public Task RefundDailyFireAsync(
+        long id, DateOnly localDay, CancellationToken ct = default)
+    {
+        var dayStr = localDay.ToString("yyyy-MM-dd");
+        const string sql = """
+            UPDATE schedules
+               SET fires_today = CASE WHEN fires_today > 0 THEN fires_today - 1 ELSE 0 END,
+                   updated_at  = @now
+             WHERE id = @id AND last_fire_day = @day;
+        """;
+        return _db.QueueAsync(c => c.ExecuteAsync(
+            sql, new { id, day = dayStr, now = DateTime.UtcNow }), ct);
+    }
+
     public async Task<int> GetFiresTodayAsync(
         long id, DateOnly localDay, CancellationToken ct = default)
     {
-        // Phase 71cc — read-or-reset. A single SELECT tells us whether
-        // last_fire_day matches today; if it doesn't, we zero the
-        // counter in the same call. Avoids a no-op write on the hot
-        // path where the day hasn't rolled.
+        // Phase 71cc — read-or-reset. Originally this issued a SELECT,
+        // compared last_fire_day in C#, then (on a stale day) fired a
+        // SEPARATE reset UPDATE — two un-coupled round-trips.
+        //
+        // audit DATA-05: collapse the stale-day reset and the read into
+        // ONE gated SQL batch so two concurrent stale-day calls can't
+        // each independently reset the counter (the read-reset race).
+        // The reset is guarded by `last_fire_day <> @day` so it is an
+        // idempotent no-op once any writer has rolled the day over, and
+        // the trailing SELECT always returns the authoritative post-write
+        // value. _querySemaphore serialises the whole batch as one
+        // statement-group, so there is no interleave between the reset
+        // and the read.
+        //
+        // NOTE: this only removes the read-reset sub-race. The
+        // check-then-fire-then-increment window in the runner (cap read
+        // here, IncrementFiresTodayAsync later) is NOT closed by this
+        // method alone — see the class-level remark below and the
+        // crossFileNeeded note: a true atomic "consume one fire if under
+        // cap" needs a new interface method the runner calls pre-fire.
         var dayStr = localDay.ToString("yyyy-MM-dd");
         const string sql = """
-            SELECT fires_today, last_fire_day FROM schedules WHERE id = @id;
-        """;
-        var row = await _db.QueueAsync(c => c.QuerySingleOrDefaultAsync<(int FiresToday, string? LastFireDay)>(
-            sql, new { id }), ct);
-        if (row.LastFireDay == dayStr) return row.FiresToday;
-        // Stale or null — reset.
-        const string reset = """
             UPDATE schedules
-               SET fires_today = 0,
+               SET fires_today   = 0,
                    last_fire_day = @day,
-                   updated_at = @now
-             WHERE id = @id;
+                   updated_at    = @now
+             WHERE id = @id AND (last_fire_day IS NULL OR last_fire_day <> @day);
+            SELECT fires_today FROM schedules WHERE id = @id;
         """;
-        await _db.QueueAsync(c => c.ExecuteAsync(reset, new
+        return await _db.QueueAsync(c => c.ExecuteScalarAsync<int>(sql, new
         {
             id, day = dayStr, now = DateTime.UtcNow,
         }), ct);
-        return 0;
     }
 
     /// <summary>Force-tag a DateTime as UTC. Inputs from the runner

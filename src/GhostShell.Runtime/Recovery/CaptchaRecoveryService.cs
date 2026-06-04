@@ -16,15 +16,19 @@ namespace GhostShell.Runtime.Recovery;
 /// <code>
 ///   captcha hit
 ///     │
+///     ├── this profile hit 5+ captchas/hour?  (CAPTCHA-02: profile-scoped,
+///     │    NOT a proxy-wide count — siblings on a shared rotating proxy
+///     │    must not pause a healthy profile)
+///     │    YES ──▶ L5 Exhausted: pause profile + critical notification
+///     │
 ///     ├── proxy has rotation API?
 ///     │    YES ──▶ count captchas this proxy/last hour
 ///     │              0       → L1 Light:        rotate IP
 ///     │              1–2     → L2 Moderate:     rotate IP + skip restore
-///     │              3–4     → L3 Aggressive:   rotate IP + skip restore + FP regen
-///     │              5+      → L5 Exhausted:    pause profile + critical notification
+///     │              3+      → L3 Aggressive:   rotate IP + skip restore + FP regen
 ///     │
 ///     │    NO  ──▶ L4 NoProxyFallback: skip restore + FP regen + longer cooldown
-///     │            (5+/hour still escalates to L5 — no proxy moves left)
+///     │            (this profile at 5+/hour still escalates to L5)
 /// </code>
 ///
 /// <para>Every action is best-effort and individually safe to fail —
@@ -100,8 +104,15 @@ public sealed class CaptchaRecoveryService : ICaptchaRecoveryService
             //      copy — Google's English captcha page text. Falls
             //      apart on localised Russian/Ukrainian variants but
             //      catches the vast majority of cases.
+            // audit CAPTCHA-01: ExecuteScript wraps this source in a
+            // function body and only marshals a value back to C# when the
+            // body uses a top-level `return`. The IIFE expression alone
+            // discards its result (returns undefined → null), so every
+            // captcha page was reported as "not a captcha" and recovery
+            // never fired. Prefix with `return`, matching the pattern in
+            // ManualCaptchaSolver/TwoCaptchaSolver.DetectAsync.
             const string js = @"
-                (function() {
+                return (function() {
                     try {
                         var u = location.href || '';
                         if (u.indexOf('/sorry/index') >= 0) return 'sorry_url';
@@ -158,9 +169,11 @@ public sealed class CaptchaRecoveryService : ICaptchaRecoveryService
             catch (Exception ex) { _log.LogDebug(ex, "CaptchaRecovery: proxy lookup failed"); }
         }
 
-        // 2) Count recent captchas — proxy-scoped (used to escalate
-        //    severity) and profile-scoped (telemetry only — events
-        //    are keyed by proxy slug, not profile).
+        // 2) Count recent captchas — proxy-scoped (drives the L1–L3
+        //    rotation ladder) and profile-scoped (drives the L5
+        //    exhaustion/pause decision). audit CAPTCHA-02: the two are
+        //    now genuinely distinct — the profile count filters events
+        //    by the profile stamp instead of mirroring the proxy count.
         var (proxyCaptchasLastHour, profileCaptchasLastHour) =
             await CountRecentCaptchasAsync(profile, proxy, ct);
 
@@ -189,8 +202,17 @@ public sealed class CaptchaRecoveryService : ICaptchaRecoveryService
         // 5+ captchas in 60 minutes means the moves we'd normally take
         // (rotate, skip restore, regen FP) already failed at least
         // 4 times. Asking the user is the right move.
-        var captchaPressure = Math.Max(proxyCaptchasLastHour, profileCaptchasLastHour);
-        if (captchaPressure >= ExhaustionThresholdPerHour)
+        //
+        // audit CAPTCHA-02: exhaustion is PROFILE-scoped, not a Max over
+        // proxy+profile. The threshold means "THIS profile keeps getting
+        // walled" (see the ExhaustionThresholdPerHour doc-comment). Using
+        // Max(proxy, profile) let captchas from OTHER profiles sharing a
+        // rotating residential proxy force a healthy profile straight to
+        // L5 (pause + critical alert). Now we gate on this profile's own
+        // count; high proxy-wide pressure is handled by the proxy-scoped
+        // L3 ladder below (full reset), which is the right response to a
+        // noisy exit IP without pausing a profile that's behaving.
+        if (profileCaptchasLastHour >= ExhaustionThresholdPerHour)
         {
             return new CaptchaRecoveryPlan
             {
@@ -200,7 +222,7 @@ public sealed class CaptchaRecoveryService : ICaptchaRecoveryService
                 RegenerateFingerprint   = true,
                 AutoRelaunch            = false,   // let the user take over
                 Cooldown                = TimeSpan.FromMinutes(5),
-                Reason                  = $"{captchaPressure} captchas in last hour — pausing auto-retry, manual attention recommended",
+                Reason                  = $"{profileCaptchasLastHour} captchas for this profile in last hour — pausing auto-retry, manual attention recommended",
                 CaptchasLastHour        = profileCaptchasLastHour,
                 ProxyCaptchasLastHour   = proxyCaptchasLastHour,
             };
@@ -398,9 +420,17 @@ public sealed class CaptchaRecoveryService : ICaptchaRecoveryService
         {
             try
             {
-                var detail = string.IsNullOrEmpty(incident.Query)
-                    ? $"severity={plan.Severity}"
-                    : $"severity={plan.Severity}; query='{Truncate(incident.Query, 60)}'";
+                // audit CAPTCHA-02: stamp the profile name into the event
+                // detail so CountRecentCaptchasAsync can derive a TRUE
+                // per-profile count instead of copying the proxy count.
+                // Several profiles routinely share one rotating residential
+                // proxy, so the profile dimension must be filtered, not
+                // assumed equal to the proxy dimension. The token is
+                // machine-readable ("profile='<name>'") yet still reads
+                // fine in the timeline tooltip.
+                var detail = $"profile='{Truncate(incident.ProfileName, 80)}'; severity={plan.Severity}";
+                if (!string.IsNullOrEmpty(incident.Query))
+                    detail += $"; query='{Truncate(incident.Query, 60)}'";
                 if (!string.IsNullOrEmpty(incident.ExitIp))
                     detail += $"; ip={incident.ExitIp}";
                 await _proxyHealth.RecordAsync(new ProxyHealthEvent
@@ -459,6 +489,17 @@ public sealed class CaptchaRecoveryService : ICaptchaRecoveryService
 
         if (_proxyHealth is null || proxy is null) return (0, 0);
 
+        // audit CAPTCHA-02: derive a TRUE per-profile count by matching
+        // the "profile='<name>'" token we now stamp into captcha event
+        // details (see ExecutePlanAsync step 4). Previously profileHr was
+        // just a copy of proxyHr, so siblings sharing a rotating proxy
+        // could force a healthy profile straight to L5 Exhausted. We
+        // build the match token once and look for it as a substring so
+        // the count is independent of the rest of the detail format.
+        string? profileToken = profile is { Name: { Length: > 0 } pname }
+            ? $"profile='{Truncate(pname, 80)}'"
+            : null;
+
         try
         {
             var events = await _proxyHealth.ListForProxyAsync(proxy.Slug, since, ct);
@@ -466,12 +507,16 @@ public sealed class CaptchaRecoveryService : ICaptchaRecoveryService
             {
                 if (ev.Kind != ProxyHealthEventKind.Captcha) continue;
                 proxyHr++;
-                // Best-effort profile-scoped count: the event detail
-                // string carries no profile id, so we approximate
-                // profile-rate ≈ proxy-rate. Good enough — most
-                // profiles have a 1:1 proxy binding, and exhaustion
-                // logic uses Max(proxy, profile) anyway.
-                profileHr++;
+                // Count toward THIS profile only when the event carries
+                // our profile stamp. Legacy events recorded before this
+                // fix have no token and so contribute to proxy pressure
+                // only — the conservative, correct default.
+                if (profileToken is not null &&
+                    ev.Detail is { Length: > 0 } d &&
+                    d.Contains(profileToken, StringComparison.Ordinal))
+                {
+                    profileHr++;
+                }
             }
         }
         catch (Exception ex)

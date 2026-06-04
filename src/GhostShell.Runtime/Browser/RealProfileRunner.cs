@@ -505,8 +505,24 @@ public sealed class RealProfileRunner : IProfileRunner, IAsyncDisposable
             {
                 // Still need to clean up the registered CTS so Stop
                 // can find a path to cancel the (browser-only) run.
-                _scriptCts.TryRemove(profile.Name, out _);
-                scriptCts.Dispose();
+                //
+                // audit SESSION-11: only dispose the CTS if WE are still
+                // its registered owner. If StopInternalAsync already
+                // TryRemoved it, Stop now owns the cancel+dispose
+                // lifecycle — disposing it here would yank the source out
+                // from under Stop's Cancel() and force it down the
+                // ObjectDisposedException path. TryRemove(KeyValuePair)
+                // is the atomic compare-and-remove primitive: it removes
+                // the entry ONLY if the stored value is reference-equal to
+                // our scriptCts, so exactly one side (this cleanup or Stop)
+                // ever owns the dispose. Mirrors the ownership guard in
+                // KickAssignedScriptAsync's finally.
+                if (_scriptCts.TryRemove(
+                        new KeyValuePair<string, CancellationTokenSource>(profile.Name, scriptCts)))
+                {
+                    try { scriptCts.Dispose(); }
+                    catch (ObjectDisposedException) { /* defensive — already disposed */ }
+                }
                 _log.LogInformation(
                     "Browser-only launch for '{P}' (assigned script kick suppressed)",
                     profile.Name);
@@ -924,10 +940,21 @@ public sealed class RealProfileRunner : IProfileRunner, IAsyncDisposable
         // observes ct.IsCancellationRequested between steps and
         // unwinds cleanly. Cancelling first means the script's last
         // ExecuteScriptAsync resolves before we yank the driver.
+        //
+        // audit SESSION-11: the browser-only cleanup task (StartAsync)
+        // races us here — it TryRemoves+Disposes the same CTS. If it
+        // disposed the source after we TryRemoved it (so we hold the
+        // reference) but before we Cancel(), Cancel() throws
+        // ObjectDisposedException. That's a benign, EXPECTED outcome
+        // (the run is already being torn down), so catch it explicitly
+        // instead of swallowing every exception with a bare catch — a
+        // future edit that logs/rethrows in this block must not turn an
+        // expected disposal race into an intermittent crash on Stop.
         if (_scriptCts.TryRemove(profileName, out var sCts))
         {
             try { sCts.Cancel(); }
-            catch { /* already cancelled */ }
+            catch (ObjectDisposedException) { /* cleanup task disposed it first — already done */ }
+            catch (AggregateException) { /* a cancel callback threw; cancellation still propagated */ }
         }
 
         // Stop watchdog FIRST — otherwise it could heartbeat against

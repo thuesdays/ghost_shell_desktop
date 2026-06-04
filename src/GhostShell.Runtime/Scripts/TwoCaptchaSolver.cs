@@ -136,13 +136,19 @@ public sealed class TwoCaptchaSolver : ICaptchaSolver
         // Inject token into the page's response field. Slight differ-
         // ences between recaptcha (textarea#g-recaptcha-response) and
         // hcaptcha (textarea[name=h-captcha-response]) — handle both.
+        // audit CAPTCHA-08: prefix the IIFE with `return` so its result
+        // actually reaches C# (per Selenium ExecuteScript semantics — see
+        // the other scripts in this file), and report how many response
+        // fields we populated so SolveAsync can tell a real injection from
+        // a no-op (page had no g-recaptcha-response / h-captcha-response).
         var injectJs = $$"""
-            (function() {
+            return (function() {
               var token = {{JsonSerializer.Serialize(token)}};
+              var filled = 0;
               var t1 = document.getElementById('g-recaptcha-response');
-              if (t1) { t1.style.display = 'block'; t1.value = token; }
+              if (t1) { t1.style.display = 'block'; t1.value = token; filled++; }
               var t2 = document.querySelector('textarea[name="h-captcha-response"]');
-              if (t2) { t2.style.display = 'block'; t2.value = token; }
+              if (t2) { t2.style.display = 'block'; t2.value = token; filled++; }
               // Many sites also listen for callback names registered
               // via grecaptcha.render({callback}); fire the standard
               // submit handler if present.
@@ -160,15 +166,35 @@ public sealed class TwoCaptchaSolver : ICaptchaSolver
                   });
                 } catch (e) {}
               }
-              return true;
+              return filled;
             })()
         """;
-        await session.ExecuteScriptAsync(injectJs, null, ct);
-        _log.LogInformation("2captcha token injected (kind={Kind})", kind);
+        // audit CAPTCHA-08: only claim success when at least one response
+        // field was actually populated. Selenium marshals the JS number as
+        // a long; tolerate other numeric shapes defensively.
+        var injectResult = await session.ExecuteScriptAsync(injectJs, null, ct);
+        var filledCount = injectResult switch
+        {
+            long l   => l,
+            int i    => i,
+            double d => (long)d,
+            _        => 0L,
+        };
+        if (filledCount <= 0)
+        {
+            _log.LogWarning(
+                "2captcha token NOT injected: no g-recaptcha-response / h-captcha-response "
+                + "field found on page (kind={Kind}) — treating solve as failed so the caller can retry", kind);
+            return false;
+        }
+        _log.LogInformation("2captcha token injected into {Count} field(s) (kind={Kind})", filledCount, kind);
         return true;
     }
 
-    private static async Task<(string Sitekey, string PageUrl)?> ExtractRecaptchaInfoAsync(
+    // audit CAPTCHA-06: instance (was static) so we can log a diagnostic
+    // distinguishing "no captcha element on page" from "element found but
+    // we couldn't read its marshalled shape".
+    private async Task<(string Sitekey, string PageUrl)?> ExtractRecaptchaInfoAsync(
         IBrowserSession session, string kind, CancellationToken ct)
     {
         var attr = kind == "hcaptcha" ? "data-sitekey" : "data-sitekey";
@@ -188,11 +214,39 @@ public sealed class TwoCaptchaSolver : ICaptchaSolver
             })();
         """;
         var raw = await session.ExecuteScriptAsync(js, null, ct);
-        if (raw is null) return null;
-        if (raw is not System.Collections.IDictionary dict) return null;
+        // audit CAPTCHA-06: raw == null is the legitimate "no captcha
+        // element / no sitekey on this page" case — caller's warning is
+        // accurate there, so stay quiet (debug only).
+        if (raw is null)
+        {
+            _log.LogDebug("2captcha sitekey extraction: page returned null (no captcha element or no sitekey, kind={Kind})", kind);
+            return null;
+        }
+        // audit CAPTCHA-06: an element WAS found and marshalled, but not as
+        // an IDictionary (driver upgrade / hCaptcha variant / ReadOnly or
+        // JObject shape). This is a breakage, not an absent captcha — log it
+        // loudly with the actual runtime type so it's triageable instead of
+        // masquerading as "could not extract sitekey".
+        if (raw is not System.Collections.IDictionary dict)
+        {
+            _log.LogWarning(
+                "2captcha sitekey extraction returned an unexpected shape ({Type}) — "
+                + "Selenium marshalling may have changed; cannot read sitekey (kind={Kind})",
+                raw.GetType().FullName, kind);
+            return null;
+        }
         var sitekey = dict["sitekey"]?.ToString();
         var url     = dict["url"]?.ToString();
-        if (string.IsNullOrEmpty(sitekey) || string.IsNullOrEmpty(url)) return null;
+        if (string.IsNullOrEmpty(sitekey) || string.IsNullOrEmpty(url))
+        {
+            // audit CAPTCHA-06: dictionary present but expected keys missing
+            // (key-casing did not survive the round trip, or shape differs).
+            _log.LogWarning(
+                "2captcha sitekey extraction: dictionary present but sitekey/url unreadable "
+                + "(keys=[{Keys}], kind={Kind})",
+                string.Join(",", dict.Keys.Cast<object?>().Select(k => k?.ToString())), kind);
+            return null;
+        }
         return (sitekey, url);
     }
 
@@ -203,6 +257,12 @@ public sealed class TwoCaptchaSolver : ICaptchaSolver
         // off HTTP-server logs, off upstream-proxy access logs.
         // 2captcha accepts both GET and POST for in.php / res.php.
         var method = kind == "hcaptcha" ? "hcaptcha" : "userrecaptcha";
+        // audit CAPTCHA-07: this dictionary holds the paid API key under
+        // "key". It is a SECRET — never pass `form` (or its content) to a
+        // logger or exception message. The provider error fields used below
+        // (Status / Request) come from the *response* and never echo the
+        // key, but always scrub through Redact() before surfacing them so a
+        // future change can't leak it.
         var form = new Dictionary<string, string>
         {
             ["key"]     = _cfg.ApiKey,
@@ -217,12 +277,14 @@ public sealed class TwoCaptchaSolver : ICaptchaSolver
         var body = await resp.Content.ReadFromJsonAsync<TwoCaptchaResponse>(cancellationToken: ct);
         if (body is null || body.Status != 1)
             throw new InvalidOperationException(
-                $"2captcha rejected task: status={body?.Status} request={body?.Request}");
+                $"2captcha rejected task: status={body?.Status} request={Redact(body?.Request)}");
         return body.Request ?? throw new InvalidOperationException("2captcha returned empty request id");
     }
 
     private async Task<string?> PollAsync(string taskId, CancellationToken ct)
     {
+        // audit CAPTCHA-07: as in SubmitTaskAsync, "key" here is the secret
+        // API key — never log or serialize `form`.
         var form = new Dictionary<string, string>
         {
             ["key"]    = _cfg.ApiKey,
@@ -244,10 +306,34 @@ public sealed class TwoCaptchaSolver : ICaptchaSolver
             && body.Request != "CAPCHA_NOT_READY"
             && !body.Request.StartsWith("CAPCHA_", StringComparison.Ordinal))
         {
-            _log.LogWarning("2captcha returned error: {Err}", body.Request);
-            throw new InvalidOperationException(body.Request);
+            // audit CAPTCHA-07: scrub the provider error string before it
+            // hits the log / exception. 2captcha's error codes don't carry
+            // the key today, but Redact() is the enforced guard rail so an
+            // unexpected echo (or a future change) can never disclose it.
+            _log.LogWarning("2captcha returned error: {Err}", Redact(body.Request));
+            throw new InvalidOperationException(Redact(body.Request));
         }
         return null;
+    }
+
+    // audit CAPTCHA-07: single choke point for surfacing any provider-
+    // supplied string into a log or exception. Removes the configured API
+    // key (and its URL-encoded form) if it ever appears, so the secret can
+    // never be written to a diagnostics-shipped log file regardless of what
+    // 2captcha echoes back or what tracing a future maintainer adds.
+    private string? Redact(string? s)
+    {
+        if (string.IsNullOrEmpty(s)) return s;
+        var key = _cfg.ApiKey;
+        if (string.IsNullOrEmpty(key)) return s;
+        s = s.Replace(key, "***REDACTED-2CAPTCHA-KEY***", StringComparison.Ordinal);
+        // Defend against the URL-encoded form too (in case a request body
+        // ever leaks through a handler), but only when it differs from the
+        // raw key to avoid a pointless second pass.
+        var encoded = Uri.EscapeDataString(key);
+        if (!string.Equals(encoded, key, StringComparison.Ordinal))
+            s = s.Replace(encoded, "***REDACTED-2CAPTCHA-KEY***", StringComparison.Ordinal);
+        return s;
     }
 
     private sealed class TwoCaptchaResponse

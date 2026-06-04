@@ -90,7 +90,12 @@ internal sealed class ProfileService : IProfileService
                  @Note, @CreatedAt, @UpdatedAt,
                  @MyDomainsCsv, @TargetDomainsCsv, @AutoRotateIp);
         """;
-        await _db.Get().ExecuteAsync(sql, p);
+        // audit DATA-03: route the write through QueueAsync so it holds
+        // the process-wide query gate, exactly like ListAsync/GetAsync/
+        // BulkCreateAsync. A direct _db.Get().ExecuteAsync bypasses the
+        // semaphore and can collide with a concurrent open DataReader
+        // ("There is already an open DataReader"), losing the write.
+        await _db.QueueAsync(c => c.ExecuteAsync(sql, p), ct);
         _log.LogInformation(
             "Created profile '{Name}' (group={Group}, template={Template}, lang={Lang}, proxy={Proxy}, enrich={Enrich})",
             p.Name, p.GroupName ?? "—", p.TemplateId ?? "auto",
@@ -119,7 +124,11 @@ internal sealed class ProfileService : IProfileService
                    auto_rotate_ip       = @AutoRotateIp
              WHERE name                 = @Name;
         """;
-        await _db.Get().ExecuteAsync(sql, p);
+        // audit DATA-03: serialise via QueueAsync. A lost UpdateAsync
+        // (transient DataReader collision on the shared connection) would
+        // silently launch the profile with stale identity config —
+        // exactly the detectable-leak failure class this product avoids.
+        await _db.QueueAsync(c => c.ExecuteAsync(sql, p), ct);
         _log.LogInformation("Updated profile '{Name}'", p.Name);
     }
 
@@ -140,8 +149,11 @@ internal sealed class ProfileService : IProfileService
                    last_run_at = @StartedAt
              WHERE name        = @Name;
         """;
-        var rows = await _db.Get().ExecuteAsync(
-            sql, new { Name = name, StartedAt = startedAt });
+        // audit DATA-03: serialise via QueueAsync so the counter bump
+        // shares the query gate and can't collide with a concurrent
+        // reader/writer on the single shared SqliteConnection.
+        var rows = await _db.QueueAsync(
+            c => c.ExecuteAsync(sql, new { Name = name, StartedAt = startedAt }), ct);
         if (rows == 0)
         {
             _log.LogWarning(
@@ -213,6 +225,17 @@ internal sealed class ProfileService : IProfileService
         //                  silently waste a slot.
         var pool = req.ProxyPool ?? Array.Empty<string>();
 
+        // audit DATA-07: derive a fixed-width zero-pad from the largest
+        // index this run can emit (StartIndex + Count - 1 plus the 1000
+        // collision-probe headroom), with a floor of 3 to preserve the
+        // historical profile_000 look. The old ":000" stopped padding
+        // past 999, so profile_1000 was indistinguishable from a future
+        // run's StartIndex=1000 — fixed width keeps names well-formed and
+        // uniqueness obvious across runs.
+        long maxIdx = (long)req.StartIndex + Math.Max(0, req.Count - 1) + 1000;
+        var  padWidth = Math.Max(3, maxIdx.ToString().Length);
+        var  fmt = "D" + padWidth;
+
         var insertSql = """
             INSERT INTO profiles
                 (name, group_name, template_id, language, proxy_slug,
@@ -241,23 +264,28 @@ internal sealed class ProfileService : IProfileService
                     // forever. The format string still emits the
                     // numeric portion fine for any positive long.
                     long idx  = (long)req.StartIndex + i;
-                    var  name = $"{prefix}{idx:000}";
+                    var  name = prefix + idx.ToString(fmt);
 
                     // Auto-skip collisions. Keep counting forward until
                     // we either land on a free name or pass a sane
                     // ceiling so we don't loop forever on a saturated
                     // namespace.
+                    // audit DATA-07: do NOT record intermediate probe
+                    // names as "skipped" — they were never an intended
+                    // target for this row, and adding them per-probe both
+                    // overcounted collisions and duplicated entries. Only
+                    // the row's originally requested name is reported as
+                    // skipped, and only when we actually abandon the row.
                     long probeIdx = idx;
                     while (existing.Contains(name) && probeIdx - idx < 1000)
                     {
-                        skipped.Add(name);
                         probeIdx++;
-                        name = $"{prefix}{probeIdx:000}";
+                        name = prefix + probeIdx.ToString(fmt);
                     }
                     if (existing.Contains(name))
                     {
-                        // Hit the ceiling — record + bail on this row.
-                        skipped.Add(name);
+                        // Hit the ceiling — record the requested name + bail.
+                        skipped.Add(prefix + idx.ToString(fmt));
                         continue;
                     }
 
@@ -293,11 +321,17 @@ internal sealed class ProfileService : IProfileService
             }
         }, ct);
 
+        // audit DATA-07: deduplicate defensively — a name should only be
+        // reported once even if the same target were hit twice.
+        var skippedDistinct = skipped
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
         _log.LogInformation(
             "Bulk-created {Created} profile(s); skipped {Skipped} collision(s)",
-            created.Count, skipped.Count);
+            created.Count, skippedDistinct.Count);
 
-        return new BulkCreateProfilesResult(created, skipped);
+        return new BulkCreateProfilesResult(created, skippedDistinct);
     }
 
     // ─── Row mapping ───

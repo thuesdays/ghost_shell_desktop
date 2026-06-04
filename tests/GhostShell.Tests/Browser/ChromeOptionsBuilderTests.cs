@@ -34,16 +34,16 @@ public class ChromeOptionsBuilderTests
     }
 
     [Fact]
-    public void StripAuth_BareHostPortWithCredsLeftAlone()
+    public void StripAuth_BareHostPortWithCredsIsStripped()
     {
-        // No scheme is present, so we can't safely identify the '@'
-        // as auth (it could be part of a hostname in some pathological
-        // input). The forwarder branch upstream handles this case
-        // by injecting a synthetic scheme first; StripAuth is the
-        // belt-and-braces fallback and it deliberately won't touch
-        // schemeless inputs.
-        var input = "user:pass@host:8080";
-        Assert.Equal(input, ChromeOptionsBuilder.StripAuth(input));
+        // audit LAUNCH-04: a scheme-less proxy URL of the form
+        // user:pass@host:port MUST have its credentials stripped. The old
+        // behaviour ("leave schemeless inputs alone") leaked the proxy
+        // username/password onto chrome.exe's command line and the
+        // chromedriver log on the forwarder-failure fallback path. A bare
+        // host:port with NO '@' still passes through untouched (covered by
+        // StripAuth_PassesThroughCleanUrls).
+        Assert.Equal("host:8080", ChromeOptionsBuilder.StripAuth("user:pass@host:8080"));
     }
 
     [Fact]

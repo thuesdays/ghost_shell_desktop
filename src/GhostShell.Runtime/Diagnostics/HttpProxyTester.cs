@@ -109,7 +109,14 @@ public sealed class HttpProxyTester : IProxyTester
         foreach (var scheme in schemes)
         {
             ct.ThrowIfCancellationRequested();
-            var attempt = await ProbeViaSchemeAsync(scheme, host, port, user, pass, ct);
+            // audit PROXY-10: build ONE handler/client per scheme and reuse it
+            // across both probes (ip-api + google) for this proxy instead of
+            // spinning up a fresh HttpClientHandler + connection pool per probe.
+            // Halves the handler/socket churn during bulk "Test all" runs and
+            // makes the latency numbers reflect real connection reuse. The
+            // client is disposed at the end of each scheme iteration.
+            using var client = BuildProbeClient(scheme, host, port, user, pass);
+            var attempt = await ProbeViaSchemeAsync(client, scheme, ct);
             attempts.Add(attempt);
             if (attempt.Ok && attempt.Body is { } body)
             {
@@ -120,7 +127,7 @@ public sealed class HttpProxyTester : IProxyTester
                 // Verify google.com responds via this scheme; if not,
                 // mark the result as a "weak" pass so the UI can warn
                 // the user before they assign the proxy to a profile.
-                var googleAttempt = await ProbeGoogleAsync(scheme, host, port, user, pass, ct);
+                var googleAttempt = await ProbeGoogleAsync(client, ct);
                 attempts.Add(googleAttempt);
                 if (!googleAttempt.Ok)
                 {
@@ -242,29 +249,62 @@ public sealed class HttpProxyTester : IProxyTester
         }
     }
 
+    /// <summary>
+    /// audit PROXY-10: single place that builds the proxied HttpClient for a
+    /// scheme so both probes (ip-api + google) reuse one handler + connection
+    /// pool per proxy instead of allocating a fresh handler per probe.
+    ///
+    /// Uses <see cref="SocketsHttpHandler"/> (the modern, pooling-capable
+    /// handler) rather than <see cref="HttpClientHandler"/>. Critically, for
+    /// SOCKS we map the scheme to its *remote-DNS* variant — socks5→socks5h,
+    /// socks4→socks4a — so hostname resolution happens AT THE PROXY, not on
+    /// the local OS resolver. That matches what the patched Chromium does for
+    /// SOCKS profiles (Chrome uses socks5h semantics), keeps the detected
+    /// scheme honest about real DNS behaviour, and avoids leaking the probe
+    /// target's DNS query out the local resolver while a SOCKS proxy is set.
+    /// </summary>
+    private static HttpClient BuildProbeClient(
+        string scheme, string host, int port, string? user, string? pass)
+    {
+        // Map to the remote-DNS SOCKS variant so the proxy resolves the
+        // target host (socks5h / socks4a). HTTP/HTTPS CONNECT already
+        // resolves remotely at the proxy, so pass those through unchanged.
+        var proxyScheme = scheme switch
+        {
+            "socks5" => "socks5h",
+            "socks4" => "socks4a",
+            _        => scheme,
+        };
+        var proxyUri = new Uri($"{proxyScheme}://{host}:{port}");
+        ICredentials? creds = null;
+        if (!string.IsNullOrEmpty(user))
+            creds = new NetworkCredential(user, pass ?? "");
+
+        var handler = new SocketsHttpHandler
+        {
+            Proxy = new WebProxy(proxyUri) { Credentials = creds },
+            UseProxy = true,
+            // Per-scheme client is short-lived (two probes then disposed),
+            // so cap idle pooling tightly — we just want the two probes to
+            // share one connection, not to keep sockets warm afterwards.
+            PooledConnectionIdleTimeout = PerSchemeTimeout,
+            ConnectTimeout = PerSchemeTimeout,
+            // Free proxies often re-write headers / inject banner pages.
+            // Allow auto-redirect so a 302 on the ip-api probe doesn't kill
+            // us. The google probe overrides this per-request below.
+            AllowAutoRedirect = true,
+        };
+        // HttpClient disposes the handler it owns, so the caller's
+        // `using` on the returned client also tears down the handler.
+        return new HttpClient(handler, disposeHandler: true) { Timeout = PerSchemeTimeout };
+    }
+
     private async Task<SchemeAttempt> ProbeViaSchemeAsync(
-        string scheme, string host, int port, string? user, string? pass,
-        CancellationToken ct)
+        HttpClient client, string scheme, CancellationToken ct)
     {
         var sw = Stopwatch.StartNew();
         try
         {
-            // Build proxy URI for this scheme. .NET 6+ accepts
-            // socks4/socks4a/socks5 directly on WebProxy.
-            var proxyUri = new Uri($"{scheme}://{host}:{port}");
-            ICredentials? creds = null;
-            if (!string.IsNullOrEmpty(user))
-                creds = new NetworkCredential(user, pass ?? "");
-
-            var handler = new HttpClientHandler
-            {
-                Proxy = new WebProxy(proxyUri) { Credentials = creds },
-                UseProxy = true,
-                // Free proxies often re-write headers / inject banner
-                // pages. Allow auto-redirect so a 302 doesn't kill us.
-                AllowAutoRedirect = true,
-            };
-            using var client = new HttpClient(handler) { Timeout = PerSchemeTimeout };
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(PerSchemeTimeout);
 
@@ -321,23 +361,19 @@ public sealed class HttpProxyTester : IProxyTester
     /// own probes will succeed.
     /// </summary>
     private async Task<SchemeAttempt> ProbeGoogleAsync(
-        string scheme, string host, int port, string? user, string? pass,
-        CancellationToken ct)
+        HttpClient client, CancellationToken ct)
     {
         var sw = Stopwatch.StartNew();
         try
         {
-            var proxyUri = new Uri($"{scheme}://{host}:{port}");
-            ICredentials? creds = null;
-            if (!string.IsNullOrEmpty(user))
-                creds = new NetworkCredential(user, pass ?? "");
-            var handler = new HttpClientHandler
-            {
-                Proxy = new WebProxy(proxyUri) { Credentials = creds },
-                UseProxy = true,
-                AllowAutoRedirect = false, // generate_204 should be a single hop
-            };
-            using var client = new HttpClient(handler) { Timeout = PerSchemeTimeout };
+            // audit PROXY-10: reuse the per-scheme client built by the caller
+            // (one handler + connection pool shared with the ip-api probe)
+            // instead of constructing a second HttpClientHandler here.
+            // Note: the shared handler keeps AllowAutoRedirect = true, but the
+            // 204 = pass / 3xx = pass / 4xx+ = fail logic below already treats
+            // any non-error status as success, so an auto-followed 3xx on
+            // generate_204 still yields a 2xx pass — equivalent to the prior
+            // single-hop behaviour for this connectivity check.
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(PerSchemeTimeout);
             using var req = new HttpRequestMessage(HttpMethod.Get,

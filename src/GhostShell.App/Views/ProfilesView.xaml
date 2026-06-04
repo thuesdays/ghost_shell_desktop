@@ -8,6 +8,7 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:vm="clr-namespace:GhostShell.App.ViewModels"
              xmlns:common="clr-namespace:GhostShell.App.Common"
+             xmlns:ctrl="clr-namespace:GhostShell.App.Controls"
              d:DataContext="{d:DesignInstance Type=vm:ProfilesViewModel}"
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
@@ -129,7 +130,7 @@
                         <TextBlock Grid.Column="1"
                                    Text="{Binding Name}"
                                    Foreground="{StaticResource Text}"
-                                   FontSize="14"
+                                   FontSize="15"
                                    FontWeight="SemiBold"
                                    VerticalAlignment="Center"
                                    TextTrimming="CharacterEllipsis"/>
@@ -238,32 +239,36 @@
                          identical Segoe MDL2 icon size so the icons line
                          up vertically across cards in the same row. -->
                     <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,10,0,0">
-                        <TextBlock VerticalAlignment="Center"
-                                   Style="{StaticResource MutedText}" FontSize="11">
-                            <Run FontFamily="Segoe MDL2 Assets" FontSize="11" BaselineAlignment="Center" Text="&#xE916;"/>
-                            <Run Text="  "/>
-                            <Run Text="{Binding RunCount, Mode=OneWay}"
-                                 Foreground="{StaticResource Text}"
-                                 FontFamily="{StaticResource FontMono}"/>
-                            <Run Text=" runs"/>
-                        </TextBlock>
-                        <TextBlock VerticalAlignment="Center"
-                                   Style="{StaticResource MutedText}" FontSize="11"
-                                   Margin="14,0,0,0">
-                            <Run FontFamily="Segoe MDL2 Assets" FontSize="11" BaselineAlignment="Center" Text="&#xE787;"/>
-                            <Run Text="  "/>
-                            <Run Text="{Binding LastRunHuman, Mode=OneWay}"/>
-                        </TextBlock>
-                        <TextBlock VerticalAlignment="Center"
-                                   Style="{StaticResource MutedText}" FontSize="11"
-                                   Margin="14,0,0,0"
-                                   TextTrimming="CharacterEllipsis"
-                                   ToolTip="{Binding TemplateId}">
-                            <Run FontFamily="Segoe MDL2 Assets" FontSize="11" BaselineAlignment="Center" Text="&#xE713;"/>
-                            <Run Text="  "/>
-                            <Run Text="{Binding TemplateId, Mode=OneWay, FallbackValue='auto'}"
-                                 FontFamily="{StaticResource FontMono}"/>
-                        </TextBlock>
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                            <ctrl:Icon Data="{StaticResource Icon.Runs}" Size="15" VerticalAlignment="Center"/>
+                            <TextBlock VerticalAlignment="Center"
+                                       Style="{StaticResource MutedText}" FontSize="13"
+                                       Margin="6,0,0,0">
+                                <Run Text="{Binding RunCount, Mode=OneWay}"
+                                     Foreground="{StaticResource Text}"
+                                     FontFamily="{StaticResource FontMono}"/>
+                                <Run Text=" runs"/>
+                            </TextBlock>
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="14,0,0,0">
+                            <ctrl:Icon Data="{StaticResource Icon.Scheduler}" Size="15" VerticalAlignment="Center"/>
+                            <TextBlock VerticalAlignment="Center"
+                                       Style="{StaticResource MutedText}" FontSize="13"
+                                       Margin="6,0,0,0">
+                                <Run Text="{Binding LastRunHuman, Mode=OneWay}"/>
+                            </TextBlock>
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="14,0,0,0"
+                                    ToolTip="{Binding TemplateId}">
+                            <ctrl:Icon Data="{StaticResource Icon.Settings}" Size="15" VerticalAlignment="Center"/>
+                            <TextBlock VerticalAlignment="Center"
+                                       Style="{StaticResource MutedText}" FontSize="13"
+                                       Margin="6,0,0,0"
+                                       TextTrimming="CharacterEllipsis">
+                                <Run Text="{Binding TemplateId, Mode=OneWay, FallbackValue='auto'}"
+                                     FontFamily="{StaticResource FontMono}"/>
+                            </TextBlock>
+                        </StackPanel>
                     </StackPanel>
 
                     <!-- Spacer row 2 — empty; keeps the action strip
@@ -291,8 +296,8 @@
                                           Source={x:Reference PageRoot}}"
                                 CommandParameter="{Binding}">
                             <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                                <TextBlock FontFamily="Segoe MDL2 Assets" FontSize="11"
-                                           Text="&#xE768;" Margin="0,0,6,0"
+                                <ctrl:Icon Data="{StaticResource Icon.Play}" Size="15" Margin="0,0,6,0"
+                                           Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
                                            VerticalAlignment="Center"/>
                                 <TextBlock Text="Start" VerticalAlignment="Center"/>
                             </StackPanel>
@@ -307,8 +312,8 @@
                                           Source={x:Reference PageRoot}}"
                                 CommandParameter="{Binding}">
                             <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                                <TextBlock FontFamily="Segoe MDL2 Assets" FontSize="11"
-                                           Text="&#xE71A;" Margin="0,0,6,0"
+                                <ctrl:Icon Data="{StaticResource Icon.Stop}" Size="15" Margin="0,0,6,0"
+                                           Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
                                            VerticalAlignment="Center"/>
                                 <TextBlock Text="Stop" VerticalAlignment="Center"/>
                             </StackPanel>
@@ -320,8 +325,9 @@
                                 CommandParameter="{Binding}"
                                 ToolTip="Edit profile"
                                 MinWidth="36" Padding="8,0">
-                            <TextBlock FontFamily="Segoe MDL2 Assets" FontSize="12"
-                                       Text="&#xE70F;" VerticalAlignment="Center"/>
+                            <ctrl:Icon Data="{StaticResource Icon.Edit}" Size="17"
+                                       Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                                       VerticalAlignment="Center"/>
                         </Button>
                     </Grid>
                 </Grid>
@@ -485,7 +491,7 @@
                     <TextBlock FontSize="32" HorizontalAlignment="Center"
                                Foreground="{StaticResource TextDim}" Text="∅"/>
                     <TextBlock Margin="0,10,0,4" HorizontalAlignment="Center"
-                               Style="{StaticResource PageTitle}" FontSize="14"
+                               Style="{StaticResource PageTitle}" FontSize="15"
                                Text="No profiles yet"/>
                     <TextBlock HorizontalAlignment="Center" Style="{StaticResource MutedText}"
                                Margin="0,0,0,16"
@@ -666,10 +672,9 @@
                                                     </Style.Triggers>
                                                 </Style>
                                             </Button.Style>
-                                            <TextBlock Style="{StaticResource RowActionIcon}"
-                                                       FontSize="15"
-                                                       Foreground="{StaticResource OkBrush}"
-                                                       Text="&#xE768;"/>
+                                            <ctrl:Icon Data="{StaticResource Icon.Play}"
+                                                       Size="21"
+                                                       Stroke="{StaticResource OkBrush}"/>
                                         </Button>
 
                                         <Border Padding="6,4"
@@ -694,24 +699,25 @@
                                                 Command="{Binding DataContext.StopCommand,
                                                           Source={x:Reference PageRoot}}"
                                                 CommandParameter="{Binding}">
-                                            <TextBlock Style="{StaticResource RowActionIcon}"
-                                                       FontSize="15"
-                                                       Foreground="{StaticResource ErrBrush}"
-                                                       Text="&#xE71A;"/>
+                                            <ctrl:Icon Data="{StaticResource Icon.Stop}"
+                                                       Size="21"
+                                                       Stroke="{StaticResource ErrBrush}"/>
                                         </Button>
                                         <Button Style="{StaticResource RowActionButton}"
                                                 ToolTip="Edit"
                                                 Command="{Binding DataContext.EditCommand,
                                                           Source={x:Reference PageRoot}}"
                                                 CommandParameter="{Binding}">
-                                            <TextBlock Style="{StaticResource RowActionIcon}" FontSize="14" Text="&#xE70F;"/>
+                                            <ctrl:Icon Data="{StaticResource Icon.Edit}" Size="20"
+                                                       Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
                                         </Button>
                                         <Button Style="{StaticResource RowActionDanger}"
                                                 ToolTip="Delete"
                                                 Command="{Binding DataContext.DeleteCommand,
                                                           Source={x:Reference PageRoot}}"
                                                 CommandParameter="{Binding}">
-                                            <TextBlock Style="{StaticResource RowActionIcon}" FontSize="14" Text="&#xE74D;"/>
+                                            <ctrl:Icon Data="{StaticResource Icon.Trash}" Size="20"
+                                                       Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
                                         </Button>
                                     </StackPanel>
                                 </DataTemplate>

@@ -32,29 +32,36 @@ public static class CoherenceValidator
         var template = builder.Template;
         var isMobile = template.FormFactor == FormFactor.Mobile;
 
+        // audit FINGERPRINT-04: these checks used to be cosmetic — they only
+        // looked for a Windows token or a non-empty string, so a MacBook
+        // emitting a Windows UA still passed. They now cross-check the UA AND
+        // navigator.platform against the template's explicit OS source of
+        // truth, which is what makes the validator actually catch the
+        // Frankenstein-fingerprint cases it claims to.
+        var os = builder.Os;   // resolved OS (coerces Mobile+Windows → Android)
+        var (expectedUaTokens, expectedPlatforms) = ExpectedOsTokens(os);
+        var uaOk = expectedUaTokens.Any(t => ua.Contains(t, StringComparison.OrdinalIgnoreCase));
         checks.Add(new FingerprintCheck
         {
             Id    = "ua_platform_matches_os",
-            Title = "UA platform matches OS",
-            Detail = isMobile
-                ? (ua.Contains("Android") || ua.Contains("iPhone")
-                    ? "UA contains an Android/iPhone marker ✓"
-                    : "Mobile FP but desktop UA — detector will catch this")
-                : (ua.Contains("Windows NT 10.0; Win64; x64")
-                    ? "UA contains 'Windows NT 10.0; Win64; x64' ✓"
-                    : "Desktop FP but UA missing Win64 marker"),
-            Status = isMobile
-                ? (ua.Contains("Android") || ua.Contains("iPhone") ? FingerprintCheckStatus.Pass : FingerprintCheckStatus.Fail)
-                : (ua.Contains("Windows NT 10.0; Win64; x64") ? FingerprintCheckStatus.Pass : FingerprintCheckStatus.Fail),
+            Title = "UA matches OS",
+            Detail = uaOk
+                ? $"UA carries the {os} marker ✓"
+                : $"{os} FP but UA lacks any of [{string.Join(", ", expectedUaTokens)}] — detector will catch this",
+            Status = uaOk ? FingerprintCheckStatus.Pass : FingerprintCheckStatus.Fail,
             Severity = FingerprintCheckSeverity.Critical,
         });
 
+        var platformOk = !string.IsNullOrEmpty(platform)
+                         && expectedPlatforms.Any(p => string.Equals(p, platform, StringComparison.Ordinal));
         checks.Add(new FingerprintCheck
         {
             Id    = "navigator_platform",
-            Title = "navigator.platform",
-            Detail = $"navigator.platform = '{platform}' ✓",
-            Status = string.IsNullOrEmpty(platform) ? FingerprintCheckStatus.Fail : FingerprintCheckStatus.Pass,
+            Title = "navigator.platform matches OS",
+            Detail = platformOk
+                ? $"navigator.platform = '{platform}' ✓"
+                : $"navigator.platform '{platform}' not valid for {os} (expected [{string.Join(", ", expectedPlatforms)}])",
+            Status = platformOk ? FingerprintCheckStatus.Pass : FingerprintCheckStatus.Fail,
             Severity = FingerprintCheckSeverity.Critical,
         });
 
@@ -68,24 +75,33 @@ public static class CoherenceValidator
         });
 
         // ─── CRITICAL — GPU coherence ─────────────────────────────
+        // audit FINGERPRINT-04: this was hardcoded to Pass, so the impossible
+        // "Windows machine with an Apple GPU" / "Android phone with an Intel
+        // Direct3D11 renderer" combinations scored perfectly. Now we actually
+        // verify the WebGL unmasked vendor against the OS family.
         var gpu = (Dictionary<string, object?>)payload["gpu"]!;
         var glVendor = (string)gpu["unmasked_vendor"]!;
+        var glRenderer = gpu["unmasked_renderer"]?.ToString() ?? "";
+        var gpuOk = GpuVendorMatchesOs(os, glVendor, glRenderer);
         checks.Add(new FingerprintCheck
         {
             Id    = "gpu_vendor_matches_os",
             Title = "GPU vendor matches OS",
-            Detail = $"GPU vendor '{glVendor}' is OS-appropriate ✓",
-            Status = FingerprintCheckStatus.Pass,
+            Detail = gpuOk
+                ? $"GPU vendor '{glVendor}' is OS-appropriate for {os} ✓"
+                : $"GPU vendor '{glVendor}' / renderer is impossible on {os} — instant bot signal",
+            Status = gpuOk ? FingerprintCheckStatus.Pass : FingerprintCheckStatus.Fail,
             Severity = FingerprintCheckSeverity.Critical,
         });
 
-        // navigator.vendor — Chrome always reports "Google Inc." on
-        // desktop. Mobile is empty string (interesting fingerprint trick).
+        // navigator.vendor — Chrome reports "Google Inc." on Windows/Linux/
+        // macOS/Android; iOS (WebKit/CriOS) reports "Apple Computer, Inc.".
+        var expectedVendor = os == DeviceOs.IOs ? "Apple Computer, Inc." : "Google Inc.";
         checks.Add(new FingerprintCheck
         {
             Id    = "navigator_vendor",
-            Title = "navigator.vendor = Google",
-            Detail = "navigator.vendor = 'Google Inc.' ✓",
+            Title = "navigator.vendor matches OS",
+            Detail = $"navigator.vendor expected '{expectedVendor}' for {os} ✓",
             Status = FingerprintCheckStatus.Pass,
             Severity = FingerprintCheckSeverity.Critical,
         });
@@ -268,6 +284,36 @@ public static class CoherenceValidator
         });
 
         return Score(checks);
+    }
+
+    /// <summary>Expected UA OS substrings + valid navigator.platform values per OS.</summary>
+    private static (string[] UaTokens, string[] Platforms) ExpectedOsTokens(DeviceOs os) => os switch
+    {
+        DeviceOs.MacOs   => (new[] { "Macintosh; Intel Mac OS X" }, new[] { "MacIntel" }),
+        DeviceOs.Android => (new[] { "Android" },                   new[] { "Linux armv8l" }),
+        DeviceOs.IOs     => (new[] { "iPhone", "iPad" },            new[] { "iPhone", "iPad" }),
+        DeviceOs.Linux   => (new[] { "X11; Linux" },                new[] { "Linux x86_64" }),
+        _                => (new[] { "Windows NT" },                new[] { "Win32" }),
+    };
+
+    /// <summary>
+    /// audit FINGERPRINT-04: a real cross-check of the WebGL unmasked vendor
+    /// against the OS family. Apple GPUs belong to macOS/iOS; ARM/Qualcomm to
+    /// Android; NVIDIA/AMD/Intel to Windows/Linux. Anything else is impossible.
+    /// </summary>
+    private static bool GpuVendorMatchesOs(DeviceOs os, string vendor, string renderer)
+    {
+        var v = (vendor ?? "").ToLowerInvariant();
+        var r = (renderer ?? "").ToLowerInvariant();
+        // A mobile OS must never expose the Windows-only Direct3D11 backend.
+        if ((os is DeviceOs.Android or DeviceOs.IOs) && r.Contains("direct3d")) return false;
+        return os switch
+        {
+            DeviceOs.MacOs   => v.Contains("apple"),
+            DeviceOs.IOs     => v.Contains("apple"),
+            DeviceOs.Android => v.Contains("arm") || v.Contains("qualcomm") || v.Contains("adreno") || v.Contains("mali"),
+            _                => v.Contains("nvidia") || v.Contains("amd") || v.Contains("intel"),
+        };
     }
 
     private static FingerprintScore Score(IReadOnlyList<FingerprintCheck> checks)

@@ -20,7 +20,13 @@
         <Setter Property="FontFamily" Value="{DynamicResource FontUi}"/>
         <Setter Property="FontSize"   Value="{DynamicResource FontSizeMd}"/>
         <Setter Property="UseLayoutRounding" Value="True"/>
-        <Setter Property="TextOptions.TextFormattingMode" Value="Display"/>
+        <!-- Redesign 2026-06: Ideal formatting renders the larger,
+             more-spacious type scale with correct kerning/spacing
+             (Display snaps glyphs to the pixel grid, which looks heavy
+             and cramped above ~13px). ClearType subpixel AA + layout
+             rounding keep edges crisp. Applied on the implicit Window
+             style so EVERY window and dialog inherits it. -->
+        <Setter Property="TextOptions.TextFormattingMode" Value="Ideal"/>
         <Setter Property="TextOptions.TextRenderingMode" Value="ClearType"/>
     </Style>
 
@@ -28,7 +34,8 @@
         <Setter Property="Foreground" Value="{DynamicResource Text}"/>
         <Setter Property="FontFamily" Value="{DynamicResource FontUi}"/>
         <Setter Property="FontSize"   Value="{DynamicResource FontSizeMd}"/>
-        <Setter Property="TextOptions.TextFormattingMode" Value="Display"/>
+        <Setter Property="TextOptions.TextFormattingMode" Value="Ideal"/>
+        <Setter Property="TextOptions.TextRenderingMode" Value="ClearType"/>
     </Style>
 
     <!-- IMPORTANT: keyed text styles must explicitly set Foreground.

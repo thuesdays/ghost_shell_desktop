@@ -62,4 +62,26 @@ public interface IScheduleService
     /// counter actually needs to be reset.
     /// </summary>
     Task<int> GetFiresTodayAsync(long id, DateOnly localDay, CancellationToken ct = default);
+
+    /// <summary>
+    /// audit DATA-05 — race-free daily-cap consumption. Atomically
+    /// CHECK-AND-INCREMENT <c>fires_today</c> in ONE gated SQL statement
+    /// (resetting on day rollover): consumes a slot only while the
+    /// schedule is still under <paramref name="cap"/>. Returns the
+    /// post-increment count when a slot was consumed, or <c>null</c> when
+    /// the cap was already reached (caller must defer). Replaces the
+    /// non-atomic GetFiresTodayAsync-check + IncrementFiresTodayAsync-bump
+    /// pair, which let two interleaved ticks both fire under cap.
+    /// </summary>
+    Task<int?> TryConsumeDailyFireAsync(long id, DateOnly localDay, int cap, CancellationToken ct = default);
+
+    /// <summary>
+    /// audit DATA-05 — give back a slot consumed by
+    /// <see cref="TryConsumeDailyFireAsync"/> when the fire it was
+    /// consumed for did NOT actually launch (target busy / deferred /
+    /// failed). Decrements <c>fires_today</c> (floored at 0) only when
+    /// <c>last_fire_day</c> still matches <paramref name="localDay"/>, so
+    /// a refund can never resurrect a slot across a day rollover.
+    /// </summary>
+    Task RefundDailyFireAsync(long id, DateOnly localDay, CancellationToken ct = default);
 }

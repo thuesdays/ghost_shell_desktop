@@ -44,11 +44,18 @@
     <FontFamily x:Key="FontUi">/Assets/Fonts/#Inter, Inter, Segoe UI Variable Text, Segoe UI, Arial</FontFamily>
     <FontFamily x:Key="FontMono">Cascadia Code, Cascadia Mono, Consolas</FontFamily>
 
-    <sys:Double x:Key="FontSizeXs">11</sys:Double>
-    <sys:Double x:Key="FontSizeSm">12</sys:Double>
-    <sys:Double x:Key="FontSizeMd">13</sys:Double>
-    <sys:Double x:Key="FontSizeLg">14</sys:Double>
-    <sys:Double x:Key="FontSizeXl">15</sys:Double>
-    <sys:Double x:Key="FontSizeTitle">20</sys:Double>
+    <!-- Redesign 2026-06 — "spacious & larger" type scale. Bumped one
+         step up from the old dense-IDE scale (11/12/13/14/15/20) for a
+         more modern, more legible feel. These tokens drive the base
+         Window/TextBlock styles and every keyed text style (MutedText,
+         CardValue, PageTitle, …), so the bump propagates broadly;
+         per-element hardcoded FontSize values are migrated in the
+         full view-by-view pass. -->
+    <sys:Double x:Key="FontSizeXs">12</sys:Double>
+    <sys:Double x:Key="FontSizeSm">13</sys:Double>
+    <sys:Double x:Key="FontSizeMd">14</sys:Double>
+    <sys:Double x:Key="FontSizeLg">16</sys:Double>
+    <sys:Double x:Key="FontSizeXl">18</sys:Double>
+    <sys:Double x:Key="FontSizeTitle">26</sys:Double>
 
 </ResourceDictionary>

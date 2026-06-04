@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Mykola Kovhanko <thuesdays@gmail.com>
 
+using System.Globalization;
 using Dapper;
 using GhostShell.Core.Models;
 using GhostShell.Core.Services;
@@ -50,7 +51,7 @@ internal sealed class DomainListService : IDomainListService
             Kind      = kind,
             Domain    = r.Domain,
             Note      = r.Note,
-            CreatedAt = DateTime.Parse(r.CreatedAt),
+            CreatedAt = ParseCreatedAtUtc(r.CreatedAt),
         }).ToList();
     }
 
@@ -74,7 +75,7 @@ internal sealed class DomainListService : IDomainListService
             Kind      = StringToKind(r.KindStr),
             Domain    = r.Domain,
             Note      = r.Note,
-            CreatedAt = DateTime.Parse(r.CreatedAt),
+            CreatedAt = ParseCreatedAtUtc(r.CreatedAt),
         }).ToList();
     }
 
@@ -215,6 +216,27 @@ internal sealed class DomainListService : IDomainListService
             }
         }
         return null;
+    }
+
+    // audit CAPTCHA-09: created_at is persisted as round-trip 'O' UTC (see AddAsync /
+    // ReplaceAsync). Parse it back as UTC explicitly — InvariantCulture +
+    // AssumeUniversal|AdjustToUniversal — to match CompetitorService and guarantee the
+    // returned DateTime is DateTimeKind.Utc rather than a culture-dependent local value.
+    // Use TryParse with a UTC fallback so a single malformed/empty row degrades instead
+    // of throwing FormatException and failing the entire list load.
+    private static DateTime ParseCreatedAtUtc(string? createdAt)
+    {
+        if (DateTime.TryParse(
+                createdAt,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
+                out var parsed))
+        {
+            return parsed;
+        }
+        // Corrupt/empty timestamp: fall back to a well-defined UTC sentinel rather
+        // than tanking the whole list. created_at is display-only.
+        return DateTime.MinValue.ToUniversalTime();
     }
 
     private static string KindToString(DomainListKind kind) => kind switch

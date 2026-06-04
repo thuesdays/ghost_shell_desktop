@@ -524,9 +524,14 @@ internal sealed class ExtensionService : IExtensionService
                 magic[2] == (byte)'2' && magic[3] == (byte)'4')
             {
                 // Read header_size (uint32 LE) at offset 8.
+                // audit DATA-08: use ReadExactly so a partial read of the
+                // 4-byte header-size field fails loudly instead of leaving
+                // stale zero bytes that mis-compute headerBytes (and thus
+                // mis-locate zipStart). ReadExactly throws EndOfStreamException
+                // if the file is too short to contain the field.
                 Span<byte> hdrSize = stackalloc byte[4];
                 fs.Position = 8;
-                fs.Read(hdrSize);
+                fs.ReadExactly(hdrSize);
                 var headerBytes = (uint)(hdrSize[0] | (hdrSize[1] << 8) | (hdrSize[2] << 16) | (hdrSize[3] << 24));
                 // Clamp header offset against file size (audit fix).
                 zipStart = 12L + headerBytes;
@@ -547,6 +552,17 @@ internal sealed class ExtensionService : IExtensionService
             // the offset-mismatch failure mode. Fix: read the zip
             // payload only, into a MemoryStream that starts at byte 0.
             zipLength = fs.Length - zipStart;
+            // audit DATA-08: cap the payload length against the same size
+            // limit CopyDirectory enforces BEFORE allocating the buffer, so
+            // a well-formed-but-hostile CRX can't force a single huge
+            // allocation off the on-disk file size. The PK-magic and
+            // zip-slip guards downstream catch malformed content, but they
+            // run only after this allocation — so guard the allocation too.
+            if (zipLength > MaxExtensionSizeBytes)
+                throw new InvalidDataException(
+                    $"CRX zip payload ({zipLength} bytes) exceeds the size cap " +
+                    $"({MaxExtensionSizeBytes / (1024 * 1024)} MB). Refusing to " +
+                    "load — the archive is too large or hostile.");
             zipBytes = new byte[zipLength];
             fs.Position = zipStart;
             int total = 0;

@@ -141,10 +141,16 @@ internal sealed class AdDensityService : IAdDensityService
                 AvgAdsPerQuery7d = Math.Round(avgAds7d, 2),
                 AvgAdsPerQuery24h = Math.Round(avgAds1d, 2),
                 DeltaPct7dPrev = Math.Round(deltaPct, 2),
-                TotalRuns7d = (int)(stats7d.Runs ?? 0),
-                TotalAds7d = (int)(stats7d.Ads ?? 0),
-                TotalQueries7d = (int)(stats7d.Queries ?? 0),
-                TotalClicks7d = (int)(clickCount ?? 0),
+                // audit CAPTCHA-05: these are genuine running totals summed from
+                // long? SQL SUM(...) columns. A raw (int) narrowing silently wraps
+                // to a negative/garbage value once cumulative ad/query counts cross
+                // int.MaxValue (~2.1B) on high-volume installs. Saturate to int.MaxValue
+                // instead so the KPI degrades gracefully rather than showing nonsense.
+                // (Proper fix is to widen the model fields to long — see crossFileNeeded.)
+                TotalRuns7d = ClampToInt(stats7d.Runs ?? 0),
+                TotalAds7d = ClampToInt(stats7d.Ads ?? 0),
+                TotalQueries7d = ClampToInt(stats7d.Queries ?? 0),
+                TotalClicks7d = ClampToInt(clickCount ?? 0),
                 Ctr7d = Math.Round(ctr7d, 4),
                 Daily = dailyList,
                 PerProfile = topProfiles
@@ -221,12 +227,24 @@ internal sealed class AdDensityService : IAdDensityService
             {
                 Date = DateOnly.FromDateTime(date),
                 Runs = runs,
-                Ads = (int)ads,
-                Queries = (int)queries,
+                // audit CAPTCHA-05: same long->int narrowing risk as the summary
+                // totals — saturate per-day ads/queries rather than wrap silently.
+                Ads = ClampToInt(ads),
+                Queries = ClampToInt(queries),
                 AdsPerQuery = Math.Round(aps, 2),
             });
         }
 
         return result;
     }
+
+    /// <summary>
+    /// audit CAPTCHA-05: saturating narrow of a long running total into the
+    /// int range used by the (int-typed) view model. Clamps at int.MaxValue
+    /// instead of allowing an unchecked cast to wrap to a negative/garbage
+    /// value once cumulative counts exceed ~2.1B. Negative inputs (should not
+    /// occur for COUNT/SUM of non-negative columns) are floored at 0.
+    /// </summary>
+    private static int ClampToInt(long value) =>
+        value <= 0 ? 0 : value >= int.MaxValue ? int.MaxValue : (int)value;
 }

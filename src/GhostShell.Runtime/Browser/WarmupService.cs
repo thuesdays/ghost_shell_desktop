@@ -15,8 +15,9 @@ namespace GhostShell.Runtime.Browser;
 /// session lifecycle and the per-site visitation loop. Mirrors
 /// legacy <c>ghost_shell/session/warmup.py</c> behaviour:
 ///
-/// 1. Pick sites via <see cref="PresetCatalog.PickSites"/> (geo-
-///    filtered if a target country is configured — Phase 6+).
+/// 1. Pick sites via <see cref="PresetCatalog.PickSites"/>, geo-
+///    filtered by the country derived from the profile's locale
+///    (see ResolveTargetCountry — audit WARMUP-01).
 /// 2. Launch a browser via <see cref="IBrowserLauncher"/> bound to
 ///    the profile.
 /// 3. For each site:
@@ -109,77 +110,167 @@ public sealed class WarmupService : IWarmupService, IAsyncDisposable
             ?? throw new ArgumentException($"Unknown preset: {presetId}", nameof(presetId));
 
         // 1. Memory-level guard.
-        if (_active.ContainsKey(profileName))
+        //
+        // audit WARMUP-05: reserve the in-memory slot ATOMICALLY up
+        // front, before any await, so two concurrent StartAsync calls
+        // for the same profile (e.g. manual click + WarmupQualityMonitor
+        // tick) can't both pass a check-then-act ContainsKey gate and
+        // then both launch a browser on the same user-data-dir. We park
+        // a placeholder CTS; the real loop CTS replaces it once we're
+        // committed. Any failure path below MUST release the reservation
+        // (see the try/catch wrapper) or the profile would be wedged
+        // "busy" forever.
+        var reservation = new CancellationTokenSource();
+        if (!_active.TryAdd(profileName, reservation))
+        {
+            reservation.Dispose();
             throw new InvalidOperationException(
                 $"Warmup already running for '{profileName}' in this app instance");
+        }
 
-        // 2. Profile must exist.
-        var profile = await _profiles.GetAsync(profileName, ct)
-            ?? throw new InvalidOperationException(
-                $"Profile '{profileName}' was not found");
-
-        // 3. Profile must not be in a regular monitor run — they share
-        //    the user-data-dir; two windows on one profile is undefined.
-        if (_runner.ActiveProfileNames.Contains(profileName))
-            throw new InvalidOperationException(
-                $"Profile '{profileName}' has an active run — stop it before starting a warmup");
-
-        // 4. DB-level guard (guards against a second app instance, if
-        //    the user ever runs more than one).
-        if (await _history.IsRunningAsync(profileName, ct))
-            throw new InvalidOperationException(
-                $"Profile '{profileName}' has a warmup row already in 'running' state");
-
-        // Pick sites BEFORE inserting the row so we can record an
-        // accurate sites_planned even if pick_sites returns fewer than
-        // requested (e.g. country filter shrunk the bucket).
-        var sites = PresetCatalog.PickSites(preset, siteCount);
-        if (sites.Count == 0)
-            throw new InvalidOperationException(
-                $"Preset '{presetId}' produced 0 sites — check the catalog");
-
-        var warmupId = await _history.StartAsync(
-            profileName, presetId, sites.Count, trigger, ct);
-
-        // Hand off to a fire-and-forget task. The CancellationToken
-        // passed in here applies to the START call (e.g. UI shutting
-        // down before the row insert finishes); the running loop has
-        // its own CTS that CancelAsync flips.
-        var loopCts = new CancellationTokenSource();
-        _active[profileName] = loopCts;
-        ActiveChanged?.Invoke(this, EventArgs.Empty);
-
-        _ = Task.Run(async () =>
+        long warmupId;
+        CancellationTokenSource loopCts;
+        try
         {
-            try
+            // 2. Profile must exist.
+            var profile = await _profiles.GetAsync(profileName, ct)
+                ?? throw new InvalidOperationException(
+                    $"Profile '{profileName}' was not found");
+
+            // 3. Profile must not be in a regular monitor run — they share
+            //    the user-data-dir; two windows on one profile is undefined.
+            if (_runner.ActiveProfileNames.Contains(profileName))
+                throw new InvalidOperationException(
+                    $"Profile '{profileName}' has an active run — stop it before starting a warmup");
+
+            // 4. DB-level guard (guards against a second app instance, if
+            //    the user ever runs more than one).
+            if (await _history.IsRunningAsync(profileName, ct))
+                throw new InvalidOperationException(
+                    $"Profile '{profileName}' has a warmup row already in 'running' state");
+
+            // audit WARMUP-01: derive a target country from the profile
+            // so the geo-filter the docs promise actually runs. Without
+            // this, PickSites was always called with targetCountry=null,
+            // so a UA-locale profile could build an organic history
+            // dominated by US-only sites — exactly the locale-inference
+            // inconsistency WarmupSite.Countries exists to prevent.
+            //
+            // The region subtag of the profile's BCP-47 language tag
+            // (e.g. "uk-UA" → "UA", "en-US" → "US") is the most reliable
+            // in-process geo signal. Proxy egress geo would be stronger
+            // but resolving ProxySlug → country lives in the proxy layer
+            // (another file); if/when that's plumbed through it should be
+            // preferred here. null = no resolvable country → unfiltered
+            // pick, same as the prior behaviour (documented, not silent).
+            var targetCountry = ResolveTargetCountry(profile);
+
+            // Pick sites BEFORE inserting the row so we can record an
+            // accurate sites_planned even if pick_sites returns fewer than
+            // requested (e.g. country filter shrunk the bucket).
+            var sites = PresetCatalog.PickSites(preset, siteCount, targetCountry);
+            if (sites.Count == 0)
+                throw new InvalidOperationException(
+                    $"Preset '{presetId}' produced 0 sites — check the catalog");
+
+            warmupId = await _history.StartAsync(
+                profileName, presetId, sites.Count, trigger, ct);
+
+            // Hand off to a fire-and-forget task. The CancellationToken
+            // passed in here applies to the START call (e.g. UI shutting
+            // down before the row insert finishes); the running loop has
+            // its own CTS that CancelAsync flips.
+            //
+            // audit WARMUP-05: swap the placeholder reservation for the
+            // real loop CTS atomically. We're now committed: the DB row
+            // exists and the slot is held, so the fire-and-forget task
+            // owns releasing the slot from here on.
+            loopCts = new CancellationTokenSource();
+            _active[profileName] = loopCts;
+
+            _ = Task.Run(async () =>
             {
-                await RunLoopAsync(profile, preset, sites, warmupId, loopCts.Token);
-            }
-            catch (Exception ex)
-            {
-                _log.LogError(ex, "Warmup #{Id} crashed unexpectedly", warmupId);
                 try
                 {
-                    await _history.FinishAsync(
-                        warmupId, "failed", 0, 0, 0,
-                        notes: $"crashed: {ex.GetType().Name}: {ex.Message}",
-                        sitesLogJson: "[]",
-                        CancellationToken.None);
+                    await RunLoopAsync(profile, preset, sites, warmupId, loopCts.Token);
                 }
-                catch (Exception writeEx)
+                catch (Exception ex)
                 {
-                    _log.LogError(writeEx, "Warmup #{Id} crash-finish write also failed", warmupId);
+                    _log.LogError(ex, "Warmup #{Id} crashed unexpectedly", warmupId);
+                    try
+                    {
+                        await _history.FinishAsync(
+                            warmupId, "failed", 0, 0, 0,
+                            notes: $"crashed: {ex.GetType().Name}: {ex.Message}",
+                            sitesLogJson: "[]",
+                            CancellationToken.None);
+                    }
+                    catch (Exception writeEx)
+                    {
+                        _log.LogError(writeEx, "Warmup #{Id} crash-finish write also failed", warmupId);
+                    }
                 }
-            }
-            finally
+                finally
+                {
+                    _active.TryRemove(profileName, out _);
+                    loopCts.Dispose();
+                    ActiveChanged?.Invoke(this, EventArgs.Empty);
+                }
+            }, CancellationToken.None);
+        }
+        catch
+        {
+            // audit WARMUP-05: any failure before the loop task takes
+            // ownership must release the reservation, else the profile
+            // is wedged "busy" until process restart. Only remove the
+            // entry if it's still OUR placeholder/loop CTS — never clobber
+            // a different start that somehow won the slot.
+            if (_active.TryGetValue(profileName, out var held) &&
+                ReferenceEquals(held, reservation))
             {
                 _active.TryRemove(profileName, out _);
-                loopCts.Dispose();
-                ActiveChanged?.Invoke(this, EventArgs.Empty);
             }
-        }, CancellationToken.None);
+            reservation.Dispose();
+            throw;
+        }
+
+        // Fire the change notification once, outside the guarded region,
+        // now that the slot is committed to a real run.
+        ActiveChanged?.Invoke(this, EventArgs.Empty);
+
+        // The placeholder reservation CTS is no longer referenced by
+        // _active (replaced by loopCts); dispose it to avoid a leak.
+        reservation.Dispose();
 
         return warmupId;
+    }
+
+    /// <summary>
+    /// audit WARMUP-01: resolve an ISO-2 country to feed the warmup
+    /// geo-filter. Uses the region subtag of the profile's BCP-47
+    /// language tag (e.g. "uk-UA" → "UA"). Returns <c>null</c> when no
+    /// country can be derived, which leaves <see cref="PresetCatalog.PickSites"/>
+    /// unfiltered — the documented fallback, not a silent skip.
+    /// </summary>
+    private static string? ResolveTargetCountry(Profile profile)
+    {
+        var lang = profile.Language;
+        if (string.IsNullOrWhiteSpace(lang)) return null;
+
+        // BCP-47: language["-"|"_" script]["-"|"_" region]…  We want the
+        // 2-letter ALPHA region subtag. Split on both separators and look
+        // for the first token that is exactly two ASCII letters.
+        var parts = lang.Split(new[] { '-', '_' }, StringSplitOptions.RemoveEmptyEntries);
+        for (var i = 1; i < parts.Length; i++)
+        {
+            var token = parts[i].Trim();
+            if (token.Length == 2 && token[0] is >= 'A' and <= 'Z' or >= 'a' and <= 'z'
+                                  && token[1] is >= 'A' and <= 'Z' or >= 'a' and <= 'z')
+            {
+                return token.ToUpperInvariant();
+            }
+        }
+        return null;
     }
 
     public Task<bool> CancelAsync(string profileName, CancellationToken ct = default)
@@ -231,6 +322,16 @@ public sealed class WarmupService : IWarmupService, IAsyncDisposable
 
             session = await _launcher.LaunchAsync(profile, ct);
 
+            // audit WARMUP-06: a launcher that returns null on a soft
+            // failure (instead of throwing) would otherwise NRE on the
+            // first use below (VisitSiteAsync / GetCookiesAsync) and be
+            // recorded as a misleading "loop error: NullReferenceException".
+            // The finally block's `session is not null` check already
+            // anticipates null — categorise the failure clearly here.
+            if (session is null)
+                throw new InvalidOperationException(
+                    "browser launch returned no session");
+
             // Per-site loop. Per-site exceptions are caught here so a
             // single bad URL doesn't abort the whole warmup.
             for (var i = 0; i < sites.Count; i++)
@@ -250,15 +351,65 @@ public sealed class WarmupService : IWarmupService, IAsyncDisposable
             try
             {
                 var cookies = await session.GetCookiesAsync(ct);
+
+                // audit WARMUP-03: also capture per-origin localStorage /
+                // sessionStorage — the bulk of a site's "returning visitor"
+                // signal (consent state, device tokens, analytics client
+                // IDs) lives there, not in cookies. Previously this was
+                // hard-coded to Array.Empty<StorageEntry>(), so the warmed
+                // profile looked brand-new to any site that keys "first
+                // visit" heuristics on localStorage, and consent set in
+                // localStorage was thrown away.
+                //
+                // Mirror SessionLifecycle.CaptureCleanRunAsync exactly:
+                // origins = unique cookie domains projected to https://.
+                // GetStorageAsync navigates per-origin and skips
+                // unreachable ones, so this is best-effort by design.
+                IReadOnlyList<StorageEntry> storage = Array.Empty<StorageEntry>();
                 if (cookies.Count > 0)
+                {
+                    var origins = cookies
+                        .Select(c => "https://" + c.Domain.TrimStart('.'))
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToList();
+                    try
+                    {
+                        storage = await session.GetStorageAsync(origins, ct);
+                    }
+                    catch (Exception storageEx)
+                    {
+                        // Storage capture is additive — a failure here must
+                        // not lose the cookie snapshot we can still save.
+                        _log.LogWarning(storageEx,
+                            "Warmup #{Id}: storage capture failed — saving cookies only",
+                            warmupId);
+                    }
+                }
+
+                // audit WARMUP-04: save whenever ANY state was captured
+                // (cookies OR storage), not only when cookies.Count > 0.
+                // A warmup that built only localStorage state would
+                // previously write no snapshot row at all, so the next
+                // monitor run had nothing to auto-restore even though the
+                // warmup reported status='ok'. Only skip when truly
+                // nothing was gathered, and say so in the note.
+                var payload = new SessionPayload { Cookies = cookies, Storage = storage };
+                if (!payload.IsEmpty)
                 {
                     await _sessions.SaveAsync(
                         profile.Name,
-                        new SessionPayload { Cookies = cookies, Storage = Array.Empty<StorageEntry>() },
+                        payload,
                         runId: null,
                         trigger: "auto_warmup",
                         reason: $"warmup #{warmupId} ({preset.Id}, {succeeded}/{sites.Count} ok)",
                         ct: ct);
+                }
+                else
+                {
+                    _log.LogInformation(
+                        "Warmup #{Id}: no cookies or storage captured — nothing to snapshot",
+                        warmupId);
+                    notes = "no session state captured (0 cookies, 0 storage origins)";
                 }
             }
             catch (Exception ex)
@@ -351,9 +502,23 @@ public sealed class WarmupService : IWarmupService, IAsyncDisposable
             await session.NavigateAsync(site.Url, ct);
 
             // Settle: a couple of seconds for the initial render.
-            // Random within (1.0, 2.0) to avoid timing-fingerprint
-            // synchronisation across multiple profiles in a fleet.
-            await Task.Delay(TimeSpan.FromMilliseconds(Random.Shared.Next(1000, 2000)), ct);
+            // audit WARMUP-02: widen and skew the settle window
+            // (0.8–2.6s) rather than the constant 1.0–2.0s band so the
+            // post-navigate timing distribution isn't an identical shape
+            // across the whole fleet. Individual values were already
+            // randomized; the *distribution* was the tell.
+            await Task.Delay(TimeSpan.FromMilliseconds(Random.Shared.Next(800, 2600)), ct);
+
+            // audit WARMUP-02: occasionally read-before-consent. A real
+            // user doesn't always dismiss the banner at near-identical
+            // timing the instant the page settles; ~1 in 3 visits we
+            // glance at the page first. This reorders the consent phase
+            // relative to a short dwell so the event ordering isn't a
+            // fixed navigate→settle→consent→dwell sequence every time.
+            if (Random.Shared.Next(3) == 0)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(Random.Shared.Next(500, 1500)), ct);
+            }
 
             // Best-effort consent-banner click. Boolean return value;
             // we record but don't fail the visit on a missing banner —
@@ -434,6 +599,38 @@ public sealed class WarmupService : IWarmupService, IAsyncDisposable
         // via toLowerCase) — matches both "Прийняти" and "ПРИЙНЯТИ".
         const string Js = """
             (function() {
+              // audit WARMUP-02: dispatch a realistic pointer trajectory
+              // before the actual click instead of a bare el.click() with
+              // no mouse movement. A consent accept that fires with zero
+              // preceding pointer events at near-identical post-navigate
+              // timing is a robotic signature; emitting move/over/down/up
+              // at the element's centre (with tiny per-event jitter) makes
+              // the interaction look user-driven. Best-effort — if any
+              // synthetic event throws we still fall back to el.click().
+              function humanClick(el) {
+                try {
+                  var r = el.getBoundingClientRect();
+                  var jx = (Math.random() - 0.5) * Math.min(r.width, 24);
+                  var jy = (Math.random() - 0.5) * Math.min(r.height, 16);
+                  var cx = Math.round(r.left + r.width / 2 + jx);
+                  var cy = Math.round(r.top + r.height / 2 + jy);
+                  var base = { bubbles: true, cancelable: true, view: window,
+                               clientX: cx, clientY: cy };
+                  function fire(type, Ctor) {
+                    try { el.dispatchEvent(new Ctor(type, base)); } catch (e) {}
+                  }
+                  var PE = (typeof PointerEvent === 'function') ? PointerEvent : MouseEvent;
+                  fire('pointerover', PE);
+                  fire('mouseover', MouseEvent);
+                  fire('pointermove', PE);
+                  fire('mousemove', MouseEvent);
+                  fire('pointerdown', PE);
+                  fire('mousedown', MouseEvent);
+                  fire('pointerup', PE);
+                  fire('mouseup', MouseEvent);
+                } catch (e) {}
+                el.click();
+              }
               try {
                 var sels = [
                   '#onetrust-accept-btn-handler',
@@ -456,7 +653,7 @@ public sealed class WarmupService : IWarmupService, IAsyncDisposable
                   try {
                     var el = document.querySelector(sels[i]);
                     if (el && el.offsetParent !== null) {
-                      el.click();
+                      humanClick(el);  // audit WARMUP-02: pointer events + click
                       return true;
                     }
                   } catch (e) {}
@@ -477,7 +674,7 @@ public sealed class WarmupService : IWarmupService, IAsyncDisposable
                   if (!t || t.length > 40) continue;
                   for (var k = 0; k < phrases.length; k++) {
                     if (t.indexOf(phrases[k]) !== -1) {
-                      try { n.click(); return true; } catch (e) {}
+                      try { humanClick(n); return true; } catch (e) {}  // audit WARMUP-02
                     }
                   }
                 }
@@ -499,15 +696,28 @@ public sealed class WarmupService : IWarmupService, IAsyncDisposable
     /// <summary>
     /// Trickle scroll over <paramref name="totalSec"/> seconds. Each
     /// step nudges 300-700px down then waits 1.5-3.0s, giving a
-    /// human-shaped scroll velocity profile. Caps at 8 steps to keep
-    /// dwell from running away when a site has a short content list.
+    /// human-shaped scroll velocity profile. The step cap is jittered
+    /// per visit to keep dwell from running away on a short page.
+    ///
+    /// audit WARMUP-02: the previous implementation was a fleet-level
+    /// tell even though individual values were randomized — every
+    /// visit on every profile capped at EXACTLY 8 steps and ALWAYS
+    /// ended with an identical-magnitude window.scrollBy({top:-200}).
+    /// A site correlating behavioural telemetry across visitors could
+    /// cluster on that constant structure. We now (a) jitter the step
+    /// cap, (b) make the return-scroll occasional and variable-
+    /// magnitude (sometimes a small extra down-scroll, sometimes none),
+    /// and (c) randomly emit a tiny mid-scroll pause/no-op so the
+    /// inter-event timing distribution isn't constant.
     /// </summary>
     private static async Task GentleScrollAsync(
         IBrowserSession session, int totalSec, CancellationToken ct)
     {
         var endsAt = DateTime.UtcNow.AddSeconds(totalSec);
         var step = 0;
-        while (DateTime.UtcNow < endsAt && step < 8)
+        // audit WARMUP-02: jittered cap (6–11) instead of the constant 8.
+        var maxSteps = Random.Shared.Next(6, 12);
+        while (DateTime.UtcNow < endsAt && step < maxSteps)
         {
             ct.ThrowIfCancellationRequested();
             var delta = Random.Shared.Next(300, 700);
@@ -520,14 +730,43 @@ public sealed class WarmupService : IWarmupService, IAsyncDisposable
             catch { /* visit-non-fatal */ }
             await Task.Delay(TimeSpan.FromMilliseconds(Random.Shared.Next(1500, 3000)), ct);
             step++;
+
+            // audit WARMUP-02: occasionally pause a beat longer mid-read
+            // (~1 in 4 steps) so the per-step delay distribution has the
+            // long tail a human's does, not a tight uniform band.
+            if (Random.Shared.Next(4) == 0)
+                await Task.Delay(TimeSpan.FromMilliseconds(Random.Shared.Next(700, 1800)), ct);
         }
-        // Tiny return-scroll at the end — looks more like someone
-        // re-reading something they spotted.
+
+        // audit WARMUP-02: end-of-scroll behaviour is now varied rather
+        // than the constant -200 return-scroll. Roughly half the time we
+        // do nothing; otherwise we either re-read upward (variable
+        // magnitude) or nudge a little further down, like someone who
+        // kept reading. ~10% of the time we don't smooth-scroll at all.
         try
         {
-            await session.ExecuteScriptAsync(
-                "window.scrollBy({top: -200, left: 0, behavior: 'smooth'});",
-                null, ct);
+            var roll = Random.Shared.Next(100);
+            if (roll < 45)
+            {
+                // No end gesture — plenty of real reads just stop.
+            }
+            else if (roll < 80)
+            {
+                // Re-read upward, variable magnitude.
+                var up = -Random.Shared.Next(120, 380);
+                var behavior = Random.Shared.Next(10) == 0 ? "auto" : "smooth";
+                await session.ExecuteScriptAsync(
+                    $"window.scrollBy({{top: {up}, left: 0, behavior: '{behavior}'}});",
+                    null, ct);
+            }
+            else
+            {
+                // Kept-reading nudge further down.
+                var down = Random.Shared.Next(80, 260);
+                await session.ExecuteScriptAsync(
+                    $"window.scrollBy({{top: {down}, left: 0, behavior: 'smooth'}});",
+                    null, ct);
+            }
         }
         catch { /* whatever */ }
     }

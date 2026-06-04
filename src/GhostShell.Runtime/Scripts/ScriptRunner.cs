@@ -193,6 +193,12 @@ public sealed class ScriptRunner : IScriptRunner
             }
         }
 
+        // audit SCRIPTRUNNER-04: remember the ORIGINAL abort so a
+        // CaptchaRecoveryAbortException keeps its concrete type + payload
+        // when re-thrown below (the generic re-wrap used to erase it, so
+        // RealProfileRunner's captcha-recovery / auto-relaunch branch never
+        // fired).
+        ScriptAbortException? capturedAbort = null;
         try
         {
             if (isGraph)
@@ -209,6 +215,7 @@ public sealed class ScriptRunner : IScriptRunner
         {
             aborted = true;
             lastError = ex.Message;
+            capturedAbort = ex;
         }
 
         var status = aborted                            ? "cancelled"
@@ -228,6 +235,10 @@ public sealed class ScriptRunner : IScriptRunner
         // stop, RealProfileRunner already handles it specially.
         if (aborted && lastError is not "cancelled")
         {
+            // audit SCRIPTRUNNER-04: preserve the captcha-recovery abort type
+            // (and its CaptchaRecoveryResult) so the caller can rotate proxy /
+            // auto-relaunch; only generic aborts get the re-wrapped message.
+            if (capturedAbort is CaptchaRecoveryAbortException) throw capturedAbort;
             throw new ScriptAbortException(
                 $"script aborted: {lastError ?? "unknown"} (status={status}, executed={counters.Executed}, failed={counters.Failed})");
         }
@@ -789,6 +800,13 @@ public sealed class ScriptRunner : IScriptRunner
                 }
                 counters.Executed++;
             }
+            // audit SCRIPTRUNNER-03: a user Stop (OperationCanceledException)
+            // or a dead browser session / explicit abort (ScriptAbortException)
+            // must tear the run down immediately — they were being swallowed
+            // by the generic catch below as a "failed node" so the sub-graph
+            // kept automating after Stop or after the window had closed.
+            catch (OperationCanceledException) { throw; }
+            catch (ScriptAbortException) { throw; }
             catch (Exception ex)
             {
                 counters.Failed++;
@@ -1588,6 +1606,11 @@ public sealed class ScriptRunner : IScriptRunner
             {
                 var min = ParamInt(step, "min_ms", 500);
                 var max = ParamInt(step, "max_ms", min);
+                // audit SCRIPTRUNNER-06: a wait with only min_ms collapsed to a
+                // fixed, perfectly deterministic delay — itself a timing tell.
+                // When no explicit max is given, spread the dwell with natural
+                // jitter above min instead of firing the exact same value.
+                if (max <= min) max = min + Math.Max(120, min / 4);
                 await Humanizer.IdleAsync(min, max, ct);
                 break;
             }
@@ -1618,12 +1641,19 @@ public sealed class ScriptRunner : IScriptRunner
                     ?? throw new ArgumentException("missing 'pattern'");
                 var timeoutMs = ParamInt(step, "timeout_ms", 15000);
                 var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
-                var rx = new System.Text.RegularExpressions.Regex(pattern);
+                // audit SCRIPTRUNNER-07: a user-supplied pattern compiled with
+                // no match timeout can hang a poll indefinitely (ReDoS). Cap
+                // each match at 200ms; a timed-out match counts as "no match".
+                var rx = new System.Text.RegularExpressions.Regex(
+                    pattern,
+                    System.Text.RegularExpressions.RegexOptions.None,
+                    TimeSpan.FromMilliseconds(200));
                 while (DateTime.UtcNow < deadline)
                 {
                     var url = await s.ExecuteScriptAsync(
                         "return location.href;", null, ct) as string ?? "";
-                    if (rx.IsMatch(url)) return StepFlow.Normal;
+                    try { if (rx.IsMatch(url)) return StepFlow.Normal; }
+                    catch (System.Text.RegularExpressions.RegexMatchTimeoutException) { /* treat as no-match this poll */ }
                     await Task.Delay(250, ct);
                 }
                 throw new TimeoutException($"wait_for_url timed out: {pattern}");
@@ -1651,30 +1681,18 @@ public sealed class ScriptRunner : IScriptRunner
             {
                 var sel = ParamString(step, "selector")
                     ?? throw new ArgumentException("missing 'selector'");
-                var js = $$"""
-                    (function() {
-                      var el = document.querySelector({{JsonSerializer.Serialize(sel)}});
-                      if (!el) return false;
-                      el.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, button: 2}));
-                      return true;
-                    })()
-                """;
-                await s.ExecuteScriptAsync(js, null, ct);
+                // audit SCRIPTRUNNER-01: trusted right-click (CDP) instead of
+                // a synthetic contextmenu dispatchEvent (isTrusted=false).
+                await s.TrustedClickAsync(sel, button: "right", ct: ct);
                 break;
             }
             case "hover":
             {
                 var sel = ParamString(step, "selector")
                     ?? throw new ArgumentException("missing 'selector'");
-                var js = $$"""
-                    (function() {
-                      var el = document.querySelector({{JsonSerializer.Serialize(sel)}});
-                      if (!el) return false;
-                      el.dispatchEvent(new MouseEvent('mouseover', {bubbles: true}));
-                      return true;
-                    })()
-                """;
-                await s.ExecuteScriptAsync(js, null, ct);
+                // audit SCRIPTRUNNER-01: trusted pointer move instead of a
+                // synthetic mouseover dispatchEvent (isTrusted=false).
+                await s.TrustedHoverAsync(sel, ct);
                 await Humanizer.IdleAsync(300, 1100, ct);
                 break;
             }
@@ -1691,16 +1709,11 @@ public sealed class ScriptRunner : IScriptRunner
             case "press_key":
             {
                 var key = ParamString(step, "key") ?? "Enter";
-                var js = $$"""
-                    (function() {
-                      var k = {{JsonSerializer.Serialize(key)}};
-                      var ev = new KeyboardEvent('keydown', {key: k, bubbles: true});
-                      var t = document.activeElement || document.body;
-                      t.dispatchEvent(ev);
-                      return true;
-                    })()
-                """;
-                await s.ExecuteScriptAsync(js, null, ct);
+                // audit SCRIPTRUNNER-01: trusted key event through the
+                // WebDriver pipeline (real keydown/keypress/keyup,
+                // isTrusted=true) instead of a synthetic KeyboardEvent that
+                // also fired keydown only.
+                await s.TrustedPressKeyAsync(key, ct);
                 break;
             }
             case "scroll":
@@ -1938,13 +1951,22 @@ public sealed class ScriptRunner : IScriptRunner
 
             case "rotate_ip":
             {
-                // No-op on static proxies; the runtime's proxy manager
-                // is the right place to wire this up. For now log and
-                // optionally pause so scripts that depend on this
-                // step's existence don't break.
+                // audit SCRIPTRUNNER-05: this step does NOT actually rotate the
+                // exit IP — the proxy manager isn't wired into the script
+                // engine (RunContext carries no proxy/rotation handle). The
+                // old code logged at Information level and let the step pass as
+                // a normal success, so scripts (and users reading the log)
+                // believed the IP had changed when it had not. Until a real
+                // driver-level rotation handler is injected, be honest: warn
+                // loudly that the IP was NOT rotated. (Per-profile
+                // "auto-rotate IP on launch" in RealProfileRunner is the
+                // working rotation path today.)
                 var waitSec = ParamInt(step, "wait_after_sec", 4);
-                _log.LogInformation("rotate_ip requested (driver-level handler not wired); waiting {S}s", waitSec);
-                await Humanizer.IdleAsync(waitSec * 1000, waitSec * 1000, ct);
+                _log.LogWarning(
+                    "rotate_ip step is a NO-OP: the exit IP was NOT rotated (mid-run proxy rotation is not wired into the script engine). Use the per-profile 'Auto-rotate IP on launch' option instead. Dwelling {S}s.",
+                    waitSec);
+                if (waitSec > 0)
+                    await Humanizer.IdleAsync(waitSec * 1000, waitSec * 1000 + 600, ct);
                 break;
             }
 

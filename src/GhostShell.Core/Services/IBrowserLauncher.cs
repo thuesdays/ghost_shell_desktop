@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Mykola Kovhanko <thuesdays@gmail.com>
 
+using System.Text.Json;
 using GhostShell.Core.Models;
 
 namespace GhostShell.Core.Services;
@@ -136,4 +137,96 @@ public interface IBrowserSession : IAsyncDisposable
     /// Returns the path on success.
     /// </summary>
     Task<string> CaptureScreenshotAsync(string path, CancellationToken ct = default);
+
+    // ─── Trusted input (audit SCRIPTRUNNER-01 / SCRIPTSUPPORT-01) ───────
+    //
+    // Automation used to drive clicks/typing/hover/keypress with JS
+    // `element.dispatchEvent(new MouseEvent(...))`, which produces
+    // events with `isTrusted === false`. Real user input is always
+    // `isTrusted === true`; the gap is a trivial, widely-deployed bot
+    // signal (e.g. Cloudflare / reCAPTCHA score it heavily).
+    //
+    // These methods dispatch input through the browser's REAL input
+    // pipeline so events are `isTrusted === true`. The DEFAULT
+    // implementations below fall back to the old synthetic JS path so
+    // non-Selenium sessions (test doubles) keep working; the Selenium
+    // session overrides them with CDP Input.* (mouse) and the WebDriver
+    // key pipeline (keyboard).
+
+    /// <summary>Trusted click at the element's centre. button: left|right|middle.</summary>
+    async Task TrustedClickAsync(string selector, int clickCount = 1, string button = "left", CancellationToken ct = default)
+    {
+        var evName = button == "right" ? "contextmenu" : "click";
+        var btn = button == "right" ? 2 : button == "middle" ? 1 : 0;
+        var js = $$"""
+            (function() {
+              var el = document.querySelector({{JsonSerializer.Serialize(selector)}});
+              if (!el) return false;
+              try { el.scrollIntoView({block:'center', inline:'center'}); } catch (e) {}
+              var r = el.getBoundingClientRect();
+              var cx = r.left + r.width/2, cy = r.top + r.height/2;
+              var n = {{clickCount}};
+              for (var i = 0; i < n; i++) {
+                ['mousedown','mouseup','{{evName}}'].forEach(function(t){
+                  el.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,clientX:cx,clientY:cy,button:{{btn}}}));
+                });
+              }
+              return true;
+            })()
+        """;
+        var ok = await ExecuteScriptAsync(js, null, ct);
+        if (ok is not true) throw new InvalidOperationException($"selector not found: {selector}");
+    }
+
+    /// <summary>Trusted hover (mouse move) over the element's centre.</summary>
+    Task TrustedHoverAsync(string selector, CancellationToken ct = default)
+    {
+        var js = $$"""
+            (function() {
+              var el = document.querySelector({{JsonSerializer.Serialize(selector)}});
+              if (!el) return false;
+              var r = el.getBoundingClientRect();
+              el.dispatchEvent(new MouseEvent('mouseover',{bubbles:true,clientX:r.left+r.width/2,clientY:r.top+r.height/2}));
+              return true;
+            })()
+        """;
+        return ExecuteScriptAsync(js, null, ct);
+    }
+
+    /// <summary>Focus the selector and type <paramref name="text"/> char-by-char with per-key jitter.</summary>
+    async Task TrustedTypeAsync(string selector, string text, int minMs = 40, int maxMs = 180, CancellationToken ct = default)
+    {
+        if (string.IsNullOrEmpty(text)) return;
+        if (maxMs < minMs) maxMs = minMs;
+        var focus = $$"""
+            (function(){var el=document.querySelector({{JsonSerializer.Serialize(selector)}});
+              if(!el)return false; el.focus(); if('value' in el) el.value=''; else el.textContent=''; return true;})()
+        """;
+        if (await ExecuteScriptAsync(focus, null, ct) is not true)
+            throw new InvalidOperationException($"selector not found: {selector}");
+        foreach (var ch in text)
+        {
+            ct.ThrowIfCancellationRequested();
+            var charJs = $$"""
+                (function(){var el=document.querySelector({{JsonSerializer.Serialize(selector)}});
+                  if(!el)return false; var c={{JsonSerializer.Serialize(ch.ToString())}};
+                  if('value' in el) el.value+=c; else el.textContent+=c;
+                  el.dispatchEvent(new InputEvent('input',{bubbles:true,data:c})); return true;})()
+            """;
+            await ExecuteScriptAsync(charJs, null, ct);
+            await Task.Delay(Random.Shared.Next(minMs, maxMs + 1), ct);
+        }
+    }
+
+    /// <summary>Press a single key (Enter, Tab, Escape, Arrow*, or a literal char) against the focused element.</summary>
+    Task TrustedPressKeyAsync(string key, CancellationToken ct = default)
+    {
+        var js = $$"""
+            (function(){var k={{JsonSerializer.Serialize(key)}};
+              var t=document.activeElement||document.body;
+              ['keydown','keyup'].forEach(function(n){t.dispatchEvent(new KeyboardEvent(n,{key:k,bubbles:true}));});
+              return true;})()
+        """;
+        return ExecuteScriptAsync(js, null, ct);
+    }
 }

@@ -32,8 +32,11 @@ namespace GhostShell.Runtime.Browser;
 /// payload (via DeviceTemplateBuilder), producing a SelfCheckTestResult
 /// with pass/warn/fail/skip status and severity levels.
 ///
-/// Score: computed as (passed tests) * 100 / (total tests), replacing
-/// the legacy ad-hoc 40/30/15/15 point allocation.
+/// Score: weighted average over non-skipped tests (pass = 1.0,
+/// warn = 0.5, fail = 0), * 100, rounded — so benign warns don't
+/// crater an otherwise-healthy profile and indeterminate "skip"
+/// probes are excluded from the denominator (audit SELFCHECK-06).
+/// Replaces the legacy ad-hoc 40/30/15/15 point allocation.
 /// </summary>
 public sealed class SelfCheckService : ISelfCheckService
 {
@@ -61,6 +64,11 @@ public sealed class SelfCheckService : ISelfCheckService
         string? tzActual = null, ua = null;
         bool webrtcLeak = false;
         string? webrtcLocalIp = null;
+        // audit SELFCHECK-02: captured at function scope so the exit-IP geo
+        // vs timezone/locale consistency probe (built in the network section
+        // below) can correlate them. Populated inside the probe block.
+        double? actualTzOffsetMin = null;
+        string? actualNavLanguage = null;
         var notes = new List<string>();
 
         // Load the profile so we can build the expected fingerprint
@@ -272,14 +280,42 @@ public sealed class SelfCheckService : ISelfCheckService
         // Exit IP + geo via ipinfo.io
         try
         {
+            // audit SELFCHECK-07: cancel the in-flight fetch with an
+            // AbortController when the per-request timeout fires (the old
+            // code left a slow-but-healthy fetch running and could resolve
+            // with a fake "timeout" error after the body arrived), and fall
+            // back to a second geo provider so a single blocked/rate-limited
+            // endpoint doesn't read as a network failure and tank the score.
+            // Each provider's response is normalised to {ip, country, city}
+            // so the C# parser below sees the same keys regardless of source.
             const string FetchJs = """
-                return new Promise((resolve) => {
-                  fetch('https://ipinfo.io/json', {cache: 'no-store'})
-                    .then(r => r.text())
-                    .then(t => resolve(t))
-                    .catch(e => resolve('{"_err":"' + (e && e.message || e) + '"}'));
-                  setTimeout(() => resolve('{"_err":"timeout"}'), 8000);
-                });
+                return (async function() {
+                  const fetchProvider = async (url, map) => {
+                    const ctrl = new AbortController();
+                    const timer = setTimeout(() => ctrl.abort(), 8000);
+                    try {
+                      const r = await fetch(url, {cache: 'no-store', signal: ctrl.signal});
+                      const j = await r.json();
+                      const out = map(j);
+                      if (out && out.ip) return out;
+                      return null;
+                    } catch (e) {
+                      return null;
+                    } finally {
+                      clearTimeout(timer);
+                    }
+                  };
+                  // Primary: ipinfo.io  → already {ip, country, city}.
+                  let res = await fetchProvider('https://ipinfo.io/json',
+                    j => ({ ip: j.ip, country: j.country, city: j.city }));
+                  // Fallback: ipapi.co → {ip, country_code, city}.
+                  if (!res) {
+                    res = await fetchProvider('https://ipapi.co/json/',
+                      j => ({ ip: j.ip, country: j.country_code || j.country, city: j.city }));
+                  }
+                  if (res) return JSON.stringify(res);
+                  return '{"_err":"all geo providers failed/timed out"}';
+                })();
             """;
             var jsonText = await session.ExecuteScriptAsync(FetchJs, null, ct) as string;
             if (!string.IsNullOrWhiteSpace(jsonText))
@@ -333,8 +369,19 @@ public sealed class SelfCheckService : ISelfCheckService
                     resolve(Array.from(ips));
                     return;
                   }
-                  const m = /\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b/.exec(e.candidate.candidate);
-                  if (m) ips.add(m[0]);
+                  // audit SELFCHECK-01: the old IPv4-only dotted-quad regex
+                  // silently dropped every IPv6 candidate, so a global IPv6
+                  // host/srflx address (routine on dual-stack hosts behind an
+                  // IPv4-only proxy) was never evaluated and the leak read as
+                  // "safe". Parse the SDP connection-address token directly so
+                  // BOTH families — plus mDNS "*.local" obfuscation hostnames —
+                  // reach the C# IsTrivialIp filter.
+                  // candidate SDP: "candidate:<foundation> <component>
+                  //   <transport> <priority> <conn-address> <port> typ ..."
+                  // → field index 4 is the connection-address.
+                  const cand = (e.candidate.candidate || '');
+                  const parts = cand.split(' ');
+                  if (parts.length > 4 && parts[4]) ips.add(parts[4]);
                 };
                 pc.createOffer({offerToReceiveAudio: true, offerToReceiveVideo: true})
                   .then((o) => pc.setLocalDescription(o))
@@ -412,11 +459,22 @@ public sealed class SelfCheckService : ISelfCheckService
             var gfxPayload = ExtractDict(expectedPayload, "graphics");
             var audioPayload = ExtractDict(expectedPayload, "audio");
             var tzPayload = ExtractDict(expectedPayload, "timezone");
-            var plgPayload = ExtractDict(expectedPayload, "plugins");
+            // audit SELFCHECK-04: the "plugins" payload node is a top-level
+            // List<object> (DeviceTemplateBuilder.BuildPlugins() returns
+            // IReadOnlyList<object>), NOT a dictionary. ExtractDict therefore
+            // always returned an empty dict and the count read 0. Read the
+            // raw top-level value and count its elements via CountList.
+            object? plgRaw = null;
+            expectedPayload?.TryGetValue("plugins", out plgRaw);
 
             // navigator.userAgent
             var expectedUa = SafeGetAs<string>(hwPayload, "user_agent");
             var actualUa = SafeGetAs<string>(nav, "userAgent");
+            // audit SELFCHECK-05: surface the captured UA to the row-level
+            // RawJson + DB ua_actual column. Mirrors the tzActual = actualTzId
+            // pattern below — the function-top `ua` was declared but never
+            // assigned, so ua_actual was always null even on probe success.
+            ua = actualUa;
             var uaStatus = StringMatch(expectedUa, actualUa) ? "pass" : "fail";
             if (uaStatus != "pass")
             {
@@ -493,6 +551,8 @@ public sealed class SelfCheckService : ISelfCheckService
             // navigator.language
             var expectedLang = SafeGetAs<string>(langPayload, "language");
             var actualLang = SafeGetAs<string>(nav, "language");
+            // audit SELFCHECK-02: stash for the geo/locale consistency probe.
+            actualNavLanguage = actualLang;
             tests.Add(new SelfCheckTestResult
             {
                 Id = "navigator.language",
@@ -650,6 +710,10 @@ public sealed class SelfCheckService : ISelfCheckService
             // alias of the configured TZ.
             var expectedTzId = SafeGetAs<string>(tzPayload, "id");
             var actualTzId = SafeGetAs<string>(tzProbe, "timeZone");
+            // audit SELFCHECK-02: stash the browser-reported UTC offset for
+            // the geo/timezone consistency probe. getTimezoneOffset() returns
+            // minutes BEHIND UTC (positive = west of UTC), the JS convention.
+            actualTzOffsetMin = SafeGetNumber(tzProbe, "offsetMinutes");
             // Phase 71cc — surface the captured TZ to the row-level
             // log + DB column. Pre-fix the probe captured this value
             // for the test result but the function-top tzActual was
@@ -682,7 +746,12 @@ public sealed class SelfCheckService : ISelfCheckService
             var glVendorMatch = expectedGlVendor is not null && actualGlVendor is not null
                 && (actualGlVendor.Contains(expectedGlVendor, StringComparison.OrdinalIgnoreCase)
                     || expectedGlVendor.Contains(actualGlVendor, StringComparison.OrdinalIgnoreCase));
-            var glVendorStatus = glVendorMatch || actualGlVendor is null ? "pass" : "warn";
+            // audit SELFCHECK-06: a value we COULDN'T read is "skip" (excluded
+            // from the score), never "pass". The old `|| actualGlVendor is null
+            // ? pass` let an unreadable WebGL probe score better than one that
+            // ran and mismatched — the opposite of what a self-check should do.
+            var glVendorStatus = actualGlVendor is null ? "skip"
+                : glVendorMatch ? "pass" : "warn";
             if (glVendorStatus != "pass")
             {
                 _log.LogDebug(
@@ -706,7 +775,9 @@ public sealed class SelfCheckService : ISelfCheckService
             var glRendererMatch = expectedGlRenderer is not null && actualGlRenderer is not null
                 && (actualGlRenderer.Contains(expectedGlRenderer, StringComparison.OrdinalIgnoreCase)
                     || expectedGlRenderer.Contains(actualGlRenderer, StringComparison.OrdinalIgnoreCase));
-            var glRendererStatus = glRendererMatch || actualGlRenderer is null ? "pass" : "warn";
+            // audit SELFCHECK-06: unreadable → "skip" (excluded), not "pass".
+            var glRendererStatus = actualGlRenderer is null ? "skip"
+                : glRendererMatch ? "pass" : "warn";
             if (glRendererStatus != "pass")
             {
                 _log.LogDebug(
@@ -780,14 +851,21 @@ public sealed class SelfCheckService : ISelfCheckService
             });
 
             // Plugins count
-            var expectedPlugCount = (SafeGetAs<List<object>>(plgPayload, "list"))?.Count ?? 0;
+            // audit SELFCHECK-04: count the real top-level plugins list and
+            // perform a genuine comparison. The previous `actual == expected
+            // ? "pass" : "pass"` ternary was dead code (both branches pass)
+            // sitting on top of an always-0 expected — a zero-plugin headless
+            // build (a classic bot tell) would have read as fine. Plugin set
+            // is informational (Chrome's PDF plugin shim can legitimately
+            // vary), so a mismatch is reported as "warn", not a hard fail.
+            var expectedPlugCount = CountList(plgRaw);
             var actualPlugCount = SafeGetNumber(plg, "count") ?? 0;
             tests.Add(new SelfCheckTestResult
             {
                 Id = "plugins.count",
                 Label = "Plugin Count",
                 Category = "fonts",
-                Status = actualPlugCount == expectedPlugCount ? "pass" : "pass", // info-level
+                Status = (int)actualPlugCount == expectedPlugCount ? "pass" : "warn",
                 Severity = "info",
                 Expected = expectedPlugCount.ToString(),
                 // actualPlugCount is now `double` (non-nullable) since
@@ -799,15 +877,21 @@ public sealed class SelfCheckService : ISelfCheckService
         }
 
         // Add network tests (exit IP, WebRTC)
+        // audit SELFCHECK-07: a missing exit IP is "warn", not a hard "fail".
+        // Both geo providers being blocked/rate-limited by the proxy does NOT
+        // mean the connection is broken — it's an indeterminate probe, so it
+        // should not be scored as a clean failure (see SELFCHECK-06).
         tests.Add(new SelfCheckTestResult
         {
             Id = "network.exit_ip",
             Label = "Exit IP",
             Category = "network",
-            Status = !string.IsNullOrEmpty(exitIp) ? "pass" : "fail",
+            Status = !string.IsNullOrEmpty(exitIp) ? "pass" : "warn",
             Severity = "info",
             Expected = "(should be populated)",
             Actual = exitIp ?? "(none)",
+            Detail = !string.IsNullOrEmpty(exitIp) ? null
+                : "Could not determine exit IP — all geo providers timed out or were blocked by the proxy; the connection itself may still be fine.",
         });
 
         tests.Add(new SelfCheckTestResult
@@ -821,10 +905,35 @@ public sealed class SelfCheckService : ISelfCheckService
             Actual = webrtcLeak ? $"Leaked IP: {webrtcLocalIp}" : "(safe)",
         });
 
-        // Compute score as (passed / total) * 100
-        var passCount = tests.Count(t => t.Status == "pass");
-        var totalCount = tests.Count;
-        var score = totalCount > 0 ? (passCount * 100) / totalCount : 0;
+        // audit SELFCHECK-02: the canonical antidetect consistency probe —
+        // does the exit IP's country agree with the browser-reported timezone
+        // and locale? Anti-bot stacks compute exactly this correlation; a
+        // mismatch (e.g. a Brazil exit IP while the browser reports
+        // America/New_York / en-US) is a high-confidence proxy/bot signal.
+        // We compare against the LIVE browser values (actual TZ offset + nav
+        // language), not the payload, because Chrome's Intl is not patched in
+        // this build (see timezone.id note) so the offset is the system clock.
+        // tzActual mirrors the in-block actualTzId (assigned at the timezone.id
+        // probe); it is the function-scope copy reachable here.
+        AddGeoConsistencyTests(tests, geoCountry, tzActual, actualTzOffsetMin, actualNavLanguage);
+
+        // audit SELFCHECK-06: weighted score with partial credit so benign
+        // "warn" outcomes (colorDepth, pixelRatio, webgl, audio jitter, locale)
+        // don't push a healthy profile into a RISKY band, and "skip" results
+        // (canvas unavailable, unreadable WebGL, indeterminate geo checks) are
+        // excluded from the denominator entirely rather than counted as
+        // failures. pass = 1.0, warn = 0.5, fail = 0; rounded (not truncated).
+        double Weight(string status) => status switch
+        {
+            "pass" => 1.0,
+            "warn" => 0.5,
+            _      => 0.0,   // "fail" (and any unexpected status)
+        };
+        var scored = tests.Where(t => t.Status != "skip").ToList();
+        var earned = scored.Sum(t => Weight(t.Status));
+        var score = scored.Count > 0
+            ? (int)Math.Round(earned * 100.0 / scored.Count, MidpointRounding.AwayFromZero)
+            : 0;
 
         // Serialize tests to JSON
         var testsJson = JsonSerializer.Serialize(tests, new JsonSerializerOptions { WriteIndented = false });
@@ -868,15 +977,273 @@ public sealed class SelfCheckService : ISelfCheckService
         => _history.GetLatestAsync(profileName, ct);
 
     /// <summary>
-    /// IPs that DON'T constitute a leak: loopback, link-local,
-    /// CGNAT-ish ranges that real users have. We treat private LAN
-    /// IPs (10/8, 192.168/16, 172.16/12) as also "trivial" because
-    /// modern Chrome's mDNS obfuscation hides them by default — if
-    /// we see one it's our patched build skipping the obfuscation,
-    /// not the user's real WAN address.
+    /// audit SELFCHECK-02: country (ISO-3166 alpha-2) → inclusive band of
+    /// acceptable UTC offsets in HOURS, covering the country's full span of
+    /// civil timezones across standard time AND DST. A reported offset that
+    /// falls outside the band for the exit-IP country is a geo inconsistency.
+    /// We ship the antidetect-relevant countries; unmapped countries yield a
+    /// "skip" (indeterminate) rather than a false positive.
+    /// </summary>
+    private static readonly Dictionary<string, (double Min, double Max)> _countryOffsetBands =
+        new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["US"] = (-10, -4),   // Hawaii (-10) .. Eastern DST (-4)
+        ["CA"] = (-8, -2.5),  // Pacific .. Newfoundland DST
+        ["GB"] = (0, 1),      // GMT / BST
+        ["IE"] = (0, 1),
+        ["PT"] = (-1, 1),     // mainland + Azores
+        ["FR"] = (0, 2),      // mainland CET/CEST (overseas excluded)
+        ["DE"] = (1, 2),
+        ["NL"] = (1, 2),
+        ["ES"] = (0, 2),      // Canaries .. mainland CEST
+        ["IT"] = (1, 2),
+        ["PL"] = (1, 2),
+        ["UA"] = (2, 3),      // EET / EEST
+        ["RU"] = (2, 12),     // Kaliningrad .. Kamchatka
+        ["BR"] = (-5, -2),    // Acre .. Fernando de Noronha
+        ["AR"] = (-3, -3),
+        ["MX"] = (-8, -5),
+        ["IN"] = (5.5, 5.5),
+        ["CN"] = (8, 8),
+        ["JP"] = (9, 9),
+        ["KR"] = (9, 9),
+        ["AU"] = (8, 11),     // AWST .. AEDT
+        ["NZ"] = (12, 13),
+        ["SG"] = (8, 8),
+        ["HK"] = (8, 8),
+        ["AE"] = (4, 4),
+        ["TR"] = (3, 3),
+        ["ZA"] = (2, 2),
+        ["VN"] = (7, 7),
+        ["ID"] = (7, 9),
+        ["TH"] = (7, 7),
+        ["PH"] = (8, 8),
+    };
+
+    /// <summary>
+    /// audit SELFCHECK-02: leading region/country subtags that are expected
+    /// for a given exit-IP country, used for the navigator.language vs geo
+    /// cross-check. Keyed by ISO-3166 country; values are acceptable
+    /// BCP-47 region subtags (the part after '-' in e.g. "en-US"). Where a
+    /// language has no region subtag we cannot judge, so it is not failed.
+    /// </summary>
+    private static readonly Dictionary<string, string[]> _countryLanguageRegions =
+        new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["US"] = new[] { "US" },
+        ["CA"] = new[] { "CA" },
+        ["GB"] = new[] { "GB", "UK" },
+        ["IE"] = new[] { "IE", "GB" },
+        ["FR"] = new[] { "FR" },
+        ["DE"] = new[] { "DE", "AT" },
+        ["NL"] = new[] { "NL" },
+        ["ES"] = new[] { "ES" },
+        ["IT"] = new[] { "IT" },
+        ["PL"] = new[] { "PL" },
+        ["PT"] = new[] { "PT" },
+        ["UA"] = new[] { "UA", "RU" },
+        ["RU"] = new[] { "RU" },
+        ["BR"] = new[] { "BR" },
+        ["AR"] = new[] { "AR" },
+        ["MX"] = new[] { "MX" },
+        ["IN"] = new[] { "IN" },
+        ["CN"] = new[] { "CN" },
+        ["JP"] = new[] { "JP" },
+        ["KR"] = new[] { "KR" },
+        ["AU"] = new[] { "AU" },
+        ["NZ"] = new[] { "NZ" },
+        ["TR"] = new[] { "TR" },
+        ["ZA"] = new[] { "ZA" },
+        ["VN"] = new[] { "VN" },
+        ["TH"] = new[] { "TH" },
+        ["PH"] = new[] { "PH" },
+    };
+
+    /// <summary>
+    /// audit SELFCHECK-02: emit the exit-IP geo vs timezone/locale
+    /// consistency tests. These are the single most important antidetect
+    /// correlation checks and were previously missing entirely. Each sub-test
+    /// is "skip" (excluded from the score, see SELFCHECK-06) when we lack the
+    /// inputs to judge — we never raise a false leak alarm on missing data.
+    /// </summary>
+    private static void AddGeoConsistencyTests(
+        List<SelfCheckTestResult> tests,
+        string? geoCountry,
+        string? actualTzId,
+        double? tzOffsetMin,
+        string? navLanguage)
+    {
+        // ── exit-IP country vs reported timezone offset ──
+        string tzStatus;
+        string? tzDetail = null;
+        string tzActualStr;
+        string tzExpectedStr;
+
+        if (string.IsNullOrWhiteSpace(geoCountry) || tzOffsetMin is null)
+        {
+            tzStatus = "skip";
+            tzExpectedStr = "(needs exit-IP country + TZ offset)";
+            tzActualStr = tzOffsetMin is null
+                ? "(no TZ offset)"
+                : $"country=(none) offset={FmtOffset(-tzOffsetMin.Value / 60.0)}";
+        }
+        else if (!_countryOffsetBands.TryGetValue(geoCountry, out var band))
+        {
+            // We don't have an offset band for this country — indeterminate.
+            tzStatus = "skip";
+            tzExpectedStr = $"(no offset band for '{geoCountry}')";
+            tzActualStr = $"{actualTzId ?? "?"} ({FmtOffset(-tzOffsetMin.Value / 60.0)})";
+        }
+        else
+        {
+            // getTimezoneOffset(): positive = behind UTC. UTC offset = -mins/60.
+            var utcOffsetHours = -tzOffsetMin.Value / 60.0;
+            // 0.25h slack for half-hour/quarter-hour zones rounding.
+            var ok = utcOffsetHours >= band.Min - 0.25 && utcOffsetHours <= band.Max + 0.25;
+            tzStatus = ok ? "pass" : "fail";
+            tzExpectedStr = $"{geoCountry}: UTC{FmtOffset(band.Min)}..UTC{FmtOffset(band.Max)}";
+            tzActualStr = $"{actualTzId ?? "?"} (UTC{FmtOffset(utcOffsetHours)})";
+            if (!ok)
+                tzDetail = $"Exit IP geolocates to '{geoCountry}' but the browser timezone " +
+                           $"offset UTC{FmtOffset(utcOffsetHours)} is outside that country's " +
+                           $"band — a high-confidence proxy/timezone-mismatch signal.";
+        }
+
+        tests.Add(new SelfCheckTestResult
+        {
+            Id = "network.geo_timezone_consistency",
+            Label = "Geo / Timezone Consistency",
+            Category = "network",
+            Status = tzStatus,
+            Severity = "critical",
+            Expected = tzExpectedStr,
+            Actual = tzActualStr,
+            Detail = tzDetail,
+        });
+
+        // ── exit-IP country vs navigator.language region subtag ──
+        string langStatus;
+        string? langDetail = null;
+        string langActualStr = navLanguage ?? "(none)";
+        string langExpectedStr;
+
+        var region = ExtractRegionSubtag(navLanguage);
+        if (string.IsNullOrWhiteSpace(geoCountry)
+            || !_countryLanguageRegions.TryGetValue(geoCountry, out var okRegions))
+        {
+            langStatus = "skip";
+            langExpectedStr = string.IsNullOrWhiteSpace(geoCountry)
+                ? "(needs exit-IP country)"
+                : $"(no locale map for '{geoCountry}')";
+        }
+        else if (region is null)
+        {
+            // Language has no region subtag (e.g. "en") — cannot judge.
+            langStatus = "skip";
+            langExpectedStr = $"{geoCountry}: lang region in [{string.Join(",", okRegions)}]";
+        }
+        else
+        {
+            var ok = okRegions.Contains(region, StringComparer.OrdinalIgnoreCase);
+            // Locale mismatch is a softer signal than TZ (travellers, expats
+            // legitimately run e.g. en-US in another country) → "warn".
+            langStatus = ok ? "pass" : "warn";
+            langExpectedStr = $"{geoCountry}: lang region in [{string.Join(",", okRegions)}]";
+            if (!ok)
+                langDetail = $"Exit IP country '{geoCountry}' but navigator.language region " +
+                             $"is '{region}' — locale/geo mismatch worth reviewing.";
+        }
+
+        tests.Add(new SelfCheckTestResult
+        {
+            Id = "network.geo_locale_consistency",
+            Label = "Geo / Locale Consistency",
+            Category = "network",
+            Status = langStatus,
+            Severity = "warning",
+            Expected = langExpectedStr,
+            Actual = langActualStr,
+            Detail = langDetail,
+        });
+    }
+
+    /// <summary>
+    /// audit SELFCHECK-02: extract the BCP-47 region subtag (the 2-letter
+    /// country code after the language) from a navigator.language value such
+    /// as "en-US" → "US" or "pt-BR" → "BR". Returns null when absent.
+    /// </summary>
+    private static string? ExtractRegionSubtag(string? lang)
+    {
+        if (string.IsNullOrWhiteSpace(lang)) return null;
+        var parts = lang.Split('-', '_');
+        // Walk subtags; the region is a 2-letter (alpha) subtag after the
+        // primary language. (3-digit UN M.49 region codes exist but are rare
+        // in navigator.language and not in our country maps.)
+        for (var i = 1; i < parts.Length; i++)
+        {
+            var p = parts[i];
+            if (p.Length == 2 && char.IsLetter(p[0]) && char.IsLetter(p[1]))
+                return p.ToUpperInvariant();
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Format a UTC offset in hours as a signed string, e.g. -4 → "-04:00",
+    /// 5.5 → "+05:30". Used by the geo/timezone consistency probe output.
+    /// </summary>
+    private static string FmtOffset(double hours)
+    {
+        var sign = hours < 0 ? "-" : "+";
+        var abs = Math.Abs(hours);
+        var h = (int)abs;
+        var m = (int)Math.Round((abs - h) * 60);
+        return $"{sign}{h:D2}:{m:D2}";
+    }
+
+    /// <summary>
+    /// IPs/hostnames that DON'T constitute a leak: loopback, link-local,
+    /// private LAN ranges, and mDNS obfuscation hostnames. We treat private
+    /// LAN IPs (10/8, 192.168/16, 172.16/12) as "trivial" because modern
+    /// Chrome's mDNS obfuscation hides them by default — if we see one it's
+    /// our patched build skipping the obfuscation, not the user's real WAN
+    /// address.
+    ///
+    /// audit SELFCHECK-01: this now also classifies IPv6 candidates. A
+    /// *global* IPv6 address (anything not loopback / link-local / ULA /
+    /// mDNS) is a genuine identity leak on a dual-stack host behind an
+    /// IPv4-only proxy and MUST return false here so the WebRTC test fails.
     /// </summary>
     private static bool IsTrivialIp(string ip)
     {
+        if (string.IsNullOrWhiteSpace(ip)) return true;
+
+        // mDNS obfuscation hostnames (e.g. "<uuid>.local") — Chrome's
+        // default privacy mechanism; never a real-address leak.
+        if (ip.EndsWith(".local", StringComparison.OrdinalIgnoreCase)) return true;
+
+        // IPv6 candidates contain ':'; IPv4 uses '.'. Strip any zone-id
+        // suffix ("fe80::1%eth0") before classifying.
+        if (ip.Contains(':'))
+        {
+            var addr = ip.Split('%')[0];
+            // Loopback ::1 (and the all-zeros unspecified address).
+            if (addr == "::1" || addr == "::") return true;
+            // Link-local fe80::/10 — fe80..febf.
+            if (addr.StartsWith("fe8", StringComparison.OrdinalIgnoreCase)
+                || addr.StartsWith("fe9", StringComparison.OrdinalIgnoreCase)
+                || addr.StartsWith("fea", StringComparison.OrdinalIgnoreCase)
+                || addr.StartsWith("feb", StringComparison.OrdinalIgnoreCase))
+                return true;
+            // Unique-local fc00::/7 — first byte fc or fd.
+            if (addr.StartsWith("fc", StringComparison.OrdinalIgnoreCase)
+                || addr.StartsWith("fd", StringComparison.OrdinalIgnoreCase))
+                return true;
+            // Any other IPv6 address is global/routable → a real leak.
+            return false;
+        }
+
+        // IPv4 ranges.
         if (ip.StartsWith("127.")) return true;
         if (ip.StartsWith("169.254.")) return true;
         if (ip.StartsWith("10.")) return true;
@@ -1049,6 +1416,33 @@ public sealed class SelfCheckService : ISelfCheckService
         if (value is System.Collections.IEnumerable arr)
             return string.Join(",", arr.Cast<object?>().Select(o => o?.ToString() ?? ""));
         return value.ToString();
+    }
+
+    /// <summary>
+    /// audit SELFCHECK-04: count the elements of an array-shaped value,
+    /// handling the shapes DeviceTemplateBuilder / System.Text.Json /
+    /// Selenium can hand us (List&lt;object&gt;, JsonElement.Array, any
+    /// IEnumerable). Returns 0 for null or non-array values. A plain
+    /// string is NOT treated as an enumerable here (we don't want its
+    /// char count) — only genuine collections are counted.
+    /// </summary>
+    private static int CountList(object? value)
+    {
+        switch (value)
+        {
+            case null:
+                return 0;
+            case JsonElement je:
+                return je.ValueKind == JsonValueKind.Array ? je.GetArrayLength() : 0;
+            case string:
+                return 0;
+            case System.Collections.ICollection coll:
+                return coll.Count;
+            case System.Collections.IEnumerable en:
+                return en.Cast<object?>().Count();
+            default:
+                return 0;
+        }
     }
 
     private static bool TimezoneMatch(string? expected, string? actual)

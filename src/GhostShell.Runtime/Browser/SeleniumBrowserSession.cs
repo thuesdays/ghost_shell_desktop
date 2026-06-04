@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Mykola Kovhanko <thuesdays@gmail.com>
 
 using System.Diagnostics;
+using System.Text.Json;
 using GhostShell.Core.Models;
 using GhostShell.Core.Services;
 using Microsoft.Extensions.Logging;
@@ -371,6 +372,137 @@ internal sealed class SeleniumBrowserSession : IBrowserSession
                 ? js.ExecuteScript(script, a)
                 : js.ExecuteScript(script);
         }, ct);
+
+    // ─────────────────────────────────────────────────────────────
+    // Trusted input (audit SCRIPTRUNNER-01 / SCRIPTSUPPORT-01).
+    // Mouse goes through CDP Input.dispatchMouseEvent and keyboard
+    // through the WebDriver key pipeline — both produce events with
+    // isTrusted === true, unlike the JS dispatchEvent() fallback in the
+    // IBrowserSession default methods. Coordinates are CSS pixels in
+    // the layout viewport, which is exactly what getBoundingClientRect
+    // returns, so no DPR scaling is needed here.
+    // ─────────────────────────────────────────────────────────────
+
+    public Task TrustedClickAsync(string selector, int clickCount = 1, string button = "left", CancellationToken ct = default) =>
+        Task.Run(() =>
+        {
+            var center = ElementCenter(selector)
+                ?? throw new InvalidOperationException($"selector not found / not visible: {selector}");
+            var (x, y) = center;
+            var btnMask = button == "right" ? 2 : button == "middle" ? 4 : 1;
+            // Approach the target with a couple of jittered moves so the
+            // pointer trail isn't a single teleport to dead-centre.
+            DispatchMouse("mouseMoved", x - Random.Shared.Next(8, 26), y - Random.Shared.Next(6, 20), "none", 0, 0);
+            DispatchMouse("mouseMoved", x, y, "none", 0, 0);
+            for (var i = 1; i <= Math.Max(1, clickCount); i++)
+            {
+                DispatchMouse("mousePressed",  x, y, button, btnMask, i);
+                DispatchMouse("mouseReleased", x, y, button, 0,        i);
+            }
+        }, ct);
+
+    public Task TrustedHoverAsync(string selector, CancellationToken ct = default) =>
+        Task.Run(() =>
+        {
+            var center = ElementCenter(selector);
+            if (center is null) return;
+            var (x, y) = center.Value;
+            DispatchMouse("mouseMoved", x - Random.Shared.Next(10, 30), y - Random.Shared.Next(6, 18), "none", 0, 0);
+            DispatchMouse("mouseMoved", x, y, "none", 0, 0);
+        }, ct);
+
+    public async Task TrustedTypeAsync(string selector, string text, int minMs = 40, int maxMs = 180, CancellationToken ct = default)
+    {
+        if (string.IsNullOrEmpty(text)) return;
+        if (maxMs < minMs) maxMs = minMs;           // audit SCRIPTSUPPORT-05 guard
+
+        IWebElement Find() => _driver.FindElement(By.CssSelector(selector));
+
+        // Focus + clear via a trusted click on the element.
+        await Task.Run(() =>
+        {
+            var el = Find();
+            try { el.Clear(); } catch { /* contenteditable / non-clearable — fine */ }
+            try { el.Click(); } catch { /* already focused / overlay — SendKeys still targets it */ }
+        }, ct);
+
+        foreach (var ch in text)
+        {
+            ct.ThrowIfCancellationRequested();
+            var s = ch.ToString();
+            await Task.Run(() =>
+            {
+                // SendKeys routes through the WebDriver input pipeline →
+                // real keydown/keypress/input/keyup with isTrusted=true.
+                try { Find().SendKeys(s); }
+                catch (StaleElementReferenceException) { Find().SendKeys(s); }
+            }, ct);
+            // audit SCRIPTSUPPORT-02: variable per-keystroke gap (not uniform).
+            await Task.Delay(Random.Shared.Next(minMs, maxMs + 1), ct);
+        }
+    }
+
+    public Task TrustedPressKeyAsync(string key, CancellationToken ct = default) =>
+        Task.Run(() =>
+        {
+            var mapped = MapSeleniumKey(key);
+            try { _driver.SwitchTo().ActiveElement().SendKeys(mapped); }
+            catch
+            {
+                try { new OpenQA.Selenium.Interactions.Actions(_driver).SendKeys(mapped).Perform(); }
+                catch (Exception ex) { _log.LogDebug(ex, "TrustedPressKey '{Key}' failed", key); }
+            }
+        }, ct);
+
+    /// <summary>Viewport-centre (CSS px) of the first match, scrolled into view; null if absent/zero-size.</summary>
+    private (double X, double Y)? ElementCenter(string selector)
+    {
+        if (_driver is not IJavaScriptExecutor js) return null;
+        var script = $$"""
+            var el = document.querySelector({{JsonSerializer.Serialize(selector)}});
+            if (!el) return null;
+            try { el.scrollIntoView({block:'center', inline:'center'}); } catch (e) {}
+            var r = el.getBoundingClientRect();
+            if (r.width === 0 && r.height === 0) return null;
+            return [r.left + r.width/2, r.top + r.height/2];
+        """;
+        var res = js.ExecuteScript(script);
+        if (res is System.Collections.IList list && list.Count >= 2 && list[0] is not null && list[1] is not null)
+            return (Convert.ToDouble(list[0]), Convert.ToDouble(list[1]));
+        return null;
+    }
+
+    private void DispatchMouse(string type, double x, double y, string button, int buttons, int clickCount)
+    {
+        ExecCdp("Input.dispatchMouseEvent", new Dictionary<string, object>
+        {
+            ["type"]       = type,
+            ["x"]          = x,
+            ["y"]          = y,
+            ["button"]     = button,
+            ["buttons"]    = buttons,
+            ["clickCount"] = clickCount,
+        });
+    }
+
+    private static string MapSeleniumKey(string key) => key switch
+    {
+        "Enter" or "Return"   => Keys.Enter,
+        "Tab"                 => Keys.Tab,
+        "Escape" or "Esc"     => Keys.Escape,
+        "Backspace"           => Keys.Backspace,
+        "Delete" or "Del"     => Keys.Delete,
+        "ArrowUp" or "Up"     => Keys.ArrowUp,
+        "ArrowDown" or "Down" => Keys.ArrowDown,
+        "ArrowLeft" or "Left" => Keys.ArrowLeft,
+        "ArrowRight" or "Right" => Keys.ArrowRight,
+        "Home"                => Keys.Home,
+        "End"                 => Keys.End,
+        "PageUp"              => Keys.PageUp,
+        "PageDown"            => Keys.PageDown,
+        "Space"               => " ",
+        _                     => key,   // single literal char or unmapped name
+    };
 
     public Task<IReadOnlyList<string>> GetWindowHandlesAsync(CancellationToken ct = default) =>
         Task.Run<IReadOnlyList<string>>(() =>
