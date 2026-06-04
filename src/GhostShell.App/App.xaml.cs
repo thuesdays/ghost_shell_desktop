@@ -411,6 +411,10 @@ public partial class App : Application
         bootLogger.LogInformation(" Data dir: {DataDir}", AppPaths.DataDir);
         bootLogger.LogInformation(" Database: {Db}",      AppPaths.DatabasePath);
         bootLogger.LogInformation(" Log file: {Log}",     LoggingSetup.CurrentLogPath);
+        if (GhostShell.Core.Common.Diagnostics.NetworkTrace)
+            bootLogger.LogWarning(
+                " NETWORK TRACE ON (GHOSTSHELL_NET_TRACE) → net log: {NetLog}  (+ per-launch chrome-netlog-*.json in the logs dir)",
+                LoggingSetup.CurrentNetLogPath);
 
         // Phase 37 audit fix #5: Log all GhostShell.* assembly versions to detect drift.
         foreach (var asm in System.AppDomain.CurrentDomain.GetAssemblies()

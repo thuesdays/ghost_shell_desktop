@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Mykola Kovhanko <thuesdays@gmail.com>
 
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -71,6 +72,22 @@ public sealed class HttpConnectForwarder : IProxyAuthForwarder
     private HostCounter GetCounter(string host) =>
         _counters.GetOrAdd(host, _ => new HostCounter());
 
+    // ─── Aggregate health counters (net-trace diagnostics) ───────────
+    // Total connections accepted, currently-open connections, and the
+    // count of connections that FAILED to reach the upstream proxy.
+    // A rising _upstreamFailures with a flat _connActive is the exact
+    // signature of a dead/unreachable upstream proxy (the ERR_EMPTY_-
+    // RESPONSE case). Surfaced in logs so the failure is never silent.
+    private long _connTotal;
+    private long _connActive;
+    private long _upstreamFailures;
+
+    /// <summary>Live snapshot of forwarder health for diagnostics.</summary>
+    public (long Total, long Active, long UpstreamFailures) Health =>
+        (Interlocked.Read(ref _connTotal),
+         Interlocked.Read(ref _connActive),
+         Interlocked.Read(ref _upstreamFailures));
+
     public HttpConnectForwarder(ILogger<HttpConnectForwarder> log)
     {
         _log = log;
@@ -123,8 +140,9 @@ public sealed class HttpConnectForwarder : IProxyAuthForwarder
         _acceptLoop = Task.Run(() => AcceptLoopAsync(_stopCts.Token));
 
         _log.LogInformation(
-            "Auth-proxy forwarder ready: 127.0.0.1:{Local} → {Up}:{UpPort} (auth={HasAuth})",
-            port, _upstreamHost, _upstreamPort, _authHeader.Length > 0);
+            "Auth-proxy forwarder ready: 127.0.0.1:{Local} → {Up}:{UpPort} (auth={HasAuth}, net-trace={Trace})",
+            port, _upstreamHost, _upstreamPort, _authHeader.Length > 0,
+            GhostShell.Core.Common.Diagnostics.NetworkTrace);
 
         return Task.FromResult(_localUrl);
     }
@@ -177,6 +195,9 @@ public sealed class HttpConnectForwarder : IProxyAuthForwarder
     private async Task HandleConnectionAsync(TcpClient client, CancellationToken ct)
     {
         TcpClient? upstream = null;
+        var targetHost = "";
+        var connId = Interlocked.Increment(ref _connTotal);
+        Interlocked.Increment(ref _connActive);
         try
         {
             client.NoDelay = true;
@@ -194,19 +215,50 @@ public sealed class HttpConnectForwarder : IProxyAuthForwarder
             var headers = await clientReader.ReadHeadersAsync(64 * 1024, ct);
             if (headers.Length == 0)
             {
-                _log.LogDebug("Empty request — client disconnected before sending headers");
+                _log.LogDebug("[net #{Id}] empty request — client disconnected before headers", connId);
                 return;
             }
 
-            var targetHost = ExtractTargetHost(headers);
+            targetHost = ExtractTargetHost(headers);
             var isConnect  = IsConnectRequest(headers);
 
-            // Connect to the real proxy.
+            _log.LogTrace(
+                "[net #{Id}] {Method} target={Target} ({HdrBytes}B headers) → dialing upstream {Up}:{UpPort}",
+                connId, isConnect ? "CONNECT" : "HTTP", string.IsNullOrEmpty(targetHost) ? "?" : targetHost,
+                headers.Length, _upstreamHost, _upstreamPort);
+
+            // Connect to the real proxy. This is THE failure point when an
+            // upstream proxy is dead/rate-limited — the symptom the browser
+            // shows as net::ERR_EMPTY_RESPONSE. Give it its own try/catch so
+            // the cause is logged LOUDLY (Warning) with the target host and
+            // the concrete socket error, instead of being swallowed below as
+            // a generic "peer reset" at Debug.
             upstream = new TcpClient { NoDelay = true };
-            using var upstreamCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            upstreamCts.CancelAfter(TimeSpan.FromSeconds(30));
-            await upstream.ConnectAsync(_upstreamHost, _upstreamPort, upstreamCts.Token);
+            var dialSw = Stopwatch.StartNew();
+            try
+            {
+                using var upstreamCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                upstreamCts.CancelAfter(TimeSpan.FromSeconds(30));
+                await upstream.ConnectAsync(_upstreamHost, _upstreamPort, upstreamCts.Token);
+            }
+            catch (Exception ex) when (ex is SocketException or OperationCanceledException)
+            {
+                var fails = Interlocked.Increment(ref _upstreamFailures);
+                var reason = ex is OperationCanceledException
+                    ? "timeout after 30s"
+                    : $"{((SocketException)ex).SocketErrorCode} ({ex.Message})";
+                _log.LogWarning(
+                    "[net #{Id}] UPSTREAM PROXY UNREACHABLE {Up}:{UpPort} for target '{Target}': {Reason}. " +
+                    "Browser will see ERR_EMPTY_RESPONSE. (upstream failures this session: {Fails})",
+                    connId, _upstreamHost, _upstreamPort,
+                    string.IsNullOrEmpty(targetHost) ? "?" : targetHost, reason, fails);
+                return;
+            }
             using var upstreamStream = upstream.GetStream();
+
+            _log.LogDebug(
+                "[net #{Id}] upstream connected in {Ms}ms (target={Target})",
+                connId, dialSw.ElapsedMilliseconds, string.IsNullOrEmpty(targetHost) ? "?" : targetHost);
 
             HostCounter? counter =
                 string.IsNullOrEmpty(targetHost) ? null : GetCounter(targetHost);
@@ -270,19 +322,35 @@ public sealed class HttpConnectForwarder : IProxyAuthForwarder
             try { upstream.Close(); } catch { /* swallow */ }
             try { await Task.WhenAll(c2u, u2c).WaitAsync(TimeSpan.FromSeconds(2)); }
             catch { /* expected — the loser threw on the closed stream */ }
+
+            if (counter is not null)
+                _log.LogTrace(
+                    "[net #{Id}] closed (target={Target}; host total {Bytes}B / {Reqs} req)",
+                    connId, string.IsNullOrEmpty(targetHost) ? "?" : targetHost,
+                    Interlocked.Read(ref counter.Bytes), Interlocked.Read(ref counter.Requests));
         }
         catch (OperationCanceledException) { /* shutdown / timeout */ }
-        catch (IOException) { /* peer closed mid-stream — normal */ }
+        catch (IOException ex)
+        {
+            // Peer closed mid-stream. Usually normal (browser navigated
+            // away), but during an upstream brown-out it's the proxy
+            // hanging up — visible only under net-trace.
+            _log.LogTrace(ex, "[net #{Id}] stream closed mid-transfer (target={Target})",
+                connId, string.IsNullOrEmpty(targetHost) ? "?" : targetHost);
+        }
         catch (SocketException ex)
         {
-            _log.LogDebug(ex, "Forwarder socket error (peer reset)");
+            _log.LogDebug(ex, "[net #{Id}] socket error (target={Target})",
+                connId, string.IsNullOrEmpty(targetHost) ? "?" : targetHost);
         }
         catch (Exception ex)
         {
-            _log.LogWarning(ex, "Forwarder connection failed");
+            _log.LogWarning(ex, "[net #{Id}] connection failed (target={Target})",
+                connId, string.IsNullOrEmpty(targetHost) ? "?" : targetHost);
         }
         finally
         {
+            Interlocked.Decrement(ref _connActive);
             try { client.Close(); }   catch { /* swallow */ }
             try { upstream?.Close(); } catch { /* swallow */ }
         }

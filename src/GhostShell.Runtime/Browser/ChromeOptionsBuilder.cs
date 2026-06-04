@@ -296,6 +296,26 @@ public static class ChromeOptionsBuilder
         options.AddArgument("--log-level=3");
         options.AddArgument("--disable-logging");
 
+        // ─── Network trace (GHOSTSHELL_NET_TRACE=1) ───────────────────
+        // Capture Chromium's own NetLog — the authoritative, packet-level
+        // record of every socket, DNS lookup, proxy resolution, TLS
+        // handshake and HTTP transaction. This is what diagnoses an
+        // ERR_EMPTY_RESPONSE from the browser's side (vs. the forwarder's
+        // side, which logs to net-*.log). Load the JSON at
+        // chrome://net-export or https://netlog-viewer.appspot.com.
+        // NetLog is independent of --disable-logging (that only gates the
+        // text/stderr log), so both coexist. IncludeSensitive keeps cookie
+        // /auth headers — fine for a local antidetect diagnostic, and the
+        // file stays on the user's machine.
+        if (GhostShell.Core.Common.Diagnostics.NetworkTrace)
+        {
+            var netlogPath = Path.Combine(
+                AppPaths.LogsDir,
+                $"chrome-netlog-{profile.Name}-{DateTime.Now:yyyyMMdd-HHmmss}.json");
+            options.AddArgument($"--log-net-log={netlogPath}");
+            options.AddArgument("--net-log-capture-mode=IncludeSensitive");
+        }
+
         // ─── Experimental prefs (mirror of legacy prefs dict) ─────
         // Some preferences only take effect via the prefs API — they
         // can't be set via command-line. Selenium writes these into
