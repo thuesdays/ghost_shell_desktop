@@ -36,14 +36,17 @@ Write-Host "Chromium version: $ver"
 $patch = Join-Path $Dest "ghost-shell-$ver.patch"
 Push-Location $ChromiumSrc
 try {
-    # stderr captured for us; use --no-color for a stable, reviewable diff
-    git diff --no-color -- ':!*.png' ':!*.ico' | Out-File -FilePath $patch -Encoding utf8
+    # --no-color for a stable, reviewable diff. 2>$null discards git's
+    # native stderr (e.g. CRLF-normalisation warnings) — under Windows
+    # PowerShell 5.1 with ErrorActionPreference=Stop a native-cmd stderr
+    # line would otherwise abort the whole script.
+    git diff --no-color -- ':!*.png' ':!*.ico' 2>$null | Out-File -FilePath $patch -Encoding utf8
     $lines = (Get-Content $patch | Measure-Object -Line).Lines
     Write-Host "Wrote $patch ($lines lines)"
 
     # 3) New (untracked) ghost_shell core files
     $newDir = Join-Path $Dest 'new_files'
-    $untracked = git ls-files --others --exclude-standard | Where-Object { $_ -match 'ghost_shell_(config|ua_override)\.(h|cc)$' }
+    $untracked = (git ls-files --others --exclude-standard 2>$null) | Where-Object { $_ -match 'ghost_shell_(config|ua_override)\.(h|cc)$' }
     foreach ($rel in $untracked) {
         $target = Join-Path $newDir ($rel -replace '/', '\')
         New-Item -ItemType Directory -Force -Path (Split-Path $target) | Out-Null
@@ -53,7 +56,7 @@ try {
 
     # 4) Branding assets (informational)
     Write-Host "`nBranding/binary changes (re-apply by copying assets, not via the patch):"
-    git diff --stat -- '*.png' '*.ico' | Select-Object -Last 25 | ForEach-Object { Write-Host "  $_" }
+    (git diff --stat -- '*.png' '*.ico' 2>$null) | Select-Object -Last 25 | ForEach-Object { Write-Host "  $_" }
 }
 finally { Pop-Location }
 

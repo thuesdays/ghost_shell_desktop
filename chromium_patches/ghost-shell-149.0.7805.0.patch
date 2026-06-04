@@ -697,7 +697,7 @@ index c5a0d3f25629c..3076d32e5ca46 100644
      // `greased_id`.
      settings_map.emplace(greased_id, greased_value);
 diff --git a/services/network/p2p/socket_manager.cc b/services/network/p2p/socket_manager.cc
-index ffc2c2c133160..930ef75f94f74 100644
+index ffc2c2c133160..db382d2187a5b 100644
 --- a/services/network/p2p/socket_manager.cc
 +++ b/services/network/p2p/socket_manager.cc
 @@ -6,11 +6,21 @@
@@ -722,7 +722,7 @@ index ffc2c2c133160..930ef75f94f74 100644
  #include "base/task/single_thread_task_runner.h"
  #include "base/task/thread_pool.h"
  #include "net/base/address_family.h"
-@@ -261,11 +271,56 @@ void P2PSocketManager::DumpPacket(base::span<const uint8_t> packet,
+@@ -261,11 +271,73 @@ void P2PSocketManager::DumpPacket(base::span<const uint8_t> packet,
                                               incoming);
  }
  
@@ -762,6 +762,23 @@ index ffc2c2c133160..930ef75f94f74 100644
 +  return false;
 +}
 +
++// audit WRTC-03: per-profile-stable fake local IP, consistent with the
++// webrtc/pc/peer_connection.cc GhostShellFakeLanIP fake (192.168.x.x for
++// IPv4, fd00::x:x ULA for IPv6) so the default-local-address and the host
++// candidates agree.
++net::IPAddress GhostShellFakeLocalIP(bool ipv6) {
++  uint32_t s = static_cast<uint32_t>(GhostShell_GetRandomSeed());
++  uint8_t o3 = static_cast<uint8_t>((s >> 8) & 0xFF);
++  uint8_t o4 = static_cast<uint8_t>(s & 0xFF);
++  if (o4 == 0)   o4 = 1;
++  if (o4 == 255) o4 = 254;
++  if (ipv6) {
++    return net::IPAddress(0xfd, 0, 0, 0, 0, 0, 0, 0,
++                          0, 0, 0, 0, 0, 0, o3, o4);
++  }
++  return net::IPAddress(192, 168, o3, o4);
++}
++
 +}  // namespace
 +
  net::NetworkInterfaceList P2PSocketManager::DoGetNetworkList() {
@@ -779,6 +796,25 @@ index ffc2c2c133160..930ef75f94f74 100644
    return list;
  }
  
+@@ -351,7 +423,17 @@ void P2PSocketManager::FinishGetDefaultLocalAddress(
+     return;
+   }
+ 
+-  std::move(callback).Run(local_address.address());
++  // audit WRTC-03: GetDefaultLocalAddress discovers the REAL default-route
++  // IP via the connect-to-public-host trick, which bypasses the host-scope
++  // filter applied to DoGetNetworkList(). When GhostShell is active and the
++  // discovered address is host-scope (private), substitute the per-profile
++  // fake so the real local address never reaches WebRTC as the default.
++  net::IPAddress addr = local_address.address();
++  if (GhostShellShouldFilterHostCandidates() &&
++      GhostShellIsHostScopeAddress(addr)) {
++    addr = GhostShellFakeLocalIP(addr.IsIPv6());
++  }
++  std::move(callback).Run(addr);
+ }
+ 
+ void P2PSocketManager::SendNetworkList(
 diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 index 5fd388fba60b2..186e9f2a692d7 100644
 --- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
