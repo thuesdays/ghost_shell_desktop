@@ -56,9 +56,50 @@ cp -r /path/to/chromium_patches/new_files/* .
 # then: gn gen out/Release && autoninja -C out/Release chrome
 ```
 
-> Regenerate this patch after any change in the checkout:
-> `git -C <chromium/src> diff -- ':!*.png' ':!*.ico' > ghost-shell-<ver>.patch`
-> and re-copy any new untracked files.
+> Keep this directory current after ANY change in the checkout — run
+> `pwsh -File chromium_patches\sync_patches.ps1` (regenerates the patch +
+> re-copies new core files). This is the canonical "keep patches up to
+> date in the repo" step.
+
+## Building (out/GhostShell)
+
+Build dir: `F:\projects\chromium\src\out\GhostShell` (Release: `is_debug=false`,
+`symbol_level=0`, `is_component_build=false`, `enable_direct_composition=false`).
+Build tool is **Siso** (use `autoninja`, not raw `ninja`). depot_tools at
+`F:\projects\depot`.
+
+```bat
+set PATH=F:\projects\depot;%PATH%
+cd /d F:\projects\chromium\src
+autoninja -C out\GhostShell chrome chromedriver crashpad_handler
+```
+
+The full build+deploy is wrapped by `scripts\build-ghost-shell.bat` (also
+`.sh`), which builds those three targets, reads `chrome\VERSION`, and copies
+the runtime set (chrome.exe/.dll, chrome_elf.dll, d3dcompiler_47.dll,
+libEGL/libGLESv2, vk_swiftshader, *.pak, v8_context_snapshot.bin, icudtl.dat,
+the SxS `<version>.manifest` — **critical**, crashpad_handler.exe,
+chromedriver.exe, `locales\`) into a flat `chrome_win64\` deploy dir.
+
+## scripts/
+
+Vendored from `ghost_shell_browser\scripts` — the browser-core build / deploy
+/ QA toolchain (kept in-repo per "держать актуальными все и скрипты тоже"):
+
+| Script | Purpose |
+|---|---|
+| `build-ghost-shell.bat` / `.sh` | build (chrome+chromedriver+crashpad) + flat deploy to `chrome_win64\` |
+| `deploy-ghost-shell.bat`, `deploy-ghost-shell-flat.bat`/`.sh` | deploy an existing build |
+| `download_chromium.bat`/`.ps1` | fetch/sync the Chromium source |
+| `package_chromium.bat`/`.ps1` | package the built browser for distribution |
+| `apply_chromium_icon.py`, `deep_icon_sync.py` | apply Ghost Shell branding (logos/icons) |
+| `backup_sources.ps1` | back up the patched source files |
+| `bisect_flags.py` | bisect Chromium flags when debugging a regression |
+| `creepjs_check.py` | run the build against CreepJS, score stealth |
+| `capture_ja3_baseline.py` | capture/compare the TLS JA3/JA4 fingerprint |
+| `captcha_diagnostic.py`, `diagnose.py` | anti-detect / runtime diagnostics |
+
+## Audit
 
 See `AUDIT_CHROMIUM_PATCHES_2026-06-04.md` (repo root) for the deep audit:
 coverage gaps, currency vs Chromium 149, detection leaks, and the
