@@ -83,21 +83,20 @@ chromedriver.exe, `locales\`) into a flat `chrome_win64\` deploy dir.
 
 ## scripts/
 
-Vendored from `ghost_shell_browser\scripts` — the browser-core build / deploy
-/ QA toolchain (kept in-repo per "держать актуальными все и скрипты тоже"):
+Only the scripts actually needed for **our (Windows desktop) build** are kept
+in-repo (the web-version / fetch-prebuilt / branding / QA scripts from
+`ghost_shell_browser\scripts` were intentionally dropped):
 
 | Script | Purpose |
 |---|---|
-| `build-ghost-shell.bat` / `.sh` | build (chrome+chromedriver+crashpad) + flat deploy to `chrome_win64\` |
-| `deploy-ghost-shell.bat`, `deploy-ghost-shell-flat.bat`/`.sh` | deploy an existing build |
-| `download_chromium.bat`/`.ps1` | fetch/sync the Chromium source |
-| `package_chromium.bat`/`.ps1` | package the built browser for distribution |
-| `apply_chromium_icon.py`, `deep_icon_sync.py` | apply Ghost Shell branding (logos/icons) |
-| `backup_sources.ps1` | back up the patched source files |
-| `bisect_flags.py` | bisect Chromium flags when debugging a regression |
-| `creepjs_check.py` | run the build against CreepJS, score stealth |
-| `capture_ja3_baseline.py` | capture/compare the TLS JA3/JA4 fingerprint |
-| `captcha_diagnostic.py`, `diagnose.py` | anti-detect / runtime diagnostics |
+| `build-ghost-shell.bat` | `autoninja` build of chrome + chromedriver + crashpad_handler, then flat-deploy the runtime set to `chrome_win64\`. Flags: `/clean` (wipe `out\GhostShell` first), `/skip-build` (deploy an existing build only). |
+| `package_chromium.ps1` | pack `chrome_win64\` → `dist\chrome_win64-vX.Y.Z.W.zip` **+ `.sha256`** (the sibling checksum the desktop self-update verifies — see audit DATA-01). |
+
+> Note: `build-ghost-shell.bat`'s `DEPLOY_DIR` still points at the legacy
+> `F:\projects\goodmedika\chrome_win64` path — update it to the desktop's
+> `chrome_win64\` location before use. The CreepJS / JA3 / captcha QA tools
+> still live in `ghost_shell_browser\scripts` if build-verification tooling
+> is wanted later.
 
 ## Audit
 
