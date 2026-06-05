@@ -312,6 +312,62 @@ public sealed class ChromeImporter : IChromeImporter
                     CryptographicOperations.ZeroMemory(aesKey);
             }
 
+            // Stage 3b: App-Bound (Chrome v127+) recovery via CDP.
+            // When DPAPI left cookies undecryptable (the "v20" prefix — keys
+            // wrapped by Chrome's Elevation Service), launch the SOURCE
+            // browser's own binary headless against a temp copy of the profile
+            // and read fully-decrypted cookies via CDP Storage.getCookies. This
+            // is the only reliable way to recover App-Bound cookies, and it
+            // works whether or not the user's Chrome is currently open (the
+            // temp user-data-dir sidesteps the singleton lock). On success it
+            // REPLACES the partial DPAPI set with the complete decrypted set.
+            if (undecryptable > 0 && opts.ImportCookies)
+            {
+                try
+                {
+                    var extractor = new CdpCookieExtractor(_log);
+                    var outcome = await extractor.TryExtractAsync(
+                        src.BrandLabel, src.UserDataPath, src.ProfileFolder, ct);
+                    var cdp = outcome.Cookies;
+                    if (cdp is { Count: > 0 })
+                    {
+                        var filtered = new List<CookieEntry>(cdp.Count);
+                        var sens = 0;
+                        foreach (var c in cdp)
+                        {
+                            if (opts.SkipSensitiveDomains && IsSensitive(c.Domain)) { sens++; continue; }
+                            filtered.Add(c);
+                        }
+                        if (filtered.Count >= cookies.Count)
+                        {
+                            _log.LogInformation(
+                                "Chrome import: App-Bound CDP recovery replaced {Old} DPAPI cookie(s) " +
+                                "with {New} decrypted cookie(s)", cookies.Count, filtered.Count);
+                            cookies.Clear();
+                            cookies.AddRange(filtered);
+                            skippedSensitive = sens;
+                            undecryptable = 0;
+                            // Drop the now-obsolete DPAPI App-Bound warning.
+                            warnings.RemoveAll(w => w.Contains("App-Bound", StringComparison.Ordinal));
+                            warnings.Add(
+                                $"App-Bound (Chrome v127+) cookies recovered — {filtered.Count} cookie(s) " +
+                                $"decrypted in-place by {src.BrandLabel} via a headless CDP session.");
+                        }
+                    }
+                    else if (outcome.Reason is not null)
+                    {
+                        // Replace the generic DPAPI v20 message with the precise,
+                        // actionable reason (usually: "close <browser> and re-run").
+                        warnings.RemoveAll(w => w.Contains("App-Bound encryption", StringComparison.Ordinal));
+                        warnings.Add("App-Bound cookie recovery: " + outcome.Reason);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _log.LogWarning(ex, "App-Bound CDP cookie recovery failed");
+                }
+            }
+
             // Stage 4: history (best-effort — failure is a warning).
             if (historyCopy is not null && opts.HistoryDays > 0)
             {

@@ -223,62 +223,73 @@
                                                TextWrapping="Wrap"
                                                Text="{Binding Description, FallbackValue='—'}"/>
 
-                                    <!-- Actions -->
+                                    <!-- Actions — two rows so the labelled buttons
+                                         get the full card width (no text clipping),
+                                         with icon actions on a compact second row. -->
                                     <Grid Grid.Row="3" Margin="0,12,0,0">
-                                        <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="*"/>
-                                            <ColumnDefinition Width="*"/>
-                                            <ColumnDefinition Width="Auto"/>
-                                            <ColumnDefinition Width="Auto"/>
-                                        </Grid.ColumnDefinitions>
-                                        <Button Grid.Column="0" Margin="0,0,4,0"
-                                                Style="{StaticResource ButtonPrimary}"
-                                                Command="{Binding DataContext.StartGroupCommand,
-                                                          Source={x:Reference PageRoot}}"
-                                                CommandParameter="{Binding}">
-                                            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                                                <ctrl:Icon Data="{StaticResource Icon.Play}" Size="17"
-                                                           Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
-                                                           Margin="0,0,6,0"
-                                                           VerticalAlignment="Center"/>
-                                                <TextBlock Text="Start group" VerticalAlignment="Center"/>
-                                            </StackPanel>
-                                        </Button>
-                                        <Button Grid.Column="1" Margin="4,0,4,0"
-                                                Style="{StaticResource ButtonDanger}"
-                                                IsEnabled="{Binding HasRunning}"
-                                                Command="{Binding DataContext.StopGroupCommand,
-                                                          Source={x:Reference PageRoot}}"
-                                                CommandParameter="{Binding}">
-                                            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                                                <ctrl:Icon Data="{StaticResource Icon.Stop}" Size="17"
-                                                           Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
-                                                           Margin="0,0,6,0"
-                                                           VerticalAlignment="Center"/>
-                                                <TextBlock VerticalAlignment="Center">
-                                                    <Run Text="Stop "/>
-                                                    <Run Text="{Binding RunningCount, Mode=OneWay}"/>
-                                                </TextBlock>
-                                            </StackPanel>
-                                        </Button>
-                                        <Button Grid.Column="2" Margin="4,0,2,0"
-                                                Style="{StaticResource RowActionButton}"
-                                                ToolTip="Edit group"
-                                                Command="{Binding DataContext.EditCommand,
-                                                          Source={x:Reference PageRoot}}"
-                                                CommandParameter="{Binding}">
-                                            <ctrl:Icon Data="{StaticResource Icon.Edit}" Size="20"
-                                                       Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
-                                        </Button>
-                                        <Button Grid.Column="3"
-                                                Style="{StaticResource RowActionDanger}"
-                                                ToolTip="Delete group"
-                                                Command="{Binding DataContext.DeleteCommand,
-                                                          Source={x:Reference PageRoot}}"
-                                                CommandParameter="{Binding}">
-                                            <ctrl:Icon Data="{StaticResource Icon.Trash}" Size="20"
-                                                       Stroke="{StaticResource ErrBrush}"/>
-                                        </Button>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="Auto"/>
+                                        </Grid.RowDefinitions>
+
+                                        <!-- Row 0: primary Start / Stop, split full width -->
+                                        <Grid Grid.Row="0">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="*"/>
+                                            </Grid.ColumnDefinitions>
+                                            <Button Grid.Column="0" Margin="0,0,4,0" Padding="10,7"
+                                                    Style="{StaticResource ButtonPrimary}"
+                                                    Command="{Binding DataContext.StartGroupCommand,
+                                                              Source={x:Reference PageRoot}}"
+                                                    CommandParameter="{Binding}">
+                                                <StackPanel Orientation="Horizontal"
+                                                            HorizontalAlignment="Center" VerticalAlignment="Center">
+                                                    <ctrl:Icon Data="{StaticResource Icon.Play}" Size="16"
+                                                               Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                                                               Margin="0,0,6,0" VerticalAlignment="Center"/>
+                                                    <TextBlock Text="Start group" VerticalAlignment="Center"/>
+                                                </StackPanel>
+                                            </Button>
+                                            <Button Grid.Column="1" Margin="4,0,0,0" Padding="10,7"
+                                                    Style="{StaticResource ButtonDanger}"
+                                                    IsEnabled="{Binding HasRunning}"
+                                                    Command="{Binding DataContext.StopGroupCommand,
+                                                              Source={x:Reference PageRoot}}"
+                                                    CommandParameter="{Binding}">
+                                                <StackPanel Orientation="Horizontal"
+                                                            HorizontalAlignment="Center" VerticalAlignment="Center">
+                                                    <ctrl:Icon Data="{StaticResource Icon.Stop}" Size="16"
+                                                               Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                                                               Margin="0,0,6,0" VerticalAlignment="Center"/>
+                                                    <TextBlock VerticalAlignment="Center">
+                                                        <Run Text="Stop "/>
+                                                        <Run Text="{Binding RunningCount, Mode=OneWay}"/>
+                                                    </TextBlock>
+                                                </StackPanel>
+                                            </Button>
+                                        </Grid>
+
+                                        <!-- Row 1: secondary icon actions, right-aligned -->
+                                        <StackPanel Grid.Row="1" Orientation="Horizontal"
+                                                    HorizontalAlignment="Right" Margin="0,6,0,0">
+                                            <Button Style="{StaticResource RowActionButton}" Margin="0,0,4,0"
+                                                    ToolTip="Edit group"
+                                                    Command="{Binding DataContext.EditCommand,
+                                                              Source={x:Reference PageRoot}}"
+                                                    CommandParameter="{Binding}">
+                                                <ctrl:Icon Data="{StaticResource Icon.Edit}" Size="18"
+                                                           Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                                            </Button>
+                                            <Button Style="{StaticResource RowActionDanger}"
+                                                    ToolTip="Delete group"
+                                                    Command="{Binding DataContext.DeleteCommand,
+                                                              Source={x:Reference PageRoot}}"
+                                                    CommandParameter="{Binding}">
+                                                <ctrl:Icon Data="{StaticResource Icon.Trash}" Size="18"
+                                                           Stroke="{StaticResource ErrBrush}"/>
+                                            </Button>
+                                        </StackPanel>
                                     </Grid>
                                 </Grid>
                             </Border>
