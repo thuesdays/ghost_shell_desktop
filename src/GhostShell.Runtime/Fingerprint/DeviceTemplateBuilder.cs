@@ -346,8 +346,19 @@ public sealed class DeviceTemplateBuilder
         {
             ["width"]         = w,
             ["height"]        = h,
+            // audit SCREEN-01: emit avail_width / outer_* / pixel_depth too.
+            // Native (ghost_shell_config) already parses them; the builder
+            // omitting them left the C++ defaults (hard-coded 1920/1040/24)
+            // in place — incoherent against the spoofed width/height on any
+            // non-1920 template. avail_width == width (taskbars are
+            // horizontal); a maximised window's outer size == the available
+            // area; pixelDepth == colorDepth == 24, exactly as real Chrome.
+            ["avail_width"]   = w,
             ["avail_height"]  = availH,
+            ["outer_width"]   = w,
+            ["outer_height"]  = availH,
             ["color_depth"]   = 24,
+            ["pixel_depth"]   = 24,
             ["pixel_ratio"]   = dpr,
             ["screen_x"]      = screenX,
             ["screen_y"]      = screenY,
