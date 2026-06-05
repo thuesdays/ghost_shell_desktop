@@ -33,6 +33,8 @@ public sealed class BrowserLauncher : IBrowserLauncher
     private readonly IExtensionService? _extensions;
     private readonly ITrafficService? _traffic;
     private readonly ISettingsService? _settings;
+    private readonly IProxyReputationService? _reputation;
+    private readonly INotificationService? _notifications;
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<BrowserLauncher> _log;
 
@@ -50,7 +52,9 @@ public sealed class BrowserLauncher : IBrowserLauncher
         ILoggerFactory loggerFactory,
         IExtensionService? extensions = null,
         ITrafficService? traffic = null,
-        ISettingsService? settings = null)
+        ISettingsService? settings = null,
+        IProxyReputationService? reputation = null,
+        INotificationService? notifications = null)
     {
         _locator          = locator;
         _proxies          = proxies;
@@ -58,6 +62,8 @@ public sealed class BrowserLauncher : IBrowserLauncher
         _extensions       = extensions;
         _traffic          = traffic;
         _settings         = settings;
+        _reputation       = reputation;
+        _notifications    = notifications;
         _loggerFactory    = loggerFactory;
         _log              = loggerFactory.CreateLogger<BrowserLauncher>();
     }
@@ -115,6 +121,10 @@ public sealed class BrowserLauncher : IBrowserLauncher
                     "Profile '{Name}' references proxy '{Slug}' which is missing from DB " +
                     "— falling back to direct connection (local IP)",
                     profile.Name, profile.ProxySlug);
+            else if (proxy is not null)
+                // Feature #1: network-layer reputation gate. May throw under
+                // the "block" policy when the IP is Burned; warns otherwise.
+                await ApplyReputationGateAsync(proxy, profile.Name, ct);
         }
         else
         {
@@ -556,6 +566,88 @@ public sealed class BrowserLauncher : IBrowserLauncher
             {
                 throw new InvalidOperationException(
                     "Could not call CDP Network.setBlockedURLs", ex2);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Feature #1 — network-layer IP-reputation gate. Evaluates the
+    /// assigned proxy's reputation before launch and applies the configured
+    /// policy:
+    ///   • off    — log only.
+    ///   • warn   — (default) a Burned IP posts a warning notification; launch proceeds.
+    ///   • block  — a Burned IP throws, aborting the launch.
+    /// Fail-open: any scoring/settings error is swallowed (never block a
+    /// launch because the gate itself failed). No-op when the reputation
+    /// service isn't wired (older test rigs).
+    /// </summary>
+    private async Task ApplyReputationGateAsync(
+        Proxy proxy, string profileName, CancellationToken ct)
+    {
+        if (_reputation is null) return;
+
+        ProxyReputationReport report;
+        try
+        {
+            report = await _reputation.EvaluateAsync(proxy, ct);
+        }
+        catch (Exception ex)
+        {
+            _log.LogDebug(ex,
+                "Reputation gate: scoring threw for proxy '{Slug}' — failing open (launch allowed)",
+                proxy.Slug);
+            return;
+        }
+
+        _log.LogInformation(
+            "Proxy '{Slug}' reputation: {Band} (score {Score}, {IpType}) — {Reasons}",
+            proxy.Slug, report.Band, report.Score, report.IpType,
+            string.Join("; ", report.Reasons));
+
+        if (report.Band != ReputationBand.Burned)
+            return;
+
+        var policy = "warn";
+        if (_settings is not null)
+        {
+            try
+            {
+                var raw = await _settings.GetStringAsync(SettingsKeys.ProxyReputationGate, ct);
+                if (!string.IsNullOrWhiteSpace(raw)) policy = raw.Trim().ToLowerInvariant();
+            }
+            catch { /* fall back to warn */ }
+        }
+
+        if (policy == "off") return;
+
+        var msg =
+            $"Proxy '{proxy.Name ?? proxy.Slug}' is a Burned IP (score {report.Score}, {report.IpType}). " +
+            report.Recommendation;
+
+        if (policy == "block")
+        {
+            _log.LogError("Reputation gate BLOCKED launch of '{Profile}': {Msg}", profileName, msg);
+            throw new InvalidOperationException(
+                $"Launch blocked by IP-reputation gate: {msg} " +
+                "(set proxy.reputation_gate to 'warn' or 'off' to allow.)");
+        }
+
+        // warn (default)
+        _log.LogWarning("Reputation gate WARNING for '{Profile}': {Msg}", profileName, msg);
+        if (_notifications is not null)
+        {
+            try
+            {
+                await _notifications.AddAsync(
+                    severity: "warning",
+                    title:    $"Burned proxy IP for '{profileName}'",
+                    body:     msg,
+                    source:   "reputation-gate",
+                    ct:       ct);
+            }
+            catch (Exception ex)
+            {
+                _log.LogDebug(ex, "Reputation gate: could not post notification");
             }
         }
     }

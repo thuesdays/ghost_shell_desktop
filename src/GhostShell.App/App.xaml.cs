@@ -253,6 +253,24 @@ public partial class App : Application
                 // and surfaces per-scheme attempts in the diagnostic log.
                 s.AddSingleton<IProxyTester, HttpProxyTester>();
 
+                // ─── Feature #1: proxy IP-reputation gate ────────
+                // Heuristic scorer (datacenter/ASN/health → burned-ness)
+                // plus an optional external fraud-score provider. The
+                // provider activates only when an IPQualityScore key is
+                // configured (GHOSTSHELL_IPQS_KEY env or Settings); else a
+                // no-op provider keeps scoring fully heuristic.
+                s.AddSingleton<IIpReputationProvider>(sp =>
+                {
+                    var key = Environment.GetEnvironmentVariable("GHOSTSHELL_IPQS_KEY");
+                    if (string.IsNullOrWhiteSpace(key))
+                        return new NullIpReputationProvider();
+                    return new IpQualityScoreProvider(
+                        key,
+                        sp.GetRequiredService<ILoggerFactory>()
+                          .CreateLogger<IpQualityScoreProvider>());
+                });
+                s.AddSingleton<IProxyReputationService, ProxyReputationService>();
+
                 // ─── Phase 3: real browser pipeline ──────────────
                 // ChromiumLocator finds the patched build on disk;
                 // BrowserLauncher composes ChromeOptions + spawns

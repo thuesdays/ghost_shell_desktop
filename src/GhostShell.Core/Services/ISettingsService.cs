@@ -71,6 +71,16 @@ public static class SettingsKeys
     public const string OrganicDwellMinSec      = "behavior.organic_dwell_min_sec";
     public const string OrganicDwellMaxSec      = "behavior.organic_dwell_max_sec";
 
+    // ─── Feature #1 — proxy IP-reputation gate ───────────────────────
+    // Policy for what the launcher does when the assigned proxy scores as
+    // a "Burned" IP (datacenter / flagged ASN). Values: "off" | "warn"
+    // (default — notify, launch anyway) | "block" (abort the launch).
+    public const string ProxyReputationGate  = "proxy.reputation_gate";
+    // Optional IPQualityScore API key. When set (here or via the
+    // GHOSTSHELL_IPQS_KEY env var) the external fraud-score provider
+    // activates; otherwise scoring is heuristic-only.
+    public const string ProxyReputationIpqsKey = "proxy.reputation_ipqs_key";
+
     public const string AutoEnrichEnabled    = "browser.auto_enrich_from_host_chrome";
     public const string AutoEnrichMaxDays    = "browser.auto_enrich_max_days";
     public const string AutoEnrichMaxUrls    = "browser.auto_enrich_max_urls";
