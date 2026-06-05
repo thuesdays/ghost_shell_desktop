@@ -326,8 +326,14 @@ public sealed class ChromeImporter : IChromeImporter
                 try
                 {
                     var extractor = new CdpCookieExtractor(_log);
+                    // closeIfRunning + relaunchAfter: to read App-Bound cookies
+                    // while the browser is open we briefly + gracefully close it,
+                    // read its profile in-place, then relaunch it (session
+                    // restores). Graceful only — aborts rather than risk losing
+                    // unsaved work.
                     var outcome = await extractor.TryExtractAsync(
-                        src.BrandLabel, src.UserDataPath, src.ProfileFolder, ct);
+                        src.BrandLabel, src.UserDataPath, src.ProfileFolder, ct,
+                        closeIfRunning: true, relaunchAfter: true);
                     var cdp = outcome.Cookies;
                     if (cdp is { Count: > 0 })
                     {

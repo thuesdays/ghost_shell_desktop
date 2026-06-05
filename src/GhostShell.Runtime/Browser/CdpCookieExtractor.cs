@@ -40,7 +40,8 @@ public sealed class CdpCookieExtractor
 
     public async Task<CdpExtractOutcome> TryExtractAsync(
         string brandLabel, string userDataPath, string profileFolder,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        bool closeIfRunning = false, bool relaunchAfter = false)
     {
         if (!OperatingSystem.IsWindows())
             return new(null, "App-Bound recovery is Windows-only.");
@@ -49,10 +50,28 @@ public sealed class CdpCookieExtractor
         if (binary is null)
             return new(null, $"Couldn't locate the {brandLabel} executable to decrypt App-Bound cookies.");
 
+        // App-Bound cookies can only be decrypted by the browser on its own
+        // profile, and the profile singleton means we can't launch a second
+        // instance while it's running. To import "while running" we briefly
+        // and GRACEFULLY close it (it saves its session), read in-place, then
+        // relaunch so the user's tabs come back. We never force-kill — if a
+        // window won't close (e.g. an unsaved-form prompt) we abort cleanly so
+        // no work is lost.
+        var wasClosedByUs = false;
         if (IsBrowserRunning(binary))
-            return new(null,
-                $"{brandLabel} is running. App-Bound (v127+) cookies can only be decrypted by the browser " +
-                $"itself on its own profile — close all {brandLabel} windows and re-run the import.");
+        {
+            if (!closeIfRunning)
+                return new(null,
+                    $"{brandLabel} is running. App-Bound (v127+) cookies can only be decrypted by the browser " +
+                    $"itself on its own profile — close all {brandLabel} windows and re-run the import.");
+
+            _log.LogInformation("CDP cookie recovery: gracefully closing {Brand} to read its profile in-place", brandLabel);
+            if (!await GracefulCloseAsync(binary, ct))
+                return new(null,
+                    $"Couldn't close {brandLabel} cleanly (a window may have an unsaved-changes prompt). " +
+                    $"Close it manually and re-run the import — no data was touched.");
+            wasClosedByUs = true;
+        }
 
         var profileDir = Path.Combine(userDataPath, profileFolder);
         if (!Directory.Exists(profileDir))
@@ -114,7 +133,51 @@ public sealed class CdpCookieExtractor
             {
                 try { var f = Path.Combine(userDataPath, lck); if (File.Exists(f)) File.Delete(f); } catch { }
             }
+            // Relaunch the browser we closed so the user's session comes back.
+            if (wasClosedByUs && relaunchAfter)
+            {
+                try
+                {
+                    Process.Start(new ProcessStartInfo { FileName = binary, UseShellExecute = true })?.Dispose();
+                    _log.LogInformation("CDP cookie recovery: relaunched {Brand} after import", brandLabel);
+                }
+                catch (Exception ex) { _log.LogWarning(ex, "Could not relaunch {Brand} after import", brandLabel); }
+            }
         }
+    }
+
+    /// <summary>Gracefully close every process running from <paramref name="binary"/>:
+    /// post WM_CLOSE to each window (so the browser saves its session and shows
+    /// any unsaved-work prompts), then wait for all of them to exit. Never
+    /// force-kills — returns false if any are still alive after the timeout, so
+    /// the caller can abort without risking the user's data.</summary>
+    private async Task<bool> GracefulCloseAsync(string binary, CancellationToken ct)
+    {
+        var procName = Path.GetFileNameWithoutExtension(binary);
+        bool IsMine(Process p)
+        {
+            try { return string.Equals(p.MainModule?.FileName, binary, StringComparison.OrdinalIgnoreCase); }
+            catch { return false; }
+        }
+
+        foreach (var p in Process.GetProcessesByName(procName))
+        {
+            try { if (IsMine(p) && p.MainWindowHandle != IntPtr.Zero) p.CloseMainWindow(); }
+            catch { }
+            finally { p.Dispose(); }
+        }
+
+        var deadline = DateTime.UtcNow.AddSeconds(12);
+        while (DateTime.UtcNow < deadline)
+        {
+            ct.ThrowIfCancellationRequested();
+            var alive = Process.GetProcessesByName(procName);
+            var any = false;
+            foreach (var p in alive) { if (IsMine(p)) any = true; p.Dispose(); }
+            if (!any) return true;
+            await Task.Delay(400, ct);
+        }
+        return false;
     }
 
     /// <summary>True if a process running from exactly <paramref name="binary"/>
