@@ -65,6 +65,19 @@ internal sealed class DialogService : IDialogService
         });
     }
 
+    public Task<bool> ShowWalletSelectorEditorAsync()
+    {
+        return Application.Current.Dispatcher.Invoke(() =>
+        {
+            var settings = _sp.GetRequiredService<ISettingsService>();
+            var dlg = new WalletSelectorEditorDialog(settings)
+            {
+                Owner = Application.Current.MainWindow,
+            };
+            return Task.FromResult(dlg.ShowDialog() == true);
+        });
+    }
+
     public async Task<BulkStartOptions?> ShowBulkStartOptionsAsync(int profileCount)
     {
         var app = Application.Current;

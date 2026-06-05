@@ -32,7 +32,7 @@ internal sealed class ProxyHealthService : IProxyHealthService
              WHERE  at >= @cutoff
           ORDER BY  at ASC;
         """;
-        var rows = await _db.Get().QueryAsync<EventRow>(sql, new { cutoff });
+        var rows = await _db.QueueAsync(c => c.QueryAsync<EventRow>(sql, new { cutoff }), ct);
         return rows.Select(ToModel).ToList();
     }
 
@@ -46,7 +46,7 @@ internal sealed class ProxyHealthService : IProxyHealthService
              WHERE  proxy_slug = @slug AND at >= @cutoff
           ORDER BY  at ASC;
         """;
-        var rows = await _db.Get().QueryAsync<EventRow>(sql, new { slug = proxySlug, cutoff });
+        var rows = await _db.QueueAsync(c => c.QueryAsync<EventRow>(sql, new { slug = proxySlug, cutoff }), ct);
         return rows.Select(ToModel).ToList();
     }
 
@@ -56,13 +56,13 @@ internal sealed class ProxyHealthService : IProxyHealthService
             INSERT INTO proxy_health_events (proxy_slug, kind, at, detail)
             VALUES (@ProxySlug, @Kind, @At, @Detail);
         """;
-        await _db.Get().ExecuteAsync(sql, new
+        await _db.QueueAsync(c => c.ExecuteAsync(sql, new
         {
             ev.ProxySlug,
             Kind   = ev.Kind.ToString().ToLowerInvariant(),
             At     = ev.At == default ? DateTime.UtcNow : ev.At,
             ev.Detail,
-        });
+        }), ct);
         _log.LogDebug("Health event '{Kind}' recorded for '{Slug}'", ev.Kind, ev.ProxySlug);
     }
 
@@ -80,7 +80,7 @@ internal sealed class ProxyHealthService : IProxyHealthService
              WHERE  at >= @cutoff
           GROUP BY  proxy_slug;
         """;
-        var rows = await _db.Get().QueryAsync<CounterRow>(sql, new { cutoff });
+        var rows = await _db.QueueAsync(c => c.QueryAsync<CounterRow>(sql, new { cutoff }), ct);
         return rows.ToDictionary(
             r => r.ProxySlug,
             r => new ProxyHealthCounters(r.Rotations, r.Captchas, r.Burns, r.FirstSeen));

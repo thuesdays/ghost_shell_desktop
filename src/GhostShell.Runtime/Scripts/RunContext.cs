@@ -114,6 +114,11 @@ public sealed class RunContext
     /// </summary>
     public HashSet<string> SecretValues { get; } = new(StringComparer.Ordinal);
 
+    /// <summary>Phase 57 — operator wallet-selector overrides, loaded once per
+    /// run from settings. Null when none configured (wallet steps fall back to
+    /// the curated catalog).</summary>
+    public GhostShell.Core.Wallets.WalletOverrideSet? WalletOverrides { get; set; }
+
     /// <summary>
     /// Phase 71 — replace any occurrence of a cleartext secret value
     /// from <see cref="SecretValues"/> in <paramref name="raw"/> with

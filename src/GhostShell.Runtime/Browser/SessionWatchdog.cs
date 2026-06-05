@@ -45,11 +45,12 @@ namespace GhostShell.Runtime.Browser;
 public sealed class SessionWatchdog : IAsyncDisposable
 {
     /// <summary>How often the loop ticks. Tightened in Phase 29 from
-    /// 3s → 1s so the UI status updates within ~2s of the user
-    /// closing the Chromium window. The probe itself is a Selenium
-    /// title fetch and stays cheap (single-digit milliseconds), so a
-    /// 1s cadence is well within budget.</summary>
-    public static readonly TimeSpan TickInterval = TimeSpan.FromSeconds(1);
+    /// 3s → 1s so the UI status updates fast on external close.
+    /// Audit (perf H2): each tick is a per-session Selenium title
+    /// round-trip; at 1s it scales to N round-trips/second across a
+    /// farm, real load on weak boxes. 2.5s keeps the status flip well
+    /// under ~5s while cutting steady-state probe load ~60%.</summary>
+    public static readonly TimeSpan TickInterval = TimeSpan.FromMilliseconds(2500);
 
     /// <summary>How often heartbeat is written to DB. Kept at 30s —
     /// SQLite writes shouldn't tick every second even though the probe

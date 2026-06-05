@@ -375,6 +375,12 @@ public partial class App : Application
                 // captive-transient lifetime mismatch AddHttpClient<T> would
                 // create here. Call volume is low and to fixed CDN endpoints, so
                 // factory handler-rotation isn't needed.
+                // Phase 57 — crypto-farm read-only chain RPC (own HttpClient,
+                // not a captive transient — same pattern as the captcha solvers).
+                s.AddSingleton<GhostShell.Core.Services.IChainRpcClient>(sp =>
+                    new GhostShell.Runtime.Chains.JsonRpcChainClient(
+                        new System.Net.Http.HttpClient(),
+                        sp.GetRequiredService<ILoggerFactory>().CreateLogger<GhostShell.Runtime.Chains.JsonRpcChainClient>()));
                 s.AddSingleton(sp => new GhostShell.Runtime.Scripts.TwoCaptchaSolver(
                     new System.Net.Http.HttpClient(),
                     sp.GetRequiredService<GhostShell.Runtime.Scripts.TwoCaptchaConfig>(),
@@ -766,8 +772,12 @@ public partial class App : Application
                 {
                     try
                     {
+                        // Audit (arch 3.1): bail before touching Host.Services if
+                        // shutdown began, and forward ct so the 6h-idle HTTP check
+                        // cancels promptly instead of resolving from a disposed host.
+                        if (ct.IsCancellationRequested) break;
                         var svc = Host.Services.GetRequiredService<IUpdateService>();
-                        var info = await svc.CheckAsync();
+                        var info = await svc.CheckAsync(ct);
                         if (info is not null && svc.UpdateAvailable)
                         {
                             // Phase 69c — also persist as a bell-drawer

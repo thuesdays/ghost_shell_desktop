@@ -96,6 +96,10 @@ public static class ServiceCollectionExtensions
         // Microsoft.Extensions.Http (registered in App.xaml.cs).
         services.AddSingleton<IUpdateService, GitHubUpdateService>();
 
+        // Phase 57 — crypto-farm chain layer: tx history + nonce store.
+        services.AddSingleton<ITxHistoryService, TxHistoryService>();
+        services.AddSingleton<INonceTracker, NonceTracker>();
+
         return services;
     }
 }

@@ -61,6 +61,9 @@ internal sealed class ProfileService : IProfileService
         return rows.Select(ToModel).ToList();
     }
 
+    public Task<int> CountAsync(CancellationToken ct = default)
+        => _db.QueueAsync(c => c.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM profiles;"), ct);
+
     public async Task<Profile?> GetAsync(string name, CancellationToken ct = default)
     {
         var sql = $"SELECT {SelectColumns} FROM profiles WHERE name = @name;";

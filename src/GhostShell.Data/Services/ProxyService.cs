@@ -53,30 +53,36 @@ internal sealed class ProxyService : IProxyService
           ORDER BY  is_default DESC,
                     COALESCE(name, slug) COLLATE NOCASE;
         """;
-        var rows = await _db.Get().QueryAsync<ProxyRow>(sql);
+        var rows = await _db.QueueAsync(c => c.QueryAsync<ProxyRow>(sql), ct);
         return rows.Select(ToModel).ToList();
     }
+
+    public Task<int> CountAsync(CancellationToken ct = default)
+        => _db.QueueAsync(c => c.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM proxies;"), ct);
 
     public async Task<Proxy?> GetAsync(string slug, CancellationToken ct = default)
     {
         var sql = $"SELECT {SelectColumns}, 0 AS ProfileCount FROM proxies WHERE slug = @slug;";
-        var row = await _db.Get().QuerySingleOrDefaultAsync<ProxyRow>(sql, new { slug });
+        var row = await _db.QueueAsync(c => c.QuerySingleOrDefaultAsync<ProxyRow>(sql, new { slug }), ct);
         return row is null ? null : ToModel(row);
     }
 
     public async Task<Proxy?> GetByUrlAsync(string url, CancellationToken ct = default)
     {
         var sql = $"SELECT {SelectColumns}, 0 AS ProfileCount FROM proxies WHERE url = @url;";
-        var row = await _db.Get().QuerySingleOrDefaultAsync<ProxyRow>(sql, new { url });
+        var row = await _db.QueueAsync(c => c.QuerySingleOrDefaultAsync<ProxyRow>(sql, new { url }), ct);
         return row is null ? null : ToModel(row);
     }
 
     public async Task<Proxy> CreateAsync(Proxy proxy, CancellationToken ct = default)
     {
-        var conn = _db.Get();
-        using var tx = conn.BeginTransaction();
-        var inserted = await InsertOneAsync(conn, tx, proxy);
-        tx.Commit();
+        var inserted = await _db.QueueAsync(async conn =>
+        {
+            using var tx = conn.BeginTransaction();
+            var ins = await InsertOneAsync(conn, tx, proxy);
+            tx.Commit();
+            return ins;
+        }, ct);
 
         _log.LogInformation("Created proxy slug='{Slug}' name='{Name}' default={Def} rotating={Rot}",
             inserted.Slug, inserted.Name ?? "—", inserted.IsDefault, inserted.IsRotating);
@@ -86,32 +92,36 @@ internal sealed class ProxyService : IProxyService
     public async Task<BulkCreateResult> BulkCreateAsync(
         IReadOnlyList<Proxy> proxies, CancellationToken ct = default)
     {
-        var conn = _db.Get();
-        using var tx = conn.BeginTransaction();
-
-        // Pull all existing URLs once so we can dedupe in memory.
-        var existing = (await conn.QueryAsync<string>(
-            "SELECT url FROM proxies;", transaction: tx)).ToHashSet();
-
-        var created = new List<Proxy>();
-        var skipped = new List<string>();
-
-        foreach (var p in proxies)
+        // Whole multi-statement transaction runs inside one gate lease so a
+        // parallel DB caller can't interleave on the shared connection (DATA-03).
+        return await _db.QueueAsync(async conn =>
         {
-            if (existing.Contains(p.Url))
-            {
-                skipped.Add(p.Url);
-                continue;
-            }
-            var inserted = await InsertOneAsync(conn, tx, p);
-            existing.Add(inserted.Url);
-            created.Add(inserted);
-        }
-        tx.Commit();
+            using var tx = conn.BeginTransaction();
 
-        _log.LogInformation("Bulk import: {Created} created, {Skipped} skipped (duplicates).",
-            created.Count, skipped.Count);
-        return new BulkCreateResult(created, skipped);
+            // Pull all existing URLs once so we can dedupe in memory.
+            var existing = (await conn.QueryAsync<string>(
+                "SELECT url FROM proxies;", transaction: tx)).ToHashSet();
+
+            var created = new List<Proxy>();
+            var skipped = new List<string>();
+
+            foreach (var p in proxies)
+            {
+                if (existing.Contains(p.Url))
+                {
+                    skipped.Add(p.Url);
+                    continue;
+                }
+                var inserted = await InsertOneAsync(conn, tx, p);
+                existing.Add(inserted.Url);
+                created.Add(inserted);
+            }
+            tx.Commit();
+
+            _log.LogInformation("Bulk import: {Created} created, {Skipped} skipped (duplicates).",
+                created.Count, skipped.Count);
+            return new BulkCreateResult(created, skipped);
+        }, ct);
     }
 
     private static async Task<Proxy> InsertOneAsync(
@@ -157,39 +167,41 @@ internal sealed class ProxyService : IProxyService
     {
         var row = ToRow(proxy) with { UpdatedAt = DateTime.UtcNow };
 
-        var conn = _db.Get();
-        using var tx = conn.BeginTransaction();
-
-        if (row.IsDefault == 1)
+        await _db.QueueAsync(async conn =>
         {
-            await conn.ExecuteAsync(
-                "UPDATE proxies SET is_default = 0 WHERE is_default = 1 AND slug <> @slug;",
-                new { slug = row.Slug }, transaction: tx);
-        }
+            using var tx = conn.BeginTransaction();
 
-        const string sql = """
-            UPDATE proxies
-               SET name              = @Name,
-                   url               = @Url,
-                   is_rotating       = @IsRotating,
-                   rotation_api_url  = @RotationApiUrl,
-                   rotation_provider = @RotationProvider,
-                   rotation_api_key  = @RotationApiKey,
-                   is_default        = @IsDefault,
-                   notes             = @Notes,
-                   updated_at        = @UpdatedAt
-             WHERE slug              = @Slug;
-        """;
-        await conn.ExecuteAsync(sql, row, transaction: tx);
-        tx.Commit();
+            if (row.IsDefault == 1)
+            {
+                await conn.ExecuteAsync(
+                    "UPDATE proxies SET is_default = 0 WHERE is_default = 1 AND slug <> @slug;",
+                    new { slug = row.Slug }, transaction: tx);
+            }
+
+            const string sql = """
+                UPDATE proxies
+                   SET name              = @Name,
+                       url               = @Url,
+                       is_rotating       = @IsRotating,
+                       rotation_api_url  = @RotationApiUrl,
+                       rotation_provider = @RotationProvider,
+                       rotation_api_key  = @RotationApiKey,
+                       is_default        = @IsDefault,
+                       notes             = @Notes,
+                       updated_at        = @UpdatedAt
+                 WHERE slug              = @Slug;
+            """;
+            await conn.ExecuteAsync(sql, row, transaction: tx);
+            tx.Commit();
+        }, ct);
 
         _log.LogInformation("Updated proxy '{Slug}'", row.Slug);
     }
 
     public async Task DeleteAsync(string slug, CancellationToken ct = default)
     {
-        var rows = await _db.Get().ExecuteAsync(
-            "DELETE FROM proxies WHERE slug = @slug;", new { slug });
+        var rows = await _db.QueueAsync(c => c.ExecuteAsync(
+            "DELETE FROM proxies WHERE slug = @slug;", new { slug }), ct);
         _log.LogInformation("Deleted proxy '{Slug}' ({Rows} row(s) affected)", slug, rows);
     }
 
@@ -215,7 +227,7 @@ internal sealed class ProxyService : IProxyService
                    updated_at      = @At
              WHERE slug            = @Slug;
         """;
-        await _db.Get().ExecuteAsync(sql, new
+        await _db.QueueAsync(c => c.ExecuteAsync(sql, new
         {
             Slug        = slug,
             Ip          = result.Ip,
@@ -228,7 +240,7 @@ internal sealed class ProxyService : IProxyService
             LatencyMs   = result.LatencyMs,
             Health      = health,
             At          = result.At,
-        });
+        }), ct);
 
         _log.LogDebug("Test result recorded for '{Slug}': ok={Ok} latency={Latency}ms type={Type}",
             slug, result.Ok, result.LatencyMs, result.IpType);

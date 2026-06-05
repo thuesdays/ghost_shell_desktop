@@ -235,7 +235,9 @@
                     BorderThickness="0"
                     Background="Transparent"
                     Padding="0"
-                    ToolTip="{Binding Label}">
+                    ToolTip="{Binding Label}"
+                    AutomationProperties.AutomationId="{Binding PageKey, StringFormat='nav.{0}'}"
+                    AutomationProperties.Name="{Binding Label}">
                 <Button.Template>
                     <ControlTemplate TargetType="Button">
                         <Grid Margin="0,2" Height="42">

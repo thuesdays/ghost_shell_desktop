@@ -3,8 +3,11 @@
 
 using System.IO;
 using System.Text.Json;
+using GhostShell.Core.Chains;
 using GhostShell.Core.Models;
 using GhostShell.Core.Services;
+using GhostShell.Core.Wallets;
+using GhostShell.Runtime.Browser;
 using Microsoft.Extensions.Logging;
 
 namespace GhostShell.Runtime.Scripts;
@@ -36,8 +39,15 @@ public sealed class ScriptRunner : IScriptRunner
     // Optional so existing test wiring keeps compiling; production DI
     // wires the real implementation.
     private readonly ICaptchaRecoveryService? _captchaRecovery;
+    // Phase 57 — crypto-farm chain layer (read-only RPC + tx history). Optional
+    // so existing constructions/tests that don't need chains keep compiling.
+    private readonly IChainRpcClient? _chainRpc;
+    private readonly ITxHistoryService? _txHistory;
+    private readonly ISettingsService? _settings;
     private readonly ILogger<ScriptRunner> _log;
     private readonly ConditionEvaluator _conditions = new();
+    // Phase 56 — crypto-wallet popup automation (stateless; safe to share).
+    private readonly WalletPopupDriver _walletDriver = new();
 
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
@@ -52,7 +62,10 @@ public sealed class ScriptRunner : IScriptRunner
         ICompetitorService competitors,
         ILogger<ScriptRunner> log,
         ICaptchaSolver? captcha = null,
-        ICaptchaRecoveryService? captchaRecovery = null)
+        ICaptchaRecoveryService? captchaRecovery = null,
+        IChainRpcClient? chainRpc = null,
+        ITxHistoryService? txHistory = null,
+        ISettingsService? settings = null)
     {
         _scripts = scripts;
         _domainLists = domainLists;
@@ -60,6 +73,9 @@ public sealed class ScriptRunner : IScriptRunner
         _competitors = competitors;
         _captcha = captcha;
         _captchaRecovery = captchaRecovery;
+        _chainRpc = chainRpc;
+        _txHistory = txHistory;
+        _settings = settings;
         _log     = log;
     }
 
@@ -143,6 +159,16 @@ public sealed class ScriptRunner : IScriptRunner
                 if (!string.IsNullOrEmpty(kv.Value) && kv.Value.Length >= 3)
                     ctx.SecretValues.Add(kv.Value);
             }
+        }
+        // Phase 57 — load operator wallet-selector overrides once per run.
+        if (_settings is not null)
+        {
+            try
+            {
+                var ovJson = await _settings.GetStringAsync("wallet_selector_overrides", ct);
+                ctx.WalletOverrides = WalletCatalog.ParseOverrides(ovJson);
+            }
+            catch (Exception ex) { _log.LogDebug(ex, "wallet override load failed (using curated catalog)"); }
         }
         var counters = new RunCounters();
         string? lastError = null;
@@ -432,7 +458,12 @@ public sealed class ScriptRunner : IScriptRunner
                     log.Add(entry);
                     throw new ScriptAbortException("browser session closed mid-run");
                 }
-                _log.LogWarning(ex, "Script step #{I} ({Type}) failed", i, step.Type);
+                // Audit (logging): redact the exception text — a step's failure
+                // message can embed an interpolated secret (e.g. an http_request
+                // URL carrying {{vault.X}}). Pass the scrubbed string, not raw `ex`,
+                // so cleartext never reaches the persistent file sink.
+                _log.LogWarning("Script step #{I} ({Type}) failed: {Err}", i, step.Type,
+                    ctx.RedactSecrets(ex.ToString()));
                 if (step.AbortOnError)
                 {
                     entry["dur_ms"] = (int)(DateTime.UtcNow - t0).TotalMilliseconds;
@@ -2002,17 +2033,282 @@ public sealed class ScriptRunner : IScriptRunner
             }
 
             case "switch_tab":
+            case "switch_window":
             {
-                // Switch the focused tab by index. Selenium-style tab
-                // switching needs driver-level access through
-                // IBrowserSession; until that's wired up this is a
-                // no-op. We log at WARN (not DEBUG) so users can see
-                // their step ran but did nothing — silent debug-level
-                // logging led to "why isn't my script working?".
-                var idx = ParamInt(step, "index", 0);
-                _log.LogWarning(
-                    "switch_tab idx={Idx} requested but driver-level handler is not wired yet — step is a no-op",
-                    idx);
+                // Phase 56 — real window/tab switching (was a NO-OP). Two
+                // addressing modes:
+                //   • url_contains: switch to the first window whose URL
+                //     contains the (interpolated) substring — robust for
+                //     wallet popups / named tabs.
+                //   • index: switch to the Nth handle (0-based) as
+                //     reported by the driver.
+                var handles = await s.GetWindowHandlesAsync(ct);
+                if (handles.Count == 0) break;
+
+                var urlNeedle = InterpolateVars(ParamString(step, "url_contains") ?? "", ctx);
+                if (!string.IsNullOrEmpty(urlNeedle))
+                {
+                    var origin = await s.GetCurrentWindowHandleAsync(ct);
+                    string? match = null;
+                    foreach (var h in handles)
+                    {
+                        try
+                        {
+                            await s.SwitchToWindowAsync(h, ct);
+                            var url = (await s.ExecuteScriptAsync("return location.href;", null, ct))?.ToString() ?? "";
+                            if (url.Contains(urlNeedle, StringComparison.OrdinalIgnoreCase)) { match = h; break; }
+                        }
+                        catch (Exception ex) { _log.LogTrace(ex, "switch_window: probe failed"); }
+                    }
+                    if (match is null)
+                    {
+                        // restore + report — a missing target tab is a real
+                        // failure the user wants to see (counts toward retry).
+                        if (!string.IsNullOrEmpty(origin))
+                            try { await s.SwitchToWindowAsync(origin, ct); } catch { /* best effort */ }
+                        throw new InvalidOperationException(
+                            $"switch_window: no open tab url contains '{urlNeedle}'");
+                    }
+                    _log.LogInformation("switch_window → tab matching '{Needle}'", urlNeedle);
+                    break;
+                }
+
+                var idx = Math.Clamp(ParamInt(step, "index", 0), 0, handles.Count - 1);
+                await s.SwitchToWindowAsync(handles[idx], ct);
+                _log.LogInformation("switch_tab → index {Idx} of {N}", idx, handles.Count);
+                break;
+            }
+
+            // ── Phase 56 — crypto-wallet popup automation ───────────────
+            //
+            // Drive a browser-extension wallet (MetaMask, OKX, Phantom,
+            // Rabby, Backpack) through its unlock / connect / confirm /
+            // approve flow. The heavy lifting (window discovery, trusted
+            // input, focus restore) lives in WalletPopupDriver; selectors
+            // are config-driven in CuratedWalletCatalog so a wallet UI
+            // change is a data edit, not a recompile.
+            //
+            // The unlock password defaults to {{vault.PASS}} — the
+            // profile-bound crypto_wallet.wallet_password — resolved via
+            // the same vault-aware interpolation as every other step, so
+            // the cleartext is already in ctx.SecretValues and redacted
+            // from logs. An explicit `password` param overrides it.
+            case "wallet_unlock":
+            case "wallet_connect":
+            case "wallet_confirm":
+            case "wallet_approve":
+            case "wallet_flow":
+            {
+                var walletId = InterpolateVars(ParamString(step, "wallet") ?? "metamask", ctx).Trim();
+                // Phase 57 — resolve through operator overrides (curated catalog
+                // as the base) so a field-edited selector takes effect.
+                var wallet = WalletCatalog.Resolve(walletId, ctx.WalletOverrides)
+                    ?? throw new ArgumentException(
+                        $"unknown wallet '{walletId}' — known: metamask, okx, phantom, rabby, backpack");
+
+                var flowName = type switch
+                {
+                    "wallet_unlock"  => WalletFlow.Unlock,
+                    "wallet_connect" => WalletFlow.Connect,
+                    "wallet_confirm" => WalletFlow.Confirm,
+                    "wallet_approve" => WalletFlow.Approve,
+                    _                => InterpolateVars(ParamString(step, "flow") ?? WalletFlow.Confirm, ctx).Trim(),
+                };
+
+                // Optional explicit password override (else the flow's
+                // {{vault.PASS}} placeholder resolves from the vault).
+                var pwOverrideRaw = ParamString(step, "password");
+                if (!string.IsNullOrEmpty(pwOverrideRaw))
+                {
+                    // Always redact an explicit wallet password (drop the ≥3
+                    // heuristic used for generic vault values — a wallet password
+                    // is high-value and must never reach a log line).
+                    var resolved = InterpolateVars(pwOverrideRaw, ctx);
+                    if (!string.IsNullOrEmpty(resolved)) ctx.SecretValues.Add(resolved);
+                }
+
+                string Resolve(string raw)
+                {
+                    if (raw == CuratedWalletCatalog.PasswordPlaceholder &&
+                        !string.IsNullOrEmpty(pwOverrideRaw))
+                        return InterpolateVars(pwOverrideRaw, ctx);
+                    return InterpolateVars(raw, ctx);
+                }
+
+                _log.LogInformation("wallet step: {Wallet} '{Flow}'", wallet.Name, flowName);
+                await _walletDriver.RunFlowAsync(s, wallet, flowName, Resolve, _log, ct);
+                break;
+            }
+
+            // ── Phase 57 — chain reads / pre-flight / tx tracking ────────
+            //
+            // Read-only RPC (balance/gas/tx status) + transaction history.
+            // Signing stays in the wallet popup; these steps gate a run
+            // (assert_balance / assert_gas_below), expose values to branch on
+            // (read_balance / read_gas → vars), and track transactions the
+            // script captured after a popup confirm (record_tx / wait_tx).
+
+            case "read_balance":
+            case "assert_balance":
+            {
+                var chain = ResolveChain(step, ctx);
+                var address = InterpolateVars(ParamString(step, "address") ?? "{{vault.ADDR}}", ctx).Trim();
+                if (string.IsNullOrEmpty(address) || address.Contains("{{"))
+                    throw new InvalidOperationException(
+                        $"{type}: no address — bind a crypto_wallet (vault ADDR) to this profile or pass 'address'");
+                var rpc = _chainRpc ?? throw new InvalidOperationException($"{type}: chain RPC not available");
+
+                System.Numerics.BigInteger raw;
+                try
+                {
+                    raw = await rpc.GetNativeBalanceAsync(chain, address, ct);
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex)
+                {
+                    // C1: a transient RPC blip must NOT crash the whole farm run.
+                    // read_* degrades to "unknown"; assert_* fails closed (we
+                    // can't verify funds, so don't let the script proceed to spend).
+                    _log.LogWarning(ex, "{Type}: RPC read failed for {Addr} on {Chain}", type, MaskAddr(address), chain.Id);
+                    if (type == "assert_balance")
+                        throw new InvalidOperationException(
+                            $"assert_balance: could not read balance for {MaskAddr(address)} on {chain.Id} (RPC error) — failing closed");
+                    var sv = ParamString(step, "save_as");
+                    if (!string.IsNullOrEmpty(sv)) ctx.Vars[sv] = "unknown";
+                    break;
+                }
+
+                var human = ChainUnits.FormatBalance(raw, chain.Decimals);
+                var saveAs = ParamString(step, "save_as");
+                if (!string.IsNullOrEmpty(saveAs)) ctx.Vars[saveAs] = human;
+                _log.LogInformation("{Type}: {Addr} = {Bal} {Sym} on {Chain}",
+                    type, MaskAddr(address), human, chain.NativeSymbol, chain.Id);
+
+                if (type == "assert_balance")
+                {
+                    var minStr = InterpolateVars(ParamString(step, "min") ?? "0", ctx);
+                    var minBase = ChainUnits.TokensToBaseUnits(minStr, chain.Decimals);
+                    if (raw < minBase)
+                        throw new InvalidOperationException(
+                            $"assert_balance failed: {MaskAddr(address)} has {human} {chain.NativeSymbol}, " +
+                            $"need ≥ {minStr} on {chain.Id}");
+                }
+                break;
+            }
+
+            case "read_gas":
+            case "assert_gas_below":
+            {
+                var chain = ResolveChain(step, ctx);
+                var rpc = _chainRpc ?? throw new InvalidOperationException($"{type}: chain RPC not available");
+
+                // M7: validate the gas ceiling BEFORE the RPC so a typo'd
+                // max_gwei fails loudly instead of the assert silently no-op'ing.
+                decimal maxGwei = 0;
+                if (type == "assert_gas_below")
+                {
+                    var maxStr = InterpolateVars(ParamString(step, "max_gwei") ?? "", ctx);
+                    if (!decimal.TryParse(maxStr, System.Globalization.NumberStyles.Float,
+                            System.Globalization.CultureInfo.InvariantCulture, out maxGwei) || maxGwei <= 0)
+                        throw new ArgumentException("assert_gas_below: invalid/missing 'max_gwei' (expected a positive number)");
+                }
+
+                decimal gwei;
+                try
+                {
+                    var wei = await rpc.GetGasPriceWeiAsync(chain, ct);
+                    gwei = ChainUnits.WeiToGwei(wei);
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex)
+                {
+                    // C1: graceful — read_gas degrades to "unknown"; assert fails closed.
+                    _log.LogWarning(ex, "{Type}: gas read failed on {Chain}", type, chain.Id);
+                    if (type == "assert_gas_below")
+                        throw new InvalidOperationException($"assert_gas_below: could not read gas on {chain.Id} (RPC error) — failing closed");
+                    var sv = ParamString(step, "save_as");
+                    if (!string.IsNullOrEmpty(sv)) ctx.Vars[sv] = "unknown";
+                    break;
+                }
+
+                var saveAs = ParamString(step, "save_as");
+                if (!string.IsNullOrEmpty(saveAs))
+                    ctx.Vars[saveAs] = gwei.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+                _log.LogInformation("{Type}: gas {Gwei} gwei on {Chain}", type, gwei, chain.Id);
+
+                if (type == "assert_gas_below" && gwei > maxGwei)
+                    throw new InvalidOperationException(
+                        $"assert_gas_below failed: gas {gwei:0.###} gwei > {maxGwei} gwei on {chain.Id}");
+                break;
+            }
+
+            case "record_tx":
+            {
+                var chain = ResolveChain(step, ctx);
+                var hash = InterpolateVars(ParamString(step, "hash") ?? "", ctx).Trim();
+                if (!IsPlausibleTxHash(chain, hash))
+                    throw new ArgumentException($"record_tx: '{hash}' is not a plausible {chain.Id} tx hash");
+                var hist = _txHistory ?? throw new InvalidOperationException("record_tx: tx history not available");
+                try
+                {
+                    await hist.RecordAsync(new TxHistoryEntry
+                    {
+                        ProfileName = profileName,
+                        ChainId     = chain.Id,
+                        Address     = InterpolateVars(ParamString(step, "address") ?? "{{vault.ADDR}}", ctx) is { } a && !a.Contains("{{") ? a.Trim() : null,
+                        TxHash      = hash,
+                        Kind        = ParamString(step, "kind") ?? "tx",
+                        State       = "pending",
+                        ValueText   = InterpolateVars(ParamString(step, "value") ?? "", ctx) is { Length: > 0 } v ? v : null,
+                        Note        = InterpolateVars(ParamString(step, "note") ?? "", ctx) is { Length: > 0 } n ? n : null,
+                    }, ct);
+                    _log.LogInformation("record_tx: {Chain} {Hash}", chain.Id, hash);
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex)
+                {
+                    // C1: a history-write failure must not kill the run.
+                    _log.LogWarning(ex, "record_tx: persist failed for {Chain} {Hash}", chain.Id, hash);
+                }
+                break;
+            }
+
+            case "wait_tx":
+            {
+                var chain = ResolveChain(step, ctx);
+                var hash = InterpolateVars(ParamString(step, "hash") ?? "", ctx).Trim();
+                if (!IsPlausibleTxHash(chain, hash))
+                    throw new ArgumentException($"wait_tx: '{hash}' is not a plausible {chain.Id} tx hash");
+                var rpc = _chainRpc ?? throw new InvalidOperationException("wait_tx: chain RPC not available");
+                var timeoutMs = Math.Max(1000, ParamInt(step, "timeout_sec", 120) * 1000);
+                var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+                var state = TxState.Unknown;
+                while (true)
+                {
+                    state = await rpc.GetTransactionStateAsync(chain, hash, ct);
+                    if (state is TxState.Success or TxState.Failed) break;
+                    // Audit M1: only sleep if a full poll interval still fits before
+                    // the deadline — otherwise a tx that confirms in the last 3s
+                    // would be missed and falsely reported as a timeout.
+                    var remaining = deadline - DateTime.UtcNow;
+                    if (remaining <= TimeSpan.FromSeconds(3)) break;
+                    await Task.Delay(3000, ct);
+                }
+                if (_txHistory is not null)
+                    try { await _txHistory.UpdateStateByHashAsync(chain.Id, hash, state, ct); }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    { _log.LogDebug(ex, "wait_tx: history update failed"); }
+                var saveAs = ParamString(step, "save_as");
+                if (!string.IsNullOrEmpty(saveAs)) ctx.Vars[saveAs] = ChainStateText(state);
+                _log.LogInformation("wait_tx: {Chain} {Hash} → {State}", chain.Id, hash, state);
+
+                if (state == TxState.Failed && ParamBool(step, "fail_on_revert", true))
+                    throw new InvalidOperationException($"wait_tx: transaction {hash} reverted on {chain.Id}");
+                // M9: a timeout/unknown is NOT a confirmation — don't let
+                // downstream steps assume success. Fail unless opted out.
+                if (state is not TxState.Success && ParamBool(step, "fail_on_timeout", true))
+                    throw new InvalidOperationException(
+                        $"wait_tx: transaction {hash} not confirmed within {timeoutMs / 1000}s on {chain.Id} (state={ChainStateText(state)})");
                 break;
             }
 
@@ -2134,8 +2430,11 @@ public sealed class ScriptRunner : IScriptRunner
                 var saveAs = ParamString(step, "save_as");
                 if (!string.IsNullOrEmpty(saveAs))
                     ctx.Vars[saveAs] = respText;
+                // Audit (logging): log scheme://host/path only — the query string
+                // / userinfo may carry an interpolated secret. (The JSON run-log
+                // gets the full redaction pass; this live line must not leak.)
                 _log.LogInformation("http_request {M} {U} → {S} ({N} bytes)",
-                    method, u, (int)rsp.StatusCode, raw.Length);
+                    method, $"{u.Scheme}://{u.Host}{u.AbsolutePath}", (int)rsp.StatusCode, raw.Length);
                 break;
             }
 
@@ -2667,6 +2966,20 @@ public sealed class ScriptRunner : IScriptRunner
                 break;
             case "captcha_solve":
                 sb.Append("kind=").Append(ParamString(step, "kind") ?? "auto");
+                break;
+            case "wallet_unlock":
+            case "wallet_connect":
+            case "wallet_confirm":
+            case "wallet_approve":
+            case "wallet_flow":
+                sb.Append("wallet=").Append(ParamString(step, "wallet") ?? "metamask");
+                if (t == "wallet_flow")
+                    sb.Append(" flow=").Append(ParamString(step, "flow") ?? "confirm");
+                break;
+            case "switch_tab":
+            case "switch_window":
+                var urlc = ParamString(step, "url_contains");
+                sb.Append(string.IsNullOrEmpty(urlc) ? $"index={ParamInt(step, "index", 0)}" : $"url_contains='{Trim(urlc, 40)}'");
                 break;
             case "break":
             case "continue":
@@ -3243,8 +3556,57 @@ public sealed class ScriptRunner : IScriptRunner
                 var alias = m.Groups[1].Value;
                 seen.Add(alias);   // forward unknown aliases too
             }
+            // Phase 56 — wallet steps reference {{vault.PASS}} via the catalog
+            // (C# code), NOT the script JSON, so the regex above can't see it.
+            // Force-resolve the wallet aliases whenever a wallet step is present
+            // so the unlock password actually materialises (else the literal
+            // placeholder would be typed as the password → wallet lockout).
+            if (json.Contains("wallet_unlock", StringComparison.OrdinalIgnoreCase) ||
+                json.Contains("wallet_connect", StringComparison.OrdinalIgnoreCase) ||
+                json.Contains("wallet_confirm", StringComparison.OrdinalIgnoreCase) ||
+                json.Contains("wallet_approve", StringComparison.OrdinalIgnoreCase) ||
+                json.Contains("wallet_flow", StringComparison.OrdinalIgnoreCase))
+            {
+                seen.Add("PASS");   // crypto_wallet.wallet_password
+                seen.Add("ADDR");   // crypto_wallet.address (for future tx steps)
+            }
         }
         return seen.ToList();
+    }
+
+    // ─── Phase 57 — chain step helpers ────────────────────────────────
+    /// <summary>Resolve the "chain" param (default ethereum) to a descriptor.</summary>
+    private static ChainDescriptor ResolveChain(ScriptStep step, RunContext ctx)
+    {
+        var id = InterpolateVars(ParamString(step, "chain") ?? CuratedChainCatalog.DefaultChainId, ctx).Trim();
+        return CuratedChainCatalog.TryGet(id)
+            ?? throw new ArgumentException(
+                $"unknown chain '{id}' — known: ethereum, bsc, polygon, arbitrum, base, optimism, solana");
+    }
+
+    private static string MaskAddr(string a)
+        => string.IsNullOrEmpty(a) ? "" : a.Length <= 12 ? a : $"{a[..6]}…{a[^4..]}";
+
+    private static string ChainStateText(TxState s) => s switch
+    {
+        TxState.Pending => "pending",
+        TxState.Success => "success",
+        TxState.Failed  => "failed",
+        _               => "unknown",
+    };
+
+    /// <summary>Cheap shape check so a bad page-scrape (a CSS class, an error
+    /// string) isn't recorded/polled as a tx hash. EVM = 0x + 64 hex; Solana =
+    /// base58, ~43–88 chars.</summary>
+    private static bool IsPlausibleTxHash(ChainDescriptor chain, string hash)
+    {
+        if (string.IsNullOrWhiteSpace(hash)) return false;
+        if (chain.Family == ChainFamily.Evm)
+            return hash.Length == 66 && hash.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
+                   && hash[2..].All(Uri.IsHexDigit);
+        // Solana base58 signature
+        const string b58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+        return hash.Length is >= 32 and <= 90 && hash.All(c => b58.IndexOf(c) >= 0);
     }
 
     private static string? ParamString(ScriptStep step, string key)

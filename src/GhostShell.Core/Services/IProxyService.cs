@@ -8,6 +8,8 @@ namespace GhostShell.Core.Services;
 public interface IProxyService
 {
     Task<IReadOnlyList<Proxy>> ListAsync(CancellationToken ct = default);
+    /// <summary>Cheap row count (SELECT COUNT(*)) for dashboards.</summary>
+    Task<int> CountAsync(CancellationToken ct = default);
     Task<Proxy?> GetAsync(string slug, CancellationToken ct = default);
     Task<Proxy?> GetByUrlAsync(string url, CancellationToken ct = default);
     Task<Proxy>  CreateAsync(Proxy proxy, CancellationToken ct = default);

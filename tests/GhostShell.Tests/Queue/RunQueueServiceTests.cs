@@ -195,6 +195,7 @@ public sealed class RunQueueServiceTests
     {
         public Task<IReadOnlyList<Profile>> ListAsync(CancellationToken ct = default)
             => Task.FromResult<IReadOnlyList<Profile>>(Array.Empty<Profile>());
+        public Task<int> CountAsync(CancellationToken ct = default) => Task.FromResult(0);
         public Task<Profile?> GetAsync(string name, CancellationToken ct = default)
             => Task.FromResult<Profile?>(null);
         public Task<Profile> CreateAsync(Profile p, CancellationToken ct = default)

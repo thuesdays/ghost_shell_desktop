@@ -6,8 +6,11 @@ using System.Windows;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using GhostShell.App.Dialogs;
+using System.Numerics;
+using GhostShell.Core.Chains;
 using GhostShell.Core.Models;
 using GhostShell.Core.Services;
+using GhostShell.Core.Wallets;
 using Microsoft.Extensions.Logging;
 
 namespace GhostShell.App.ViewModels;
@@ -29,6 +32,9 @@ public sealed partial class GroupsViewModel : BaseViewModel
     private readonly IProfileService      _profiles;
     private readonly IProfileRunner       _runner;
     private readonly IDialogService       _dialogs;
+    private readonly IVaultService        _vault;
+    private readonly IScriptService       _scripts;
+    private readonly IChainRpcClient      _rpc;
     private readonly ILogger<GroupsViewModel> _log;
 
     public GroupsViewModel(
@@ -36,13 +42,22 @@ public sealed partial class GroupsViewModel : BaseViewModel
         IProfileService profiles,
         IProfileRunner runner,
         IDialogService dialogs,
+        IVaultService vault,
+        IScriptService scripts,
+        IChainRpcClient rpc,
         ILogger<GroupsViewModel> log)
     {
         _groups   = groups;
         _profiles = profiles;
         _runner   = runner;
         _dialogs  = dialogs;
+        _vault    = vault;
+        _scripts  = scripts;
+        _rpc      = rpc;
         _log      = log;
+
+        foreach (var c in CuratedChainCatalog.Entries) AvailableChains.Add(c);
+        SelectedChain = AvailableChains.FirstOrDefault(c => c.Id == CuratedChainCatalog.DefaultChainId);
 
         _runner.ActiveChanged += (_, _) =>
             Application.Current?.Dispatcher.BeginInvoke(SyncRunningCounts);
@@ -56,7 +71,44 @@ public sealed partial class GroupsViewModel : BaseViewModel
     /// <summary>Full snapshot — search filters into <see cref="Items"/>.</summary>
     private readonly List<GroupRowVm> _all = new();
 
-    public override async Task OnNavigatedToAsync() => await ReloadAsync();
+    // ─── Phase 56 — crypto-farm panel ─────────────────────────────────
+    /// <summary>The group whose farm panel is shown (list selection).</summary>
+    [ObservableProperty] private GroupRowVm? _selectedGroup;
+    /// <summary>Per-member wallet readiness for the selected farm.</summary>
+    public ObservableCollection<FarmMemberRowVm> FarmMembers { get; } = new();
+    /// <summary>Scripts the operator can push across the farm.</summary>
+    public ObservableCollection<Script> AvailableScripts { get; } = new();
+    [ObservableProperty] private Script? _selectedFarmScript;
+    [ObservableProperty] private string _farmSummary = "";
+    [ObservableProperty] private bool _hasSelectedGroup;
+    [ObservableProperty] private bool _vaultLocked;
+    [ObservableProperty] private bool _isFarmBusy;
+    /// <summary>Monotonic token — a newer farm load invalidates older in-flight
+    /// ones so fire-and-forget selections can't interleave into FarmMembers.</summary>
+    private int _farmLoadGen;
+
+    /// <summary>Chains the operator can check balances on.</summary>
+    public ObservableCollection<ChainDescriptor> AvailableChains { get; } = new();
+    [ObservableProperty] private ChainDescriptor? _selectedChain;
+    /// <summary>Cancels an in-flight balance sweep when the panel closes or a new sweep starts.</summary>
+    private CancellationTokenSource? _balanceCts;
+
+    public override async Task OnNavigatedToAsync()
+    {
+        await ReloadAsync();
+        await LoadScriptsAsync();
+    }
+
+    private async Task LoadScriptsAsync()
+    {
+        try
+        {
+            var scripts = await _scripts.ListAsync();
+            AvailableScripts.Clear();
+            foreach (var sc in scripts) AvailableScripts.Add(sc);
+        }
+        catch (Exception ex) { _log.LogError(ex, "Farm: load scripts failed"); }
+    }
 
     [RelayCommand]
     private async Task ReloadAsync()
@@ -69,6 +121,11 @@ public sealed partial class GroupsViewModel : BaseViewModel
                 _all.Add(new GroupRowVm(g));
             ApplyFilter();
             SyncRunningCounts();
+            // ReloadAsync builds brand-new GroupRowVm instances, so a farm panel
+            // open against an OLD row would point at an orphan. Re-resolve the
+            // selection to the fresh row with the same id (or close the panel).
+            if (SelectedGroup is { } sel)
+                SelectedGroup = _all.FirstOrDefault(r => r.Group.Id == sel.Group.Id);
             _log.LogInformation("Groups loaded: {Count}", _all.Count);
         }
         catch (Exception ex)
@@ -233,6 +290,287 @@ public sealed partial class GroupsViewModel : BaseViewModel
             }
         });
     }
+
+    // ─── Phase 56 — crypto-farm panel ─────────────────────────────────
+
+    partial void OnSelectedGroupChanged(GroupRowVm? value)
+        => _ = LoadFarmAsync(value);
+
+    [RelayCommand]
+    private void OpenFarm(GroupRowVm? group) => SelectedGroup = group;
+
+    [RelayCommand]
+    private void CloseFarm()
+    {
+        _balanceCts?.Cancel();
+        _balanceCts?.Dispose();
+        _balanceCts = null;
+        SelectedGroup = null;
+    }
+
+    [RelayCommand]
+    private async Task EditWalletSelectorsAsync() => await _dialogs.ShowWalletSelectorEditorAsync();
+
+    /// <summary>Compute per-member wallet readiness for the selected farm by
+    /// cross-referencing its members against the vault's crypto_wallet items.
+    /// Addresses are non-secret (shown masked); passwords are checked for
+    /// PRESENCE only and never surfaced.</summary>
+    private async Task LoadFarmAsync(GroupRowVm? group)
+    {
+        // Invalidate any in-flight load (fire-and-forget selections must not
+        // interleave). This runs on the UI thread before the first await.
+        var gen = ++_farmLoadGen;
+        HasSelectedGroup = group is not null;
+        if (group is null) { FarmMembers.Clear(); FarmSummary = ""; return; }
+
+        IsFarmBusy = true;
+        try
+        {
+            var detailed = await _groups.GetAsync(group.Group.Id);
+            var members = detailed?.Members?.ToList() ?? new List<string>();
+
+            await _vault.RefreshStateAsync();
+            var locked = !_vault.IsUnlocked;
+
+            // Heavy work — DB list + one decrypt PER member — off the UI thread
+            // so a 50-member farm doesn't stutter the panel. Build into a plain
+            // list; only touch ObservableCollection after we marshal back.
+            var statuses = await Task.Run(async () =>
+            {
+                var byProfile = new Dictionary<string, VaultItem>(StringComparer.OrdinalIgnoreCase);
+                try
+                {
+                    foreach (var w in await _vault.ListAsync(kind: "crypto_wallet"))
+                        if (!string.IsNullOrEmpty(w.ProfileName))
+                            byProfile[w.ProfileName!] = w;
+                }
+                catch (Exception ex) { _log.LogError(ex, "Farm: list wallets failed"); }
+
+                var list = new List<FarmMemberStatus>();
+                foreach (var name in members)
+                {
+                    var hasWallet = byProfile.TryGetValue(name, out var item);
+                    bool hasPassword = false;
+                    string? address = null;
+
+                    if (hasWallet && !locked)
+                    {
+                        try
+                        {
+                            var got = await _vault.GetClearAsync(item!.Id);
+                            if (got is { } g)
+                            {
+                                g.clear.TryGetValue("address", out address);
+                                hasPassword = g.clear.TryGetValue("wallet_password", out var pw)
+                                              && !string.IsNullOrWhiteSpace(pw);
+                            }
+                        }
+                        catch (Exception ex) { _log.LogDebug(ex, "Farm: read wallet for {Name} failed", name); }
+                    }
+
+                    var st = FarmReadiness.Evaluate(name, hasWallet, hasPassword, address);
+                    if (hasWallet && locked)
+                        st = st with { Reason = "vault locked — unlock to verify" };
+                    list.Add(st);
+                }
+                return list;
+            });
+
+            // A newer selection started while we awaited → drop these results
+            // (the newer load owns FarmMembers / IsFarmBusy now).
+            if (gen != _farmLoadGen) return;
+
+            VaultLocked = locked;
+            FarmMembers.Clear();
+            foreach (var st in statuses) FarmMembers.Add(new FarmMemberRowVm(st));
+
+            // When locked, readiness is genuinely unknown — don't mislabel every
+            // member as "no password". Show an explicit locked summary instead.
+            FarmSummary = locked
+                ? $"🔒 vault locked — unlock to verify {statuses.Count} member(s)"
+                : FarmReadiness.Summarize(statuses).Label;
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "Farm: load failed for group {Id}", group.Group.Id);
+            if (gen == _farmLoadGen) { FarmMembers.Clear(); FarmSummary = "⚠ failed to load farm — see logs"; }
+        }
+        finally { if (gen == _farmLoadGen) IsFarmBusy = false; }
+    }
+
+    /// <summary>Gate for the farm Run/Refresh commands — disabled while a load
+    /// or mass-run is in flight (also notified from <see cref="OnIsFarmBusyChanged"/>).</summary>
+    private bool CanFarmAct() => !IsFarmBusy;
+
+    partial void OnIsFarmBusyChanged(bool value)
+    {
+        RunWalletTaskCommand.NotifyCanExecuteChanged();
+        RefreshFarmCommand.NotifyCanExecuteChanged();
+        FetchBalancesCommand.NotifyCanExecuteChanged();
+    }
+
+    [RelayCommand(CanExecute = nameof(CanFarmAct))]
+    private async Task RefreshFarmAsync()
+    {
+        if (IsFarmBusy) return;
+        await LoadFarmAsync(SelectedGroup);
+    }
+
+    /// <summary>Fetch the native-coin balance of every member that has an
+    /// address, on the selected chain, via read-only RPC (off the UI thread).</summary>
+    [RelayCommand(CanExecute = nameof(CanFarmAct))]
+    private async Task FetchBalancesAsync()
+    {
+        if (IsFarmBusy) return;
+        var chain = SelectedChain;
+        if (chain is null) return;
+
+        // Snapshot the rows + addresses on the UI thread.
+        var targets = FarmMembers.Where(m => !string.IsNullOrEmpty(m.AddressFull)).ToList();
+        if (targets.Count == 0) return;
+
+        // Cancellable: a dead RPC otherwise pins the panel. Dispose the prior
+        // CTS before replacing (audit M3 — don't leak one per sweep).
+        _balanceCts?.Cancel();
+        _balanceCts?.Dispose();
+        _balanceCts = new CancellationTokenSource();
+        var token = _balanceCts.Token;
+
+        IsFarmBusy = true;
+        try
+        {
+            foreach (var m in FarmMembers) m.Balance = "…";
+
+            // Audit (perf C1): fan out with bounded concurrency instead of a
+            // serial members×15s wall. Continuations resume on the UI context
+            // (entered on the UI thread), so writing m.Balance stays thread-safe.
+            using var gate = new SemaphoreSlim(8);
+            var tasks = targets.Select(async m =>
+            {
+                try { await gate.WaitAsync(token); }
+                catch (OperationCanceledException) { return; }
+                try
+                {
+                    var raw = await _rpc.GetNativeBalanceAsync(chain, m.AddressFull, token);
+                    m.Balance = $"{ChainUnits.FormatBalance(raw, chain.Decimals)} {chain.NativeSymbol}";
+                }
+                catch (OperationCanceledException) { /* sweep cancelled */ }
+                catch (Exception ex)
+                {
+                    _log.LogDebug(ex, "Farm: balance fetch failed for {Addr}", m.AddressFull);
+                    m.Balance = "rpc error";
+                }
+                finally { gate.Release(); }
+            });
+            await Task.WhenAll(tasks);
+        }
+        catch (OperationCanceledException) { /* sweep cancelled */ }
+        finally { IsFarmBusy = false; }
+    }
+
+    /// <summary>Push the selected script to every farm member as its task and
+    /// launch the group. Assignment is PERSISTED (a farm "remembers" its job),
+    /// which the confirm dialog states plainly.</summary>
+    [RelayCommand(CanExecute = nameof(CanFarmAct))]
+    private async Task RunWalletTaskAsync()
+    {
+        if (IsFarmBusy) return;
+        if (SelectedGroup is null) return;
+        if (SelectedFarmScript is null)
+        {
+            await _dialogs.ConfirmAsync(
+                "Pick a task first",
+                "Choose a script in the farm panel's dropdown — it becomes the task " +
+                "assigned to every member.",
+                "OK");
+            return;
+        }
+
+        var detailed = await _groups.GetAsync(SelectedGroup.Group.Id);
+        var members = detailed?.Members?.ToList() ?? new List<string>();
+        if (members.Count == 0) return;
+
+        var script = SelectedFarmScript;
+        var ok = await _dialogs.ConfirmAsync(
+            $"Run '{script.Name}' across {members.Count} farm member(s)?",
+            $"This ASSIGNS '{script.Name}' as the task for every member of " +
+            $"'{detailed!.Name}' (persisted — the farm remembers its job) and launches " +
+            "the idle ones. Cap = " +
+            (detailed.MaxParallel?.ToString() ?? "global default") + ". " +
+            "Each member uses its own profile, proxy, and bound wallet.",
+            "Run on farm");
+        if (!ok) return;
+
+        IsFarmBusy = true;
+        try
+        {
+            await Task.Run(async () =>
+            {
+                // 1) Assign the task to EVERY member first (explicit + complete,
+                //    so the farm is uniformly retasked even if a launch is skipped).
+                foreach (var name in members)
+                {
+                    try
+                    {
+                        var p = await _profiles.GetAsync(name);
+                        if (p is null) continue;
+                        if (p.AssignedScriptId != script.Id)
+                            await _profiles.UpdateAsync(p with { AssignedScriptId = script.Id });
+                    }
+                    catch (Exception ex) { _log.LogError(ex, "Farm-run: assign '{Name}' failed", name); }
+                }
+
+                // 2) Launch the idle members (staggered so we don't spawn N
+                //    chromedrivers in one tick).
+                foreach (var name in members)
+                {
+                    if (_runner.ActiveProfileNames.Contains(name)) continue;
+                    var p = await _profiles.GetAsync(name);
+                    if (p is null) continue;
+                    try
+                    {
+                        await _runner.StartAsync(p);
+                    }
+                    catch (GhostShell.Core.Common.ProfileBusyException)
+                    {
+                        _log.LogInformation("Farm-run: '{Name}' already launching — skipped", name);
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.LogError(ex, "Farm-run: '{Name}' failed", name);
+                    }
+                    await Task.Delay(150);
+                }
+            });
+        }
+        finally { IsFarmBusy = false; }
+
+        await LoadFarmAsync(SelectedGroup);
+    }
+}
+
+/// <summary>
+/// One farm member's wallet-readiness row for the crypto-farm panel.
+/// Wraps a pure <see cref="FarmMemberStatus"/> with UI-friendly glyph/brush
+/// keys (resolved by the same ResourceKeyToBrush converter the rest of the
+/// app uses).
+/// </summary>
+public sealed partial class FarmMemberRowVm : ObservableObject
+{
+    private readonly FarmMemberStatus _s;
+    public FarmMemberRowVm(FarmMemberStatus s) => _s = s;
+
+    public string Name          => _s.Name;
+    public bool   Ready         => _s.Ready;
+    public string AddressMasked => string.IsNullOrEmpty(_s.AddressMasked) ? "—" : _s.AddressMasked;
+    public string AddressFull   => _s.AddressFull;
+    public string Reason        => _s.Reason;
+    public string StatusGlyph   => _s.Ready ? "✓" : "•";
+    public string StatusBrushKey => _s.Ready ? "OkBrush" : "WarnBrush";
+    public string StatusText    => _s.Ready ? "ready" : _s.Reason;
+
+    /// <summary>Live native-coin balance (filled by Fetch balances); empty until then.</summary>
+    [ObservableProperty] private string _balance = "";
 }
 
 /// <summary>

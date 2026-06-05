@@ -430,14 +430,29 @@ public sealed partial class FingerprintViewModel : BaseViewModel
             var pct = 100.0 * t.Weight / totalWeight;
             // Phase 53 — compute both string and numeric versions so the UI
             // can color-code by percentage (≥5% amber, 2-5% teal, <2% grey).
+            var ffName = t.FormFactor.ToString().ToLowerInvariant();
+            var screen = (t.ScreenWidth > 0 && t.ScreenHeight > 0)
+                ? $"{t.ScreenWidth}×{t.ScreenHeight}{(t.Dpr > 1.0 ? $" @{t.Dpr:0.#}x" : "")}"
+                : "";
             Templates.Add(new DeviceTemplateRow
             {
                 Id          = t.Id,
                 Label       = t.ToLabel(),
-                FormFactor  = t.FormFactor.ToString().ToLowerInvariant(),
+                FormFactor  = ffName,
                 IsLaptop    = t.IsLaptop,
                 WeightPct   = $"{pct:F1}%",
                 WeightPctNum = pct,
+                // Phase 56 — discrete spec fields for the readable card layout.
+                DisplayName = !string.IsNullOrEmpty(t.HumanName) ? t.HumanName! : t.Id,
+                IdSubtitle  = !string.IsNullOrEmpty(t.HumanName) && t.HumanName != t.Id ? t.Id : "",
+                FormFactorGlyph = t.FormFactor == FormFactor.Mobile ? "📱"
+                                  : t.FormFactor == FormFactor.Tablet ? "📱"
+                                  : t.IsLaptop ? "💻"
+                                  : "🖥",
+                Cpu    = t.CpuCores > 0 ? $"{t.CpuCores} cores" : "",
+                Ram    = t.RamGb > 0 ? $"{Math.Round(t.RamGb)} GB" : "",
+                Gpu    = !string.IsNullOrEmpty(t.GpuModel) ? t.GpuModel! : "",
+                Screen = screen,
                 // Coarse tier bucket — XAML DataTrigger needs exact-
                 // equality match, so we pre-compute "top"/"med"/"low"
                 // here instead of expecting the trigger to do range
@@ -1049,6 +1064,27 @@ public sealed record DeviceTemplateRow
     public required string FormFactor  { get; init; }
     public required bool   IsLaptop    { get; init; }
     public required string WeightPct   { get; init; }
+
+    // ─── Phase 56 — readable card fields ────────────────────────────
+    // The card template renders these discrete specs as labelled stat
+    // pills instead of one dense, ellipsis-trimmed line. DisplayName is
+    // the friendly title (HumanName ?? Id); the raw Id is shown small &
+    // muted underneath only when it differs. Empty string = hide the pill.
+    /// <summary>Friendly card title — HumanName when set, else the Id.</summary>
+    public string DisplayName     { get; init; } = "";
+    /// <summary>Raw template id shown as a mono subtitle — blank when it
+    /// equals <see cref="DisplayName"/> so we don't print it twice.</summary>
+    public string IdSubtitle      { get; init; } = "";
+    /// <summary>Emoji glyph matching the form factor (💻 / 🖥 / 📱).</summary>
+    public string FormFactorGlyph { get; init; } = "";
+    /// <summary>CPU spec, e.g. "8 cores" — empty hides the pill.</summary>
+    public string Cpu             { get; init; } = "";
+    /// <summary>RAM spec, e.g. "16 GB".</summary>
+    public string Ram             { get; init; } = "";
+    /// <summary>GPU model, e.g. "GeForce RTX 4080".</summary>
+    public string Gpu             { get; init; } = "";
+    /// <summary>Screen spec, e.g. "2560×1440" or "390×844 @3x".</summary>
+    public string Screen          { get; init; } = "";
     /// <summary>Numeric version of WeightPct (8.6 from "8.6%"). Kept
     /// for sorts / future numeric DataTriggers, not used by the
     /// current UI (which binds to <see cref="WeightTier"/> instead

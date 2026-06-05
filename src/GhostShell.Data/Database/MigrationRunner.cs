@@ -213,6 +213,14 @@ public sealed class MigrationRunner
         {
             ApplyTolerantStatements(conn, 28, Migrations_V28.Statements);
         }
+
+        // V29 — Phase 57 crypto-farm transaction history (tx_history table +
+        // indexes). Records hashes captured after wallet popup confirms; the
+        // state column is updated via RPC polling. Tolerant CREATE IF NOT EXISTS.
+        if (!applied.Contains(29))
+        {
+            ApplyTolerantStatements(conn, 29, Migrations_V29.Statements);
+        }
     }
 
     // audit DATA-06: dropped the dead `tolerateDuplicateColumn` parameter and

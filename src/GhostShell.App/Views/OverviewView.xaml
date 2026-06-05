@@ -16,6 +16,7 @@
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              mc:Ignorable="d"
+             AutomationProperties.AutomationId="page.overview"
              Background="Transparent">
     <ScrollViewer VerticalScrollBarVisibility="Auto"
                   HorizontalScrollBarVisibility="Disabled">
@@ -81,7 +82,8 @@
                 </Grid.ColumnDefinitions>
 
                 <!-- Runs — accent blue -->
-                <Border Grid.Column="0" Style="{StaticResource HeroTile}" Margin="0,0,6,0" Cursor="Hand">
+                <Border Grid.Column="0" Style="{StaticResource HeroTile}" Margin="0,0,6,0" Cursor="Hand"
+                        AutomationProperties.AutomationId="overview.tile.runs">
                     <Border.InputBindings>
                         <MouseBinding MouseAction="LeftClick" Command="{Binding GoRunsCommand}"/>
                     </Border.InputBindings>
@@ -90,14 +92,14 @@
                         <Border CornerRadius="8,8,0,0" Height="3" VerticalAlignment="Top"
                                 Background="{StaticResource Accent}"/>
                         <ctrl:Icon Data="{StaticResource Icon.Runs}"
-                                   Size="28" Opacity="0.10"
+                                   Size="46" Opacity="0.22"
                                    Stroke="{StaticResource Accent}"
                                    HorizontalAlignment="Right" VerticalAlignment="Bottom"
                                    Margin="0,0,8,2"/>
                         <StackPanel Margin="14,12,14,12">
-                            <TextBlock Text="🚀  TOTAL RUNS" Style="{StaticResource MutedText}" FontSize="12"/>
+                            <TextBlock Text="🚀  TOTAL RUNS" Style="{StaticResource MutedText}" FontSize="13"/>
                             <TextBlock Text="{Binding TotalRuns}"
-                                       FontSize="26" FontWeight="SemiBold"
+                                       FontSize="38" FontWeight="Bold"
                                        Foreground="{StaticResource Accent}"
                                        Margin="0,4,0,0"/>
                             <Grid Margin="0,6,0,0">
@@ -108,21 +110,21 @@
                                 </Grid.ColumnDefinitions>
                                 <StackPanel Grid.Column="0">
                                     <TextBlock Text="{Binding SuccessfulRuns}"
-                                               FontSize="13" FontWeight="SemiBold"
+                                               FontSize="18" FontWeight="Bold"
                                                Foreground="{StaticResource OkBrush}"/>
-                                    <TextBlock Text="ok" Style="{StaticResource MutedText}" FontSize="10"/>
+                                    <TextBlock Text="ok" Style="{StaticResource MutedText}" FontSize="11"/>
                                 </StackPanel>
                                 <StackPanel Grid.Column="1">
                                     <TextBlock Text="{Binding FailedRuns}"
-                                               FontSize="13" FontWeight="SemiBold"
+                                               FontSize="18" FontWeight="Bold"
                                                Foreground="{StaticResource ErrBrush}"/>
-                                    <TextBlock Text="fail" Style="{StaticResource MutedText}" FontSize="10"/>
+                                    <TextBlock Text="fail" Style="{StaticResource MutedText}" FontSize="11"/>
                                 </StackPanel>
                                 <StackPanel Grid.Column="2">
                                     <TextBlock Text="{Binding RunningRuns}"
-                                               FontSize="13" FontWeight="SemiBold"
+                                               FontSize="18" FontWeight="Bold"
                                                Foreground="{StaticResource Accent}"/>
-                                    <TextBlock Text="run" Style="{StaticResource MutedText}" FontSize="10"/>
+                                    <TextBlock Text="run" Style="{StaticResource MutedText}" FontSize="11"/>
                                 </StackPanel>
                             </Grid>
                         </StackPanel>
@@ -130,30 +132,32 @@
                 </Border>
 
                 <!-- Success rate — orange -->
-                <Border Grid.Column="1" Style="{StaticResource HeroTile}" Margin="3,0,3,0">
+                <Border Grid.Column="1" Style="{StaticResource HeroTile}" Margin="3,0,3,0"
+                        AutomationProperties.AutomationId="overview.tile.successRate">
                     <Grid>
                         <Border CornerRadius="8" Background="{StaticResource HueOrangeSoft}"/>
                         <Border CornerRadius="8,8,0,0" Height="3" VerticalAlignment="Top"
                                 Background="{StaticResource HueOrange}"/>
                         <ctrl:Icon Data="{StaticResource Icon.Check}"
-                                   Size="28" Opacity="0.10"
+                                   Size="46" Opacity="0.22"
                                    Stroke="{StaticResource HueOrange}"
                                    HorizontalAlignment="Right" VerticalAlignment="Bottom"
                                    Margin="0,0,8,2"/>
                         <StackPanel Margin="14,12,14,12">
-                            <TextBlock Text="✅  SUCCESS RATE" Style="{StaticResource MutedText}" FontSize="12"/>
+                            <TextBlock Text="✅  SUCCESS RATE" Style="{StaticResource MutedText}" FontSize="13"/>
                             <TextBlock Text="{Binding SuccessRateLabel}"
-                                       FontSize="26" FontWeight="SemiBold"
+                                       FontSize="38" FontWeight="Bold"
                                        Foreground="{Binding SuccessRateBrushKey, Converter={StaticResource ResourceKeyToBrush}}"
                                        Margin="0,4,0,0"/>
                             <TextBlock Text="last completed runs"
-                                       Style="{StaticResource MutedText}" FontSize="12" Margin="0,6,0,0"/>
+                                       Style="{StaticResource MutedText}" FontSize="13" Margin="0,6,0,0"/>
                         </StackPanel>
                     </Grid>
                 </Border>
 
                 <!-- Profiles — green -->
-                <Border Grid.Column="2" Style="{StaticResource HeroTile}" Margin="3,0,3,0" Cursor="Hand">
+                <Border Grid.Column="2" Style="{StaticResource HeroTile}" Margin="3,0,3,0" Cursor="Hand"
+                        AutomationProperties.AutomationId="overview.tile.profiles">
                     <Border.InputBindings>
                         <MouseBinding MouseAction="LeftClick" Command="{Binding GoProfilesCommand}"/>
                     </Border.InputBindings>
@@ -162,24 +166,25 @@
                         <Border CornerRadius="8,8,0,0" Height="3" VerticalAlignment="Top"
                                 Background="{StaticResource HueGreen}"/>
                         <ctrl:Icon Data="{StaticResource Icon.Profiles}"
-                                   Size="28" Opacity="0.10"
+                                   Size="46" Opacity="0.22"
                                    Stroke="{StaticResource HueGreen}"
                                    HorizontalAlignment="Right" VerticalAlignment="Bottom"
                                    Margin="0,0,8,2"/>
                         <StackPanel Margin="14,12,14,12">
-                            <TextBlock Text="👤  PROFILES" Style="{StaticResource MutedText}" FontSize="12"/>
+                            <TextBlock Text="👤  PROFILES" Style="{StaticResource MutedText}" FontSize="13"/>
                             <TextBlock Text="{Binding ProfileCount}"
-                                       FontSize="26" FontWeight="SemiBold"
+                                       FontSize="38" FontWeight="Bold"
                                        Foreground="{StaticResource HueGreen}"
                                        Margin="0,4,0,0"/>
                             <TextBlock Text="installed identities"
-                                       Style="{StaticResource MutedText}" FontSize="12" Margin="0,6,0,0"/>
+                                       Style="{StaticResource MutedText}" FontSize="13" Margin="0,6,0,0"/>
                         </StackPanel>
                     </Grid>
                 </Border>
 
                 <!-- Vault — amber -->
-                <Border Grid.Column="3" Style="{StaticResource HeroTile}" Margin="3,0,3,0" Cursor="Hand">
+                <Border Grid.Column="3" Style="{StaticResource HeroTile}" Margin="3,0,3,0" Cursor="Hand"
+                        AutomationProperties.AutomationId="overview.tile.vault">
                     <Border.InputBindings>
                         <MouseBinding MouseAction="LeftClick" Command="{Binding GoVaultCommand}"/>
                     </Border.InputBindings>
@@ -188,24 +193,25 @@
                         <Border CornerRadius="8,8,0,0" Height="3" VerticalAlignment="Top"
                                 Background="{StaticResource HueAmber}"/>
                         <ctrl:Icon Data="{StaticResource Icon.Vault}"
-                                   Size="28" Opacity="0.10"
+                                   Size="46" Opacity="0.22"
                                    Stroke="{StaticResource HueAmber}"
                                    HorizontalAlignment="Right" VerticalAlignment="Bottom"
                                    Margin="0,0,8,2"/>
                         <StackPanel Margin="14,12,14,12">
-                            <TextBlock Text="🔐  VAULT" Style="{StaticResource MutedText}" FontSize="12"/>
+                            <TextBlock Text="🔐  VAULT" Style="{StaticResource MutedText}" FontSize="13"/>
                             <TextBlock Text="{Binding VaultStatusText}"
-                                       FontSize="20" FontWeight="SemiBold"
+                                       FontSize="28" FontWeight="Bold"
                                        Foreground="{Binding VaultStatusBrushKey, Converter={StaticResource ResourceKeyToBrush}}"
                                        Margin="0,6,0,0"/>
                             <TextBlock Text="encrypted credentials"
-                                       Style="{StaticResource MutedText}" FontSize="12" Margin="0,6,0,0"/>
+                                       Style="{StaticResource MutedText}" FontSize="13" Margin="0,6,0,0"/>
                         </StackPanel>
                     </Grid>
                 </Border>
 
                 <!-- Traffic 24h — violet -->
-                <Border Grid.Column="4" Style="{StaticResource HeroTile}" Margin="6,0,0,0" Cursor="Hand">
+                <Border Grid.Column="4" Style="{StaticResource HeroTile}" Margin="6,0,0,0" Cursor="Hand"
+                        AutomationProperties.AutomationId="overview.tile.traffic">
                     <Border.InputBindings>
                         <MouseBinding MouseAction="LeftClick" Command="{Binding GoTrafficCommand}"/>
                     </Border.InputBindings>
@@ -214,18 +220,18 @@
                         <Border CornerRadius="8,8,0,0" Height="3" VerticalAlignment="Top"
                                 Background="{StaticResource HueViolet}"/>
                         <ctrl:Icon Data="{StaticResource Icon.Traffic}"
-                                   Size="28" Opacity="0.10"
+                                   Size="46" Opacity="0.22"
                                    Stroke="{StaticResource HueViolet}"
                                    HorizontalAlignment="Right" VerticalAlignment="Bottom"
                                    Margin="0,0,8,2"/>
                         <StackPanel Margin="14,12,14,12">
-                            <TextBlock Text="📈  TRAFFIC · 24H" Style="{StaticResource MutedText}" FontSize="12"/>
+                            <TextBlock Text="📈  TRAFFIC · 24H" Style="{StaticResource MutedText}" FontSize="13"/>
                             <TextBlock Text="{Binding Traffic24hText}"
-                                       FontSize="22" FontWeight="SemiBold"
+                                       FontSize="30" FontWeight="Bold"
                                        Foreground="{StaticResource HueViolet}"
                                        Margin="0,4,0,0"/>
                             <TextBlock Text="{Binding TrafficRequestsText, StringFormat='{}{0} requests'}"
-                                       Style="{StaticResource MutedText}" FontSize="12" Margin="0,6,0,0"/>
+                                       Style="{StaticResource MutedText}" FontSize="13" Margin="0,6,0,0"/>
                         </StackPanel>
                     </Grid>
                 </Border>
@@ -465,14 +471,14 @@
                         <Border CornerRadius="8,8,0,0" Height="3" VerticalAlignment="Top"
                                 Background="{StaticResource HueTeal}"/>
                         <ctrl:Icon Data="{StaticResource Icon.Globe}"
-                                   Size="28" Opacity="0.10"
+                                   Size="46" Opacity="0.22"
                                    Stroke="{StaticResource HueTeal}"
                                    HorizontalAlignment="Right" VerticalAlignment="Bottom"
                                    Margin="0,0,10,4"/>
                         <StackPanel Margin="14,10,14,10">
-                            <TextBlock Text="🌐  PROXIES" Style="{StaticResource MutedText}" FontSize="12"/>
+                            <TextBlock Text="🌐  PROXIES" Style="{StaticResource MutedText}" FontSize="13"/>
                             <TextBlock Text="{Binding ProxyCount}"
-                                       FontSize="20" FontWeight="SemiBold"
+                                       FontSize="30" FontWeight="Bold"
                                        Foreground="{StaticResource HueTeal}"
                                        Margin="0,4,0,0"/>
                         </StackPanel>
@@ -485,14 +491,14 @@
                         <Border CornerRadius="8,8,0,0" Height="3" VerticalAlignment="Top"
                                 Background="{StaticResource HueViolet}"/>
                         <ctrl:Icon Data="{StaticResource Icon.Domains}"
-                                   Size="28" Opacity="0.10"
+                                   Size="46" Opacity="0.22"
                                    Stroke="{StaticResource HueViolet}"
                                    HorizontalAlignment="Right" VerticalAlignment="Bottom"
                                    Margin="0,0,10,4"/>
                         <StackPanel Margin="14,10,14,10">
-                            <TextBlock Text="🌐  UNIQUE DOMAINS · 24H" Style="{StaticResource MutedText}" FontSize="12"/>
+                            <TextBlock Text="🌐  UNIQUE DOMAINS · 24H" Style="{StaticResource MutedText}" FontSize="13"/>
                             <TextBlock Text="{Binding TrafficUniqueDomains}"
-                                       FontSize="20" FontWeight="SemiBold"
+                                       FontSize="30" FontWeight="Bold"
                                        Foreground="{StaticResource HueViolet}"
                                        Margin="0,4,0,0"/>
                         </StackPanel>

@@ -13,6 +13,7 @@
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              mc:Ignorable="d"
+             AutomationProperties.AutomationId="page.profiles"
              Background="Transparent">
 
     <UserControl.Resources>
@@ -73,24 +74,23 @@
                  MinWidth removed — UniformGrid drives sizing so all
                  cards in a row land at the same width regardless of
                  profile-name length. -->
-            <Grid Margin="0,0,10,10" MinHeight="112" HorizontalAlignment="Stretch">
+            <Grid Margin="0,0,12,12" MinHeight="120" HorizontalAlignment="Stretch"
+                  AutomationProperties.AutomationId="{Binding Name, StringFormat='profiles.row.{0}'}"
+                  AutomationProperties.Name="{Binding Name}">
                 <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="3"/>
+                    <ColumnDefinition Width="4"/>
                     <ColumnDefinition Width="*"/>
                 </Grid.ColumnDefinitions>
 
-                <!-- Left accent stripe — slimmer (3px) and full-height -->
+                <!-- Left accent stripe — per-profile hue, full-height -->
                 <Border Grid.Column="0"
-                        CornerRadius="8,0,0,8"
+                        CornerRadius="10,0,0,10"
                         Background="{Binding AccentBrushKey,
                                              Converter={StaticResource ResourceKeyToBrush}}"/>
 
                 <Border Grid.Column="1"
-                        Background="{StaticResource BgRaised}"
-                        BorderBrush="{StaticResource Border}"
-                        BorderThickness="1"
-                        CornerRadius="0,8,8,0"
-                        Padding="12,10,12,10"
+                        CornerRadius="0,10,10,0"
+                        Padding="14,12,14,12"
                         ContextMenu="{StaticResource ProfileRowMenu}">
                 <Border.Style>
                     <Style TargetType="Border">
@@ -98,6 +98,15 @@
                         <Setter Property="BorderBrush" Value="{StaticResource Border}"/>
                         <Setter Property="BorderThickness" Value="1"/>
                         <Style.Triggers>
+                            <!-- Hover: brighten the edge + lift with a soft shadow. -->
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="BorderBrush" Value="{StaticResource BorderStrong}"/>
+                                <Setter Property="Effect">
+                                    <Setter.Value>
+                                        <DropShadowEffect Color="Black" BlurRadius="16" ShadowDepth="2" Opacity="0.45"/>
+                                    </Setter.Value>
+                                </Setter>
+                            </Trigger>
                             <DataTrigger Binding="{Binding IsRunning}" Value="True">
                                 <Setter Property="BorderBrush" Value="{StaticResource OkBrush}"/>
                             </DataTrigger>
@@ -116,9 +125,10 @@
                         <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
 
-                    <!-- Header row: checkbox + name + status pill -->
+                    <!-- Header row: checkbox + avatar + name/template + status pill -->
                     <Grid Grid.Row="0">
                         <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
@@ -126,108 +136,87 @@
                         <CheckBox Grid.Column="0"
                                   IsChecked="{Binding IsSelected, Mode=TwoWay}"
                                   VerticalAlignment="Center"
-                                  Margin="0,0,8,0"/>
-                        <TextBlock Grid.Column="1"
-                                   Text="{Binding Name}"
-                                   Foreground="{StaticResource Text}"
-                                   FontSize="15"
-                                   FontWeight="SemiBold"
-                                   VerticalAlignment="Center"
-                                   TextTrimming="CharacterEllipsis"/>
-
-                        <!-- Phase 71w — proper status chip.
-                             Old design rendered a single em-dash ("—")
-                             centred in a 21-px pill, which read as
-                             "stretched icon" rather than "status".
-                             New design = Ellipse dot + text, padded
-                             to a comfortable 9,4 inside an 11-radius
-                             pill. Colour palette flips by status:
-                                 idle      → muted gray (no pulse)
-                                 ready     → info blue
-                                 starting  → accent
-                                 running   → ok green
-                                 not-ready → warn amber
-                             so the chip is the visual focal point of
-                             the card's top row. -->
-                        <Border Grid.Column="2" VerticalAlignment="Center"
-                                Padding="9,4"
-                                CornerRadius="11" BorderThickness="1">
-                            <Border.Style>
-                                <Style TargetType="Border">
-                                    <Setter Property="Background"  Value="{StaticResource BgRaised}"/>
-                                    <Setter Property="BorderBrush" Value="{StaticResource Border}"/>
-                                    <Style.Triggers>
-                                        <DataTrigger Binding="{Binding IsRunning}" Value="True">
-                                            <Setter Property="Background"  Value="{StaticResource OkSoftBrush}"/>
-                                            <Setter Property="BorderBrush" Value="{StaticResource OkBrush}"/>
-                                        </DataTrigger>
-                                        <DataTrigger Binding="{Binding IsStarting}" Value="True">
-                                            <Setter Property="Background"  Value="{StaticResource AccentSoft}"/>
-                                            <Setter Property="BorderBrush" Value="{StaticResource Accent}"/>
-                                        </DataTrigger>
-                                        <DataTrigger Binding="{Binding IsReady}" Value="True">
-                                            <Setter Property="Background"  Value="{StaticResource InfoSoftBrush}"/>
-                                            <Setter Property="BorderBrush" Value="{StaticResource InfoBrush}"/>
-                                        </DataTrigger>
-                                        <DataTrigger Binding="{Binding IsNotReady}" Value="True">
-                                            <Setter Property="Background"  Value="{StaticResource WarnSoftBrush}"/>
-                                            <Setter Property="BorderBrush" Value="{StaticResource WarnBrush}"/>
-                                        </DataTrigger>
-                                    </Style.Triggers>
-                                </Style>
-                            </Border.Style>
-                            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                                <!-- Status dot — colour flips with the
-                                     same DataTriggers as the pill. -->
-                                <Ellipse Width="7" Height="7"
-                                         Margin="0,0,6,0"
-                                         VerticalAlignment="Center">
+                                  Margin="0,0,10,0"/>
+                        <!-- Avatar tile — accent-outlined profile glyph -->
+                        <Border Grid.Column="1" Width="36" Height="36" CornerRadius="9"
+                                Background="{StaticResource BgDeep}"
+                                BorderThickness="1.5"
+                                BorderBrush="{Binding AccentBrushKey, Converter={StaticResource ResourceKeyToBrush}}"
+                                Margin="0,0,10,0" VerticalAlignment="Center">
+                            <ctrl:Icon Data="{StaticResource Icon.Profiles}" Size="18"
+                                       Stroke="{Binding AccentBrushKey, Converter={StaticResource ResourceKeyToBrush}}"
+                                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <StackPanel Grid.Column="2" VerticalAlignment="Center">
+                            <TextBlock Text="{Binding Name}"
+                                       Foreground="{StaticResource Text}"
+                                       FontSize="15" FontWeight="SemiBold"
+                                       TextTrimming="CharacterEllipsis"/>
+                            <!-- line 2: template + status dot/label (V2) -->
+                            <StackPanel Orientation="Horizontal" Margin="0,2,0,0" VerticalAlignment="Center">
+                                <TextBlock Text="{Binding TemplateId, FallbackValue='auto template'}"
+                                           Style="{StaticResource MutedText}" FontSize="11"
+                                           FontFamily="{StaticResource FontMono}"
+                                           TextTrimming="CharacterEllipsis"/>
+                                <Ellipse Width="6" Height="6" Margin="10,0,5,0" VerticalAlignment="Center">
                                     <Ellipse.Style>
                                         <Style TargetType="Ellipse">
                                             <Setter Property="Fill" Value="{StaticResource TextDim}"/>
                                             <Style.Triggers>
-                                                <DataTrigger Binding="{Binding IsRunning}" Value="True">
-                                                    <Setter Property="Fill" Value="{StaticResource OkBrush}"/>
-                                                </DataTrigger>
-                                                <DataTrigger Binding="{Binding IsStarting}" Value="True">
-                                                    <Setter Property="Fill" Value="{StaticResource Accent}"/>
-                                                </DataTrigger>
-                                                <DataTrigger Binding="{Binding IsReady}" Value="True">
-                                                    <Setter Property="Fill" Value="{StaticResource InfoBrush}"/>
-                                                </DataTrigger>
-                                                <DataTrigger Binding="{Binding IsNotReady}" Value="True">
-                                                    <Setter Property="Fill" Value="{StaticResource WarnBrush}"/>
-                                                </DataTrigger>
+                                                <DataTrigger Binding="{Binding IsRunning}" Value="True"><Setter Property="Fill" Value="{StaticResource OkBrush}"/></DataTrigger>
+                                                <DataTrigger Binding="{Binding IsStarting}" Value="True"><Setter Property="Fill" Value="{StaticResource Accent}"/></DataTrigger>
+                                                <DataTrigger Binding="{Binding IsReady}" Value="True"><Setter Property="Fill" Value="{StaticResource InfoBrush}"/></DataTrigger>
+                                                <DataTrigger Binding="{Binding IsNotReady}" Value="True"><Setter Property="Fill" Value="{StaticResource WarnBrush}"/></DataTrigger>
                                             </Style.Triggers>
                                         </Style>
                                     </Ellipse.Style>
                                 </Ellipse>
-                                <TextBlock Text="{Binding StatusText}"
-                                           VerticalAlignment="Center"
-                                           FontSize="10"
-                                           FontWeight="SemiBold">
+                                <TextBlock Text="{Binding StatusText}" FontSize="10.5" FontWeight="SemiBold" VerticalAlignment="Center">
                                     <TextBlock.Style>
                                         <Style TargetType="TextBlock">
                                             <Setter Property="Foreground" Value="{StaticResource TextMuted}"/>
                                             <Style.Triggers>
-                                                <DataTrigger Binding="{Binding IsRunning}" Value="True">
-                                                    <Setter Property="Foreground" Value="{StaticResource OkBrush}"/>
-                                                </DataTrigger>
-                                                <DataTrigger Binding="{Binding IsStarting}" Value="True">
-                                                    <Setter Property="Foreground" Value="{StaticResource Accent}"/>
-                                                </DataTrigger>
-                                                <DataTrigger Binding="{Binding IsReady}" Value="True">
-                                                    <Setter Property="Foreground" Value="{StaticResource InfoBrush}"/>
-                                                </DataTrigger>
-                                                <DataTrigger Binding="{Binding IsNotReady}" Value="True">
-                                                    <Setter Property="Foreground" Value="{StaticResource WarnBrush}"/>
-                                                </DataTrigger>
+                                                <DataTrigger Binding="{Binding IsRunning}" Value="True"><Setter Property="Foreground" Value="{StaticResource OkBrush}"/></DataTrigger>
+                                                <DataTrigger Binding="{Binding IsStarting}" Value="True"><Setter Property="Foreground" Value="{StaticResource Accent}"/></DataTrigger>
+                                                <DataTrigger Binding="{Binding IsReady}" Value="True"><Setter Property="Foreground" Value="{StaticResource InfoBrush}"/></DataTrigger>
+                                                <DataTrigger Binding="{Binding IsNotReady}" Value="True"><Setter Property="Foreground" Value="{StaticResource WarnBrush}"/></DataTrigger>
                                             </Style.Triggers>
                                         </Style>
                                     </TextBlock.Style>
                                 </TextBlock>
                             </StackPanel>
-                        </Border>
+                        </StackPanel>
+
+                        <!-- V2 — always-visible action icons (Edit / Fresh / Delete),
+                             top-right. Sized for comfortable clicking; tooltips +
+                             AutomationIds for automation. -->
+                        <StackPanel Grid.Column="3" Orientation="Horizontal"
+                                    VerticalAlignment="Top" HorizontalAlignment="Right">
+                            <Button Width="30" Height="28" Padding="0" Margin="0,0,4,0"
+                                    ToolTip="Edit profile"
+                                    AutomationProperties.AutomationId="{Binding Name, StringFormat='profiles.edit.{0}'}"
+                                    Command="{Binding DataContext.EditCommand, Source={x:Reference PageRoot}}"
+                                    CommandParameter="{Binding}">
+                                <ctrl:Icon Data="{StaticResource Icon.Edit}" Size="16"
+                                           Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                            </Button>
+                            <Button Width="30" Height="28" Padding="0" Margin="0,0,4,0"
+                                    ToolTip="Start without restoring the saved session"
+                                    Visibility="{Binding IsRunning, Converter={StaticResource InverseBoolToVis}}"
+                                    Command="{Binding DataContext.StartFreshCommand, Source={x:Reference PageRoot}}"
+                                    CommandParameter="{Binding}">
+                                <ctrl:Icon Data="{StaticResource Icon.Play}" Size="15"
+                                           Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                            </Button>
+                            <Button Width="30" Height="28" Padding="0"
+                                    ToolTip="Delete profile"
+                                    AutomationProperties.AutomationId="{Binding Name, StringFormat='profiles.delete.{0}'}"
+                                    Command="{Binding DataContext.DeleteCommand, Source={x:Reference PageRoot}}"
+                                    CommandParameter="{Binding}">
+                                <ctrl:Icon Data="{StaticResource Icon.Trash}" Size="16"
+                                           Stroke="{StaticResource ErrBrush}"/>
+                            </Button>
+                        </StackPanel>
                     </Grid>
 
                     <!-- Phase 71f — single compact meta line replacing the
@@ -259,77 +248,47 @@
                             </TextBlock>
                         </StackPanel>
                         <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="14,0,0,0"
-                                    ToolTip="{Binding TemplateId}">
-                            <ctrl:Icon Data="{StaticResource Icon.Settings}" Size="15" VerticalAlignment="Center"/>
+                                    ToolTip="{Binding ProxySlug, FallbackValue='direct connection'}">
+                            <ctrl:Icon Data="{StaticResource Icon.Globe}" Size="15" VerticalAlignment="Center"/>
                             <TextBlock VerticalAlignment="Center"
                                        Style="{StaticResource MutedText}" FontSize="13"
                                        Margin="6,0,0,0"
                                        TextTrimming="CharacterEllipsis">
-                                <Run Text="{Binding TemplateId, Mode=OneWay, FallbackValue='auto'}"
+                                <Run Text="{Binding ProxySlug, Mode=OneWay, FallbackValue='direct'}"
                                      FontFamily="{StaticResource FontMono}"/>
                             </TextBlock>
                         </StackPanel>
                     </StackPanel>
 
-                    <!-- Spacer row 2 — empty; keeps the action strip
-                         pinned to the bottom while the card grows. -->
-
-                    <!-- Phase 71s — slimmer action strip.
-                         User feedback: Start was too wide (full row).
-                         Now: spacer (*) absorbs slack, then Auto-sized
-                         Start (lime green, ~92 px) and Edit (36 px
-                         icon) sit flush right. Visually punchier:
-                         green = "go" CTA, low-key edit beside it. -->
-                    <Grid Grid.Row="3" Margin="0,10,0,0">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="Auto"/>
-                            <ColumnDefinition Width="Auto"/>
-                        </Grid.ColumnDefinitions>
-                        <!-- Start (idle) — lime green ButtonOk -->
-                        <Button Grid.Column="1" Margin="0,0,6,0"
-                                Style="{StaticResource ButtonOk}"
-                                MinWidth="92"
-                                Padding="12,6"
-                                Visibility="{Binding IsRunning, Converter={StaticResource InverseBoolToVis}}"
-                                Command="{Binding DataContext.StartCommand,
-                                          Source={x:Reference PageRoot}}"
-                                CommandParameter="{Binding}">
-                            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                                <ctrl:Icon Data="{StaticResource Icon.Play}" Size="15" Margin="0,0,6,0"
-                                           Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
-                                           VerticalAlignment="Center"/>
-                                <TextBlock Text="Start" VerticalAlignment="Center"/>
-                            </StackPanel>
-                        </Button>
-                        <!-- Stop (running) — same column slot, red danger -->
-                        <Button Grid.Column="1" Margin="0,0,6,0"
-                                Style="{StaticResource ButtonDanger}"
-                                MinWidth="92"
-                                Padding="12,6"
-                                Visibility="{Binding IsRunning, Converter={StaticResource BoolToVis}}"
-                                Command="{Binding DataContext.StopCommand,
-                                          Source={x:Reference PageRoot}}"
-                                CommandParameter="{Binding}">
-                            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                                <ctrl:Icon Data="{StaticResource Icon.Stop}" Size="15" Margin="0,0,6,0"
-                                           Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
-                                           VerticalAlignment="Center"/>
-                                <TextBlock Text="Stop" VerticalAlignment="Center"/>
-                            </StackPanel>
-                        </Button>
-                        <!-- Edit — icon-only on a 36-px compact button -->
-                        <Button Grid.Column="2"
-                                Command="{Binding DataContext.EditCommand,
-                                          Source={x:Reference PageRoot}}"
-                                CommandParameter="{Binding}"
-                                ToolTip="Edit profile"
-                                MinWidth="36" Padding="8,0">
-                            <ctrl:Icon Data="{StaticResource Icon.Edit}" Size="17"
+                    <!-- Row 3 — full-width primary Start / Stop (V2). -->
+                    <Button Grid.Row="3" Margin="0,12,0,0"
+                            Style="{StaticResource ButtonAccent}"
+                            HorizontalAlignment="Stretch"
+                            AutomationProperties.AutomationId="{Binding Name, StringFormat='profiles.start.{0}'}"
+                            Visibility="{Binding IsRunning, Converter={StaticResource InverseBoolToVis}}"
+                            Command="{Binding DataContext.StartCommand, Source={x:Reference PageRoot}}"
+                            CommandParameter="{Binding}">
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
+                            <ctrl:Icon Data="{StaticResource Icon.Play}" Size="16" Margin="0,0,8,0"
                                        Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
                                        VerticalAlignment="Center"/>
-                        </Button>
-                    </Grid>
+                            <TextBlock Text="Start" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Button>
+                    <Button Grid.Row="3" Margin="0,12,0,0"
+                            Style="{StaticResource ButtonDanger}" Padding="14,8"
+                            HorizontalAlignment="Stretch"
+                            AutomationProperties.AutomationId="{Binding Name, StringFormat='profiles.stop.{0}'}"
+                            Visibility="{Binding IsRunning, Converter={StaticResource BoolToVis}}"
+                            Command="{Binding DataContext.StopCommand, Source={x:Reference PageRoot}}"
+                            CommandParameter="{Binding}">
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
+                            <ctrl:Icon Data="{StaticResource Icon.Stop}" Size="16" Margin="0,0,8,0"
+                                       Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                                       VerticalAlignment="Center"/>
+                            <TextBlock Text="Stop" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Button>
                 </Grid>
             </Border>
             </Grid>
@@ -420,10 +379,12 @@
                 <Button Content="⚡  Bulk create"
                         Command="{Binding BulkAddCommand}"
                         Margin="0,0,8,0"
+                        AutomationProperties.AutomationId="profiles.bulkCreate"
                         MinWidth="120"/>
                 <Button Content="+  Add profile"
                         Command="{Binding AddCommand}"
                         Style="{StaticResource ButtonPrimary}"
+                        AutomationProperties.AutomationId="profiles.add"
                         MinWidth="120"/>
             </StackPanel>
             </Grid>

@@ -353,6 +353,7 @@ public class CaptchaRecoveryServiceTests
 
         public Task<IReadOnlyList<Profile>> ListAsync(CancellationToken ct = default)
             => Task.FromResult<IReadOnlyList<Profile>>(_byName.Values.ToList());
+        public Task<int> CountAsync(CancellationToken ct = default) => Task.FromResult(_byName.Count);
         public Task<Profile?> GetAsync(string name, CancellationToken ct = default)
             => Task.FromResult(_byName.TryGetValue(name, out var p) ? p : null);
         public Task<Profile> CreateAsync(Profile p, CancellationToken ct = default)
@@ -378,6 +379,7 @@ public class CaptchaRecoveryServiceTests
 
         public Task<IReadOnlyList<ProxyModel>> ListAsync(CancellationToken ct = default)
             => Task.FromResult<IReadOnlyList<ProxyModel>>(_bySlug.Values.ToList());
+        public Task<int> CountAsync(CancellationToken ct = default) => Task.FromResult(_bySlug.Count);
         public Task<ProxyModel?> GetAsync(string slug, CancellationToken ct = default)
             => Task.FromResult(_bySlug.TryGetValue(slug, out var p) ? p : null);
         public Task<ProxyModel?> GetByUrlAsync(string url, CancellationToken ct = default)

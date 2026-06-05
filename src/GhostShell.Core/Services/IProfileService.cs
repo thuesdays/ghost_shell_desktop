@@ -13,6 +13,9 @@ namespace GhostShell.Core.Services;
 public interface IProfileService
 {
     Task<IReadOnlyList<Profile>> ListAsync(CancellationToken ct = default);
+    /// <summary>Cheap row count (SELECT COUNT(*)) — for dashboards that only
+    /// need the number, not a full materialised list.</summary>
+    Task<int> CountAsync(CancellationToken ct = default);
     Task<Profile?> GetAsync(string name, CancellationToken ct = default);
     Task<Profile>  CreateAsync(Profile profile, CancellationToken ct = default);
     Task           UpdateAsync(Profile profile, CancellationToken ct = default);

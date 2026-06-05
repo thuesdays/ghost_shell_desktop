@@ -213,9 +213,10 @@ public sealed partial class OverviewViewModel : BaseViewModel
             FailedRuns     = stats.Failed;
             RunningRuns    = stats.Running;
 
-            // Counts.
-            ProfileCount = (await _profiles.ListAsync()).Count;
-            ProxyCount   = (await _proxies.ListAsync()).Count;
+            // Counts. Audit (perf H1): SELECT COUNT(*) instead of materialising
+            // the full profile/proxy lists every 10s just to read .Count.
+            ProfileCount = await _profiles.CountAsync();
+            ProxyCount   = await _proxies.CountAsync();
 
             // Vault status.
             await _vault.RefreshStateAsync();

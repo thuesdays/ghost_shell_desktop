@@ -13,6 +13,7 @@
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              mc:Ignorable="d"
+             AutomationProperties.AutomationId="page.groups"
              Background="Transparent">
 
     <UserControl.Resources>
@@ -61,6 +62,7 @@
                     <Button Content="+  Create group"
                             Command="{Binding AddCommand}"
                             Style="{StaticResource ButtonPrimary}"
+                            AutomationProperties.AutomationId="groups.create"
                             MinWidth="140"/>
                 </WrapPanel>
             </Grid>
@@ -91,10 +93,14 @@
             </Grid>
         </Border>
 
-        <!-- Content -->
+        <!-- Content — cards (col 0) + crypto-farm detail panel (col 1) -->
         <Grid Grid.Row="2">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
             <!-- Empty state -->
-            <Border Style="{StaticResource Card}" Padding="40"
+            <Border Grid.Column="0" Style="{StaticResource Card}" Padding="40"
                     HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
                     Visibility="{Binding IsEmpty, Converter={StaticResource BoolToVis}}">
                 <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
@@ -115,7 +121,8 @@
             </Border>
 
             <!-- Group cards grid -->
-            <ScrollViewer VerticalScrollBarVisibility="Auto"
+            <ScrollViewer Grid.Column="0"
+                          VerticalScrollBarVisibility="Auto"
                           HorizontalScrollBarVisibility="Disabled"
                           Visibility="{Binding IsEmpty, Converter={StaticResource InverseBoolToVis}}">
                 <ItemsControl ItemsSource="{Binding Items}">
@@ -273,6 +280,14 @@
                                         <!-- Row 1: secondary icon actions, right-aligned -->
                                         <StackPanel Grid.Row="1" Orientation="Horizontal"
                                                     HorizontalAlignment="Right" Margin="0,6,0,0">
+                                            <Button Margin="0,0,4,0" Padding="8,3"
+                                                    ToolTip="Open the crypto-farm panel for this group"
+                                                    AutomationProperties.AutomationId="{Binding Name, StringFormat='groups.farm.open.{0}'}"
+                                                    Command="{Binding DataContext.OpenFarmCommand,
+                                                              Source={x:Reference PageRoot}}"
+                                                    CommandParameter="{Binding}">
+                                                <TextBlock Text="🪙 Farm" FontSize="12" VerticalAlignment="Center"/>
+                                            </Button>
                                             <Button Style="{StaticResource RowActionButton}" Margin="0,0,4,0"
                                                     ToolTip="Edit group"
                                                     Command="{Binding DataContext.EditCommand,
@@ -297,6 +312,153 @@
                     </ItemsControl.ItemTemplate>
                 </ItemsControl>
             </ScrollViewer>
+
+            <!-- ─── Crypto-farm detail panel (col 1) ───────────────────
+                 Shown when a group is selected via its "🪙 Farm" button.
+                 Lists per-member wallet readiness + a one-click mass run
+                 of a chosen task across the whole farm. -->
+            <Border Grid.Column="1"
+                    Width="380" Margin="12,0,0,0"
+                    Style="{StaticResource Card}" Padding="0"
+                    Visibility="{Binding HasSelectedGroup, Converter={StaticResource BoolToVis}}">
+                <DockPanel LastChildFill="True">
+                    <!-- Header -->
+                    <Grid DockPanel.Dock="Top" Margin="14,12,10,8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0">
+                            <TextBlock FontSize="15" FontWeight="SemiBold"
+                                       Foreground="{StaticResource Text}">
+                                <Run Text="🪙  "/>
+                                <Run Text="{Binding SelectedGroup.Name, Mode=OneWay, FallbackValue='Farm'}"/>
+                            </TextBlock>
+                            <TextBlock Text="{Binding FarmSummary}" Margin="0,3,0,0"
+                                       Style="{StaticResource MutedText}" FontSize="12"
+                                       TextWrapping="Wrap"/>
+                        </StackPanel>
+                        <Button Grid.Column="1" Content="✕" Padding="8,2" FontSize="12"
+                                ToolTip="Close farm panel"
+                                AutomationProperties.AutomationId="farm.close"
+                                Command="{Binding CloseFarmCommand}"/>
+                    </Grid>
+
+                    <!-- Mass-run task bar -->
+                    <Border DockPanel.Dock="Top" BorderBrush="{StaticResource Border}"
+                            BorderThickness="0,1,0,1" Padding="14,10"
+                            Background="{StaticResource BgDeep}">
+                        <StackPanel>
+                            <TextBlock Text="Run a task across the whole farm"
+                                       Style="{StaticResource MutedText}" FontSize="11"
+                                       Margin="0,0,0,6"/>
+                            <ComboBox ItemsSource="{Binding AvailableScripts}"
+                                      SelectedItem="{Binding SelectedFarmScript, Mode=TwoWay}"
+                                      DisplayMemberPath="Name"
+                                      AutomationProperties.AutomationId="farm.script"
+                                      ToolTip="Pick the wallet task (script) to assign + launch on every member"/>
+                            <Button Content="▶  Run wallet task on farm"
+                                    Margin="0,8,0,0" Padding="10,8"
+                                    HorizontalAlignment="Stretch"
+                                    Style="{StaticResource ButtonAccent}"
+                                    AutomationProperties.AutomationId="farm.run"
+                                    Command="{Binding RunWalletTaskCommand}"/>
+                            <TextBlock Margin="0,6,0,0" FontSize="10.5"
+                                       Style="{StaticResource MutedText}" TextWrapping="Wrap"
+                                       Text="Assigns the selected script to every member (persisted) and launches them with the group's concurrency cap."/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Balance / chain bar -->
+                    <Border DockPanel.Dock="Top" BorderBrush="{StaticResource Border}"
+                            BorderThickness="0,0,0,1" Padding="14,8">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <ComboBox Grid.Column="0"
+                                      ItemsSource="{Binding AvailableChains}"
+                                      SelectedItem="{Binding SelectedChain, Mode=TwoWay}"
+                                      DisplayMemberPath="Name"
+                                      AutomationProperties.AutomationId="farm.chain"
+                                      ToolTip="Chain to read native balances on"/>
+                            <Button Grid.Column="1" Content="💰 Balances" Margin="8,0,0,0" Padding="8,4"
+                                    FontSize="11"
+                                    AutomationProperties.AutomationId="farm.balances"
+                                    Command="{Binding FetchBalancesCommand}"
+                                    ToolTip="Fetch each member's native-coin balance (read-only RPC)"/>
+                            <Button Grid.Column="2" Content="⚙" Margin="6,0,0,0" Padding="8,4"
+                                    FontSize="12"
+                                    AutomationProperties.AutomationId="farm.selectors"
+                                    Command="{Binding EditWalletSelectorsCommand}"
+                                    ToolTip="Edit wallet selector overrides"/>
+                        </Grid>
+                    </Border>
+
+                    <!-- Refresh -->
+                    <Button DockPanel.Dock="Top" Content="⟳  Refresh readiness"
+                            Margin="14,8,14,4" Padding="6,4" HorizontalAlignment="Left"
+                            FontSize="11"
+                            AutomationProperties.AutomationId="farm.refresh"
+                            Command="{Binding RefreshFarmCommand}"/>
+
+                    <!-- Member readiness list -->
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="6,0,6,8">
+                        <ItemsControl ItemsSource="{Binding FarmMembers}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate DataType="{x:Type vm:FarmMemberRowVm}">
+                                    <Border Margin="8,3" Padding="10,7"
+                                            CornerRadius="6"
+                                            Background="{StaticResource BgRaised}"
+                                            BorderThickness="3,0,0,0"
+                                            AutomationProperties.AutomationId="{Binding Name, StringFormat='farm.member.{0}'}"
+                                            AutomationProperties.Name="{Binding Name}"
+                                            BorderBrush="{Binding StatusBrushKey, Converter={StaticResource ResourceKeyToBrush}}">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="Auto"/>
+                                                <ColumnDefinition Width="*"/>
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0" Text="{Binding StatusGlyph}"
+                                                       FontWeight="Bold" FontSize="14"
+                                                       VerticalAlignment="Top" Margin="0,0,9,0"
+                                                       Foreground="{Binding StatusBrushKey, Converter={StaticResource ResourceKeyToBrush}}"/>
+                                            <StackPanel Grid.Column="1">
+                                                <Grid>
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="*"/>
+                                                        <ColumnDefinition Width="Auto"/>
+                                                    </Grid.ColumnDefinitions>
+                                                    <TextBlock Grid.Column="0" Text="{Binding Name}" FontSize="13"
+                                                               FontWeight="SemiBold"
+                                                               Foreground="{StaticResource Text}"
+                                                               TextTrimming="CharacterEllipsis"/>
+                                                    <TextBlock Grid.Column="1" Text="{Binding Balance}"
+                                                               FontFamily="{StaticResource FontMono}"
+                                                               FontSize="11.5" FontWeight="SemiBold"
+                                                               Foreground="{StaticResource HueGreen}"
+                                                               VerticalAlignment="Center" Margin="6,0,0,0"/>
+                                                </Grid>
+                                                <TextBlock Text="{Binding AddressMasked}"
+                                                           FontFamily="{StaticResource FontMono}"
+                                                           FontSize="11" Margin="0,2,0,0"
+                                                           Foreground="{StaticResource TextMuted}"
+                                                           ToolTip="{Binding AddressFull}"/>
+                                                <TextBlock Text="{Binding StatusText}"
+                                                           FontSize="10.5" Margin="0,2,0,0"
+                                                           Foreground="{StaticResource TextDim}"
+                                                           TextWrapping="Wrap"/>
+                                            </StackPanel>
+                                        </Grid>
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </ScrollViewer>
+                </DockPanel>
+            </Border>
         </Grid>
     </Grid>
 </UserControl>

@@ -18,6 +18,7 @@
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              mc:Ignorable="d"
+             AutomationProperties.AutomationId="page.vault"
              Background="{StaticResource BgBase}">
     <Grid Margin="24,20">
         <Grid.RowDefinitions>
@@ -48,27 +49,32 @@
                     <Button Content="🔑  Change password"
                             Command="{Binding ChangeMasterPasswordCommand}"
                             Margin="0,0,8,4"
+                            AutomationProperties.AutomationId="vault.changePassword"
                             ToolTip="Rotate the master passphrase. Re-encrypts every item in one transaction."
                             Visibility="{Binding IsUnlocked, Converter={StaticResource BoolToVis}}"/>
                     <Button Content="🔒  Lock"
                             Command="{Binding LockCommand}"
                             Margin="0,0,8,4"
+                            AutomationProperties.AutomationId="vault.lock"
                             ToolTip="Drop the in-memory master key. Items stay encrypted on disk."
                             Visibility="{Binding IsUnlocked, Converter={StaticResource BoolToVis}}"/>
                     <Button Content="🔓  Unlock"
                             Command="{Binding UnlockCommand}"
                             Margin="0,0,8,4"
                             Style="{StaticResource ButtonPrimary}"
+                            AutomationProperties.AutomationId="vault.unlock"
                             Visibility="{Binding IsUnlocked, Converter={StaticResource InverseBoolToVis}}"/>
                     <Button Content="📥  Bulk import"
                             Command="{Binding BulkImportCommand}"
                             Margin="0,0,8,4"
+                            AutomationProperties.AutomationId="vault.bulkImport"
                             ToolTip="Paste CSV / load a file / fetch a Google Sheet to create many credentials at once. Auto-binds rows to profiles by name."
                             Visibility="{Binding IsUnlocked, Converter={StaticResource BoolToVis}}"/>
                     <Button Content="+  Add item"
                             Command="{Binding AddCommand}"
                             Style="{StaticResource ButtonPrimary}"
                             MinWidth="120" Margin="0,0,0,4"
+                            AutomationProperties.AutomationId="vault.add"
                             Visibility="{Binding IsUnlocked, Converter={StaticResource BoolToVis}}"/>
                 </WrapPanel>
             </Grid>
@@ -139,6 +145,7 @@
                         Command="{Binding UnlockCommand}"
                         Style="{StaticResource ButtonPrimary}"
                         HorizontalAlignment="Center"
+                        AutomationProperties.AutomationId="vault.unlock.cta"
                         MinWidth="180"/>
             </StackPanel>
         </Border>

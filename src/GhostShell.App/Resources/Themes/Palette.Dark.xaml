@@ -19,36 +19,37 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
 
     <!-- ─── Surfaces ─── -->
-    <Color x:Key="ColorBgBase">#FF0A0A0B</Color>            <!-- near-black canvas -->
-    <Color x:Key="ColorBgRaised">#FF1F1F22</Color>          <!-- cards LIFTED — big delta -->
-    <Color x:Key="ColorBgDeep">#FF050507</Color>            <!-- input wells, near pitch -->
-    <Color x:Key="ColorBgSidebar">#FF131316</Color>         <!-- between Base and Raised -->
+    <!-- Phase 58: retheme to testhide.com tokens (cool blue-black). -->
+    <Color x:Key="ColorBgBase">#FF0A0C12</Color>            <!-- testhide bg -->
+    <Color x:Key="ColorBgRaised">#FF161A26</Color>          <!-- cards (panel) -->
+    <Color x:Key="ColorBgDeep">#FF0F1219</Color>            <!-- input wells (bg-2) -->
+    <Color x:Key="ColorBgSidebar">#FF0C0F17</Color>         <!-- between base and panel -->
     <Color x:Key="ColorBgHover">#1FFFFFFF</Color>           <!-- 12% white overlay -->
     <Color x:Key="ColorBgActive">#33FFFFFF</Color>          <!-- 20% white overlay -->
 
     <!-- ─── Text ─── -->
-    <Color x:Key="ColorText">#FFFAFAFA</Color>              <!-- bright off-white -->
-    <Color x:Key="ColorTextMuted">#FFA0A0AB</Color>         <!-- neutral muted -->
-    <Color x:Key="ColorTextDim">#FF606069</Color>           <!-- neutral dim -->
+    <Color x:Key="ColorText">#FFE8EEF8</Color>              <!-- testhide text -->
+    <Color x:Key="ColorTextMuted">#FF9AA8C0</Color>         <!-- testhide muted -->
+    <Color x:Key="ColorTextDim">#FF6F7C95</Color>           <!-- dim blue-gray -->
 
     <!-- ─── Borders ─── -->
-    <Color x:Key="ColorBorder">#FF2A2A2F</Color>            <!-- crisp neutral divider -->
-    <Color x:Key="ColorBorderStrong">#FF3F3F46</Color>      <!-- emphasised on hover -->
+    <Color x:Key="ColorBorder">#FF1F2432</Color>            <!-- testhide border -->
+    <Color x:Key="ColorBorderStrong">#FF2A3142</Color>      <!-- testhide border-2 -->
 
     <!-- ─── Accent ─── -->
-    <Color x:Key="ColorAccent">#FF3B82F6</Color>            <!-- tailwind blue-500 -->
-    <Color x:Key="ColorAccentDim">#FF2563EB</Color>         <!-- blue-600 hover-darker -->
-    <Color x:Key="ColorAccentSoft">#263B82F6</Color>        <!-- 15% accent -->
+    <Color x:Key="ColorAccent">#FFF97316</Color>            <!-- testhide accent (orange) -->
+    <Color x:Key="ColorAccentDim">#FFEA6C0A</Color>         <!-- testhide accent-h -->
+    <Color x:Key="ColorAccentSoft">#26F97316</Color>        <!-- 15% accent -->
 
     <!-- ─── Semantic + Soft companions ─── -->
-    <Color x:Key="ColorOk">#FF22C55E</Color>                <!-- green-500 -->
-    <Color x:Key="ColorOkSoft">#1F22C55E</Color>            <!-- 12% green -->
-    <Color x:Key="ColorWarn">#FFF59E0B</Color>              <!-- amber-500 -->
-    <Color x:Key="ColorWarnSoft">#1FF59E0B</Color>
-    <Color x:Key="ColorErr">#FFEF4444</Color>               <!-- red-500 -->
-    <Color x:Key="ColorErrSoft">#1FEF4444</Color>
-    <Color x:Key="ColorInfo">#FF38BDF8</Color>              <!-- sky-400 -->
-    <Color x:Key="ColorInfoSoft">#1F38BDF8</Color>
+    <Color x:Key="ColorOk">#FF5DD08F</Color>                <!-- testhide green -->
+    <Color x:Key="ColorOkSoft">#1F5DD08F</Color>            <!-- 12% green -->
+    <Color x:Key="ColorWarn">#FFFBBF24</Color>              <!-- amber-400 (distinct from accent) -->
+    <Color x:Key="ColorWarnSoft">#1FFBBF24</Color>
+    <Color x:Key="ColorErr">#FFEF5B73</Color>               <!-- testhide red -->
+    <Color x:Key="ColorErrSoft">#1FEF5B73</Color>
+    <Color x:Key="ColorInfo">#FF6FB0FF</Color>              <!-- testhide blue -->
+    <Color x:Key="ColorInfoSoft">#1F6FB0FF</Color>
 
     <!-- ─── Brushes (surface/text/border/accent/semantic) ─── -->
     <SolidColorBrush x:Key="BgBase"          Color="{StaticResource ColorBgBase}"/>
@@ -79,15 +80,15 @@
     <SolidColorBrush x:Key="InfoSoftBrush"   Color="{StaticResource ColorInfoSoft}"/>
 
     <!-- ─── Per-page sidebar icon hues (Tailwind v4 400 weights) ─── -->
-    <Color x:Key="ColorHueBlue">#FF60A5FA</Color>      <!-- blue-400  -->
-    <Color x:Key="ColorHueGreen">#FF34D399</Color>     <!-- green-400 -->
-    <Color x:Key="ColorHueOrange">#FFFB923C</Color>    <!-- orange-400-->
-    <Color x:Key="ColorHueTeal">#FF2DD4BF</Color>      <!-- teal-400  -->
-    <Color x:Key="ColorHueViolet">#FFA78BFA</Color>    <!-- violet-400-->
-    <Color x:Key="ColorHuePink">#FFF472B6</Color>      <!-- pink-400  -->
-    <Color x:Key="ColorHueAmber">#FFFBBF24</Color>     <!-- amber-400 -->
-    <Color x:Key="ColorHueIndigo">#FF818CF8</Color>    <!-- indigo-400-->
-    <Color x:Key="ColorHueSlate">#FF94A3B8</Color>     <!-- slate-400 -->
+    <Color x:Key="ColorHueBlue">#FF6FB0FF</Color>      <!-- testhide blue -->
+    <Color x:Key="ColorHueGreen">#FF5DD08F</Color>     <!-- testhide green -->
+    <Color x:Key="ColorHueOrange">#FFF97316</Color>    <!-- testhide accent -->
+    <Color x:Key="ColorHueTeal">#FF7FB1AC</Color>      <!-- testhide teal-2 -->
+    <Color x:Key="ColorHueViolet">#FFB58CFF</Color>    <!-- testhide violet -->
+    <Color x:Key="ColorHuePink">#FFFF7BB5</Color>      <!-- testhide pink -->
+    <Color x:Key="ColorHueAmber">#FFFDBA74</Color>     <!-- testhide accent-2 -->
+    <Color x:Key="ColorHueIndigo">#FF818CF8</Color>    <!-- indigo -->
+    <Color x:Key="ColorHueSlate">#FF9AA8C0</Color>     <!-- testhide muted -->
 
     <SolidColorBrush x:Key="HueBlue"   Color="{StaticResource ColorHueBlue}"/>
     <SolidColorBrush x:Key="HueGreen"  Color="{StaticResource ColorHueGreen}"/>

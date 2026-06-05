@@ -1,0 +1,61 @@
+<!--
+  SPDX-License-Identifier: MIT
+  Copyright (c) 2026 Mykola Kovhanko <thuesdays@gmail.com>
+
+  Phase 57 — wallet selector-override editor. Lets the operator add CSS
+  selectors that are tried FIRST for a wallet's flow steps, so a popup-UI
+  change is fixed in the field (JSON edit) instead of a recompile.
+-->
+<Window x:Class="GhostShell.App.Dialogs.WalletSelectorEditorDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Wallet selector overrides"
+        Width="660" Height="600"
+        WindowStartupLocation="CenterOwner"
+        Background="{DynamicResource BgBase}"
+        ShowInTaskbar="False">
+    <DockPanel Margin="22">
+        <TextBlock DockPanel.Dock="Top" Text="🪙  Wallet selector overrides"
+                   FontSize="16" FontWeight="Bold"
+                   Foreground="{DynamicResource Text}"/>
+        <TextBlock DockPanel.Dock="Top" TextWrapping="Wrap" Margin="0,6,0,12"
+                   Foreground="{DynamicResource TextDim}" FontSize="11.5"
+                   Text="Extension popup DOMs change often. Add selectors here and they are tried FIRST for the named flow's steps (unlock / connect / confirm / approve) — no recompile. Irrelevant selectors simply never match, so order is safe. Leave empty to use the shipped defaults."/>
+
+        <!-- Buttons (bottom) -->
+        <Grid DockPanel.Dock="Bottom" Margin="0,12,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <Button Grid.Column="0" Content="Insert example" Padding="10,6"
+                    AutomationProperties.AutomationId="walletSelectors.example"
+                    Click="InsertExample_Click"/>
+            <Button Grid.Column="2" Content="Reset (use defaults)" Padding="10,6" Margin="0,0,8,0"
+                    AutomationProperties.AutomationId="walletSelectors.reset"
+                    Click="Reset_Click"/>
+            <Button Grid.Column="3" Content="Save" Padding="14,6"
+                    Style="{StaticResource ButtonPrimary}"
+                    AutomationProperties.AutomationId="walletSelectors.save" Click="Save_Click"/>
+        </Grid>
+
+        <TextBlock DockPanel.Dock="Bottom" x:Name="StatusText" Margin="0,8,0,0"
+                   FontSize="11" Foreground="{DynamicResource WarnBrush}" TextWrapping="Wrap"/>
+
+        <!-- JSON editor -->
+        <Border BorderBrush="{DynamicResource Border}" BorderThickness="1" CornerRadius="4">
+            <TextBox x:Name="JsonBox"
+                     AutomationProperties.AutomationId="walletSelectors.json"
+                     AcceptsReturn="True" AcceptsTab="True"
+                     FontFamily="{DynamicResource FontMono}" FontSize="12.5"
+                     VerticalScrollBarVisibility="Auto"
+                     HorizontalScrollBarVisibility="Auto"
+                     Background="{DynamicResource BgDeep}"
+                     Foreground="{DynamicResource Text}"
+                     Padding="10"
+                     TextWrapping="NoWrap"/>
+        </Border>
+    </DockPanel>
+</Window>

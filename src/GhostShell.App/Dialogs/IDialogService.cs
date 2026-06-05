@@ -96,6 +96,12 @@ public interface IDialogService
     /// Returns the chosen options or null if cancelled.
     /// </summary>
     Task<BulkStartOptions?> ShowBulkStartOptionsAsync(int profileCount);
+
+    /// <summary>
+    /// Phase 57 — open the wallet selector-override editor (crypto farms).
+    /// Returns true when the operator saved changes.
+    /// </summary>
+    Task<bool> ShowWalletSelectorEditorAsync();
 }
 
 /// <summary>

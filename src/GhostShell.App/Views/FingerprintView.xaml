@@ -11,6 +11,7 @@
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              mc:Ignorable="d"
+             AutomationProperties.AutomationId="page.fingerprint"
              Background="Transparent">
     <ScrollViewer VerticalScrollBarVisibility="Auto"
                   HorizontalScrollBarVisibility="Disabled">
@@ -239,49 +240,45 @@
                          InputBindings on the Border. MaxHeight + ScrollViewer keeps the
                          whole panel bounded on tall template libraries. -->
                     <ItemsControl ItemsSource="{Binding Templates}"
-                                  Margin="0,4,0,12"
-                                  MaxHeight="280">
+                                  Margin="6,4,6,12"
+                                  MaxHeight="420">
                         <ItemsControl.Template>
                             <ControlTemplate TargetType="ItemsControl">
-                                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                                <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                              Padding="0,0,4,0">
                                     <ItemsPresenter/>
                                 </ScrollViewer>
                             </ControlTemplate>
                         </ItemsControl.Template>
                         <ItemsControl.ItemsPanel>
                             <ItemsPanelTemplate>
-                                <UniformGrid Columns="3"/>
+                                <UniformGrid Columns="2"/>
                             </ItemsPanelTemplate>
                         </ItemsControl.ItemsPanel>
                         <ItemsControl.ItemTemplate>
                             <DataTemplate>
-                                <!-- Phase 52 — card template for device template. Border with
-                                     left-edge accent stripe (BorderThickness 3,0,0,0) colored per
-                                     FormFactor: laptop→blue, desktop→teal, mobile→violet.
-                                     Clickable via MouseBinding instead of Button so the card
-                                     appearance stays a simple bordered box. Wire the existing
-                                     SelectTemplateCommand via InputBindings. -->
-                                <Border Padding="10,7"
-                                        Margin="3"
-                                        CornerRadius="3"
+                                <!-- Phase 56 — roomier, more readable device-template card.
+                                     A full bordered surface with a coloured left accent stripe
+                                     (laptop→blue, desktop→teal, mobile→violet), a form-factor
+                                     glyph, a large friendly title, a mono template-id subtitle,
+                                     and a row of labelled spec pills (CPU / RAM / GPU / screen)
+                                     instead of one dense trimmed line. Hover lifts the surface.
+                                     Clickable via MouseBinding wired to SelectTemplateCommand. -->
+                                <Border Padding="14,12"
+                                        Margin="5"
+                                        CornerRadius="8"
                                         Background="{StaticResource BgRaised}"
-                                        BorderThickness="3,0,0,0"
+                                        BorderThickness="1"
                                         Cursor="Hand">
-                                    <!-- DataTriggers on Border.Style to color the left stripe
-                                         per FormFactor. Default is TextDim; overridden by matches. -->
+                                    <!-- Surface border: subtle by default, brightens on hover. -->
                                     <Border.Style>
                                         <Style TargetType="Border">
-                                            <Setter Property="BorderBrush" Value="{StaticResource TextDim}"/>
+                                            <Setter Property="BorderBrush" Value="{StaticResource Border}"/>
                                             <Style.Triggers>
-                                                <DataTrigger Binding="{Binding FormFactor}" Value="laptop">
-                                                    <Setter Property="BorderBrush" Value="{StaticResource HueBlue}"/>
-                                                </DataTrigger>
-                                                <DataTrigger Binding="{Binding FormFactor}" Value="desktop">
-                                                    <Setter Property="BorderBrush" Value="{StaticResource HueTeal}"/>
-                                                </DataTrigger>
-                                                <DataTrigger Binding="{Binding FormFactor}" Value="mobile">
-                                                    <Setter Property="BorderBrush" Value="{StaticResource HueViolet}"/>
-                                                </DataTrigger>
+                                                <Trigger Property="IsMouseOver" Value="True">
+                                                    <Setter Property="Background" Value="{StaticResource BgHover}"/>
+                                                    <Setter Property="BorderBrush" Value="{StaticResource BorderStrong}"/>
+                                                </Trigger>
                                             </Style.Triggers>
                                         </Style>
                                     </Border.Style>
@@ -291,104 +288,167 @@
                                                                 RelativeSource={RelativeSource AncestorType=ItemsControl}}"
                                                       CommandParameter="{Binding}"/>
                                     </Border.InputBindings>
-                                    <StackPanel>
-                                        <!-- Top row: template ID (monospace, right-aligned) and
-                                             form-factor chip (small rounded border). -->
-                                        <Grid Margin="0,0,0,4">
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="*"/>
-                                                <ColumnDefinition Width="Auto"/>
-                                            </Grid.ColumnDefinitions>
-                                            <TextBlock Grid.Column="0"
-                                                       Text="{Binding Id}"
-                                                       FontFamily="{StaticResource FontMono}"
-                                                       FontSize="10"
-                                                       FontWeight="SemiBold"
-                                                       Foreground="{StaticResource Text}"
-                                                       TextTrimming="CharacterEllipsis"/>
-                                            <!-- Form-factor chip: small rounded border with
-                                                 text showing "laptop"/"desktop"/"phone". Color-coded
-                                                 to match the stripe. -->
-                                            <Border Grid.Column="1"
-                                                    Padding="5,2"
-                                                    Margin="4,0,0,0"
-                                                    CornerRadius="2"
-                                                    Background="{StaticResource BgDeep}">
-                                                <TextBlock Text="{Binding FormFactor}"
-                                                           FontSize="8"
-                                                           FontWeight="SemiBold"
-                                                           Foreground="{StaticResource TextMuted}">
-                                                    <TextBlock.Style>
-                                                        <Style TargetType="TextBlock">
-                                                            <Style.Triggers>
-                                                                <DataTrigger Binding="{Binding FormFactor}" Value="laptop">
-                                                                    <Setter Property="Foreground" Value="{StaticResource HueBlue}"/>
-                                                                </DataTrigger>
-                                                                <DataTrigger Binding="{Binding FormFactor}" Value="desktop">
-                                                                    <Setter Property="Foreground" Value="{StaticResource HueTeal}"/>
-                                                                </DataTrigger>
-                                                                <DataTrigger Binding="{Binding FormFactor}" Value="mobile">
-                                                                    <Setter Property="Foreground" Value="{StaticResource HueViolet}"/>
-                                                                </DataTrigger>
-                                                            </Style.Triggers>
-                                                        </Style>
-                                                    </TextBlock.Style>
-                                                </TextBlock>
-                                            </Border>
-                                        </Grid>
-                                        <!-- Middle row: specs (single-line, ellipsis-trimmed,
-                                             muted text). Content comes from Label binding. -->
-                                        <TextBlock Text="{Binding Label}"
-                                                   FontSize="10"
-                                                   Foreground="{StaticResource TextMuted}"
-                                                   TextTrimming="CharacterEllipsis"
-                                                   Margin="0,0,0,4"/>
-                                        <!-- Bottom-right: weight percent badge with dynamic
-                                             colors based on WeightTier. WPF DataTrigger only
-                                             does EXACT-equality match (no >=, <), so we bind to
-                                             a pre-computed tier string ("top"/"med"/"low")
-                                             instead of trying numeric ranges directly.
-                                             Phase 54 fix: previous Value="5" / Value="4" only
-                                             matched the literal floats 5.0 and 4.0 — almost
-                                             never true → no card was ever amber/teal. -->
-                                        <Border CornerRadius="2"
-                                                Padding="6,2"
-                                                HorizontalAlignment="Right"
-                                                BorderThickness="0">
+
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="*"/>
+                                        </Grid.ColumnDefinitions>
+
+                                        <!-- Left accent stripe, coloured per form factor. -->
+                                        <Border Grid.Column="0"
+                                                Width="4"
+                                                CornerRadius="2"
+                                                Margin="0,1,13,1">
                                             <Border.Style>
                                                 <Style TargetType="Border">
-                                                    <Setter Property="Background" Value="{StaticResource BgDeep}"/>
+                                                    <Setter Property="Background" Value="{StaticResource TextDim}"/>
                                                     <Style.Triggers>
-                                                        <DataTrigger Binding="{Binding WeightTier}" Value="top">
-                                                            <Setter Property="Background" Value="{StaticResource HueAmber}"/>
+                                                        <DataTrigger Binding="{Binding FormFactor}" Value="laptop">
+                                                            <Setter Property="Background" Value="{StaticResource HueBlue}"/>
                                                         </DataTrigger>
-                                                        <DataTrigger Binding="{Binding WeightTier}" Value="med">
+                                                        <DataTrigger Binding="{Binding FormFactor}" Value="desktop">
                                                             <Setter Property="Background" Value="{StaticResource HueTeal}"/>
+                                                        </DataTrigger>
+                                                        <DataTrigger Binding="{Binding FormFactor}" Value="mobile">
+                                                            <Setter Property="Background" Value="{StaticResource HueViolet}"/>
                                                         </DataTrigger>
                                                     </Style.Triggers>
                                                 </Style>
                                             </Border.Style>
-                                            <TextBlock Text="{Binding WeightPct}"
+                                        </Border>
+
+                                        <StackPanel Grid.Column="1">
+                                            <!-- Header: glyph + title (left), weight badge (right). -->
+                                            <Grid>
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                </Grid.ColumnDefinitions>
+                                                <StackPanel Grid.Column="0"
+                                                            Orientation="Horizontal"
+                                                            VerticalAlignment="Center">
+                                                    <TextBlock Text="{Binding FormFactorGlyph}"
+                                                               FontSize="16"
+                                                               Margin="0,0,8,0"
+                                                               VerticalAlignment="Center"/>
+                                                    <TextBlock Text="{Binding DisplayName}"
+                                                               FontSize="15"
+                                                               FontWeight="SemiBold"
+                                                               Foreground="{StaticResource Text}"
+                                                               TextTrimming="CharacterEllipsis"
+                                                               VerticalAlignment="Center"
+                                                               ToolTip="{Binding Label}"/>
+                                                </StackPanel>
+
+                                                <!-- Weight badge: amber (top) / teal (med) / dim (low).
+                                                     Tier is pre-computed in the VM because WPF
+                                                     DataTriggers only do exact-equality matching. -->
+                                                <Border Grid.Column="1"
+                                                        CornerRadius="5"
+                                                        Padding="8,3"
+                                                        VerticalAlignment="Center"
+                                                        Margin="8,0,0,0">
+                                                    <Border.Style>
+                                                        <Style TargetType="Border">
+                                                            <Setter Property="Background" Value="{StaticResource BgDeep}"/>
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding WeightTier}" Value="top">
+                                                                    <Setter Property="Background" Value="{StaticResource HueAmber}"/>
+                                                                </DataTrigger>
+                                                                <DataTrigger Binding="{Binding WeightTier}" Value="med">
+                                                                    <Setter Property="Background" Value="{StaticResource HueTeal}"/>
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </Border.Style>
+                                                    <TextBlock Text="{Binding WeightPct}"
+                                                               FontFamily="{StaticResource FontMono}"
+                                                               FontSize="12"
+                                                               FontWeight="SemiBold"
+                                                               TextAlignment="Right">
+                                                        <TextBlock.Style>
+                                                            <Style TargetType="TextBlock">
+                                                                <Setter Property="Foreground" Value="{StaticResource TextDim}"/>
+                                                                <Style.Triggers>
+                                                                    <DataTrigger Binding="{Binding WeightTier}" Value="top">
+                                                                        <Setter Property="Foreground" Value="Black"/>
+                                                                    </DataTrigger>
+                                                                    <DataTrigger Binding="{Binding WeightTier}" Value="med">
+                                                                        <Setter Property="Foreground" Value="Black"/>
+                                                                    </DataTrigger>
+                                                                </Style.Triggers>
+                                                            </Style>
+                                                        </TextBlock.Style>
+                                                    </TextBlock>
+                                                </Border>
+                                            </Grid>
+
+                                            <!-- Mono template-id subtitle (hidden when it equals the title). -->
+                                            <TextBlock Text="{Binding IdSubtitle}"
+                                                       Visibility="{Binding IdSubtitle, Converter={StaticResource NonEmptyToVisibleConverter}}"
                                                        FontFamily="{StaticResource FontMono}"
                                                        FontSize="11"
-                                                       FontWeight="SemiBold"
-                                                       TextAlignment="Right">
-                                                <TextBlock.Style>
-                                                    <Style TargetType="TextBlock">
-                                                        <Setter Property="Foreground" Value="{StaticResource TextDim}"/>
-                                                        <Style.Triggers>
-                                                            <DataTrigger Binding="{Binding WeightTier}" Value="top">
-                                                                <Setter Property="Foreground" Value="White"/>
-                                                            </DataTrigger>
-                                                            <DataTrigger Binding="{Binding WeightTier}" Value="med">
-                                                                <Setter Property="Foreground" Value="White"/>
-                                                            </DataTrigger>
-                                                        </Style.Triggers>
-                                                    </Style>
-                                                </TextBlock.Style>
-                                            </TextBlock>
-                                        </Border>
-                                    </StackPanel>
+                                                       Foreground="{StaticResource TextDim}"
+                                                       Margin="24,3,0,0"
+                                                       TextTrimming="CharacterEllipsis"/>
+
+                                            <!-- Spec pills: CPU / RAM / GPU / screen. Each pill
+                                                 collapses when its value is empty. -->
+                                            <WrapPanel Orientation="Horizontal" Margin="24,9,0,0">
+                                                <Border Background="{StaticResource BgDeep}" CornerRadius="5"
+                                                        Padding="8,4" Margin="0,0,7,7"
+                                                        Visibility="{Binding Cpu, Converter={StaticResource NonEmptyToVisibleConverter}}">
+                                                    <StackPanel Orientation="Horizontal">
+                                                        <TextBlock Text="CPU" FontSize="10" FontWeight="SemiBold"
+                                                                   Foreground="{StaticResource TextDim}"
+                                                                   VerticalAlignment="Center" Margin="0,0,6,0"/>
+                                                        <TextBlock Text="{Binding Cpu}" FontSize="12.5"
+                                                                   Foreground="{StaticResource Text}"
+                                                                   VerticalAlignment="Center"/>
+                                                    </StackPanel>
+                                                </Border>
+                                                <Border Background="{StaticResource BgDeep}" CornerRadius="5"
+                                                        Padding="8,4" Margin="0,0,7,7"
+                                                        Visibility="{Binding Ram, Converter={StaticResource NonEmptyToVisibleConverter}}">
+                                                    <StackPanel Orientation="Horizontal">
+                                                        <TextBlock Text="RAM" FontSize="10" FontWeight="SemiBold"
+                                                                   Foreground="{StaticResource TextDim}"
+                                                                   VerticalAlignment="Center" Margin="0,0,6,0"/>
+                                                        <TextBlock Text="{Binding Ram}" FontSize="12.5"
+                                                                   Foreground="{StaticResource Text}"
+                                                                   VerticalAlignment="Center"/>
+                                                    </StackPanel>
+                                                </Border>
+                                                <Border Background="{StaticResource BgDeep}" CornerRadius="5"
+                                                        Padding="8,4" Margin="0,0,7,7"
+                                                        Visibility="{Binding Gpu, Converter={StaticResource NonEmptyToVisibleConverter}}">
+                                                    <StackPanel Orientation="Horizontal">
+                                                        <TextBlock Text="GPU" FontSize="10" FontWeight="SemiBold"
+                                                                   Foreground="{StaticResource TextDim}"
+                                                                   VerticalAlignment="Center" Margin="0,0,6,0"/>
+                                                        <TextBlock Text="{Binding Gpu}" FontSize="12.5"
+                                                                   Foreground="{StaticResource TextMuted}"
+                                                                   VerticalAlignment="Center"
+                                                                   TextTrimming="CharacterEllipsis"
+                                                                   MaxWidth="220"/>
+                                                    </StackPanel>
+                                                </Border>
+                                                <Border Background="{StaticResource BgDeep}" CornerRadius="5"
+                                                        Padding="8,4" Margin="0,0,7,7"
+                                                        Visibility="{Binding Screen, Converter={StaticResource NonEmptyToVisibleConverter}}">
+                                                    <StackPanel Orientation="Horizontal">
+                                                        <TextBlock Text="🖥" FontSize="11"
+                                                                   VerticalAlignment="Center" Margin="0,0,6,0"/>
+                                                        <TextBlock Text="{Binding Screen}" FontSize="12.5"
+                                                                   FontFamily="{StaticResource FontMono}"
+                                                                   Foreground="{StaticResource Text}"
+                                                                   VerticalAlignment="Center"/>
+                                                    </StackPanel>
+                                                </Border>
+                                            </WrapPanel>
+                                        </StackPanel>
+                                    </Grid>
                                 </Border>
                             </DataTemplate>
                         </ItemsControl.ItemTemplate>

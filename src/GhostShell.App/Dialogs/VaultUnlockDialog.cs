@@ -106,6 +106,7 @@ public sealed class VaultUnlockDialog : Window
         };
         _pwField.PasswordChanged += (_, _) => UpdateStrength();
         _pwField.KeyDown += OnPwKeyDown;
+        System.Windows.Automation.AutomationProperties.SetAutomationId(_pwField, "vault.passphrase");
         body.Children.Add(_pwField);
 
         if (_initMode)
@@ -136,6 +137,7 @@ public sealed class VaultUnlockDialog : Window
                 Margin = new Thickness(0, 0, 0, 14),
             };
             _pwConfirm.KeyDown += OnPwKeyDown;
+            System.Windows.Automation.AutomationProperties.SetAutomationId(_pwConfirm, "vault.passphrase.confirm");
             body.Children.Add(_pwConfirm);
 
             var warn = new TextBlock
@@ -176,6 +178,7 @@ public sealed class VaultUnlockDialog : Window
         };
         var cancel = new Button { Content = "Cancel", MinWidth = 84, Margin = new Thickness(0, 0, 8, 0), IsCancel = true };
         cancel.Click += (_, _) => { DialogResult = false; Close(); };
+        System.Windows.Automation.AutomationProperties.SetAutomationId(cancel, "vault.unlock.cancel");
         _okBtn = new Button
         {
             Content = _initMode ? "Initialize" : "Unlock",
@@ -183,6 +186,7 @@ public sealed class VaultUnlockDialog : Window
             IsDefault = true,
         };
         _okBtn.SetResourceReference(StyleProperty, "ButtonPrimary");
+        System.Windows.Automation.AutomationProperties.SetAutomationId(_okBtn, "vault.unlock.submit");
         _okBtn.Click += async (_, _) => await SubmitAsync();
         btns.Children.Add(cancel);
         btns.Children.Add(_okBtn);

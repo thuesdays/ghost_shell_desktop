@@ -58,9 +58,9 @@
     <Color x:Key="ColorBorderStrong">#FF64748B</Color>      <!-- slate-500, emphasised -->
 
     <!-- ─── Accent (blue-600 for legibility on white) ─── -->
-    <Color x:Key="ColorAccent">#FF2563EB</Color>            <!-- tailwind blue-600 -->
-    <Color x:Key="ColorAccentDim">#FF1D4ED8</Color>         <!-- blue-700 hover-darker -->
-    <Color x:Key="ColorAccentSoft">#262563EB</Color>        <!-- 15% accent -->
+    <Color x:Key="ColorAccent">#FFEA6C0A</Color>            <!-- testhide orange (darker for light bg) -->
+    <Color x:Key="ColorAccentDim">#FFC25608</Color>         <!-- hover-darker -->
+    <Color x:Key="ColorAccentSoft">#26F97316</Color>        <!-- 15% accent -->
 
     <!-- ─── Semantic + Soft companions ───
          Use 600 weights so coloured text reads cleanly on white;
