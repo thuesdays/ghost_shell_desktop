@@ -27,4 +27,18 @@ public interface ICaptchaSolver
     Task<bool> SolveAsync(
         IBrowserSession session, string kind,
         TimeSpan timeout, CancellationToken ct = default);
+
+    /// <summary>
+    /// True for an unattended API solver that is actually configured (has a
+    /// key). False for the interactive manual solver and for API solvers
+    /// missing a key. The router tries automated solvers first, then falls
+    /// back to manual. Default false so existing implementors keep behaviour.
+    /// </summary>
+    bool IsAutomated => false;
+
+    /// <summary>Whether this solver handles a given captcha kind
+    /// ("recaptcha", "recaptcha_v3", "hcaptcha", "turnstile", "cloudflare",
+    /// "sorry", "unknown"). Default true — the manual solver handles anything
+    /// by waiting for the page to clear.</summary>
+    bool CanHandle(string kind) => true;
 }

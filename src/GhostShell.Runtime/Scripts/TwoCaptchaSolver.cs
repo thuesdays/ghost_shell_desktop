@@ -48,6 +48,11 @@ public sealed class TwoCaptchaSolver : ICaptchaSolver
 
     public string ProviderName => "2captcha";
 
+    // Feature #3 — capability hints for CaptchaSolverRouter. Configured only
+    // when a key is present; this v1 wire format handles reCAPTCHA v2 + hCaptcha.
+    public bool IsAutomated => !string.IsNullOrWhiteSpace(_cfg.ApiKey);
+    public bool CanHandle(string kind) => kind is "recaptcha" or "hcaptcha";
+
     public async Task<string?> DetectAsync(IBrowserSession session, CancellationToken ct = default)
     {
         // Reuse the legwork in ManualCaptchaSolver — same DOM patterns.

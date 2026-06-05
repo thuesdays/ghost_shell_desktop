@@ -1855,8 +1855,13 @@ public sealed class ScriptRunner : IScriptRunner
                     _log.LogWarning("solve_captcha invoked but no ICaptchaSolver registered");
                     break;
                 }
-                var kind = await _captcha.DetectAsync(s, ct);
-                if (kind is null)
+                // Feature #3: honour an explicit `kind` param (recaptcha,
+                // recaptcha_v3, hcaptcha, turnstile) when the author knows it;
+                // otherwise auto-detect via the shared detector.
+                var kind = ParamString(step, "kind");
+                if (string.IsNullOrWhiteSpace(kind))
+                    kind = await _captcha.DetectAsync(s, ct);
+                if (string.IsNullOrWhiteSpace(kind))
                 {
                     _log.LogDebug("solve_captcha: no captcha detected");
                     break;

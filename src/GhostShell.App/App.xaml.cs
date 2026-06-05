@@ -346,15 +346,35 @@ public partial class App : Application
                 s.AddHostedService(sp =>
                     sp.GetRequiredService<RunQueueService>());
 
-                // ─── Phase 13F: Captcha auto-solve (manual default) ───
-                // Phase 14: 2captcha integration available — set
-                // TwoCaptchaConfig.ApiKey via Settings to switch.
-                // For now register the manual solver as the default;
-                // users with a paid API key can re-bind in their own
-                // composition root.
-                s.AddSingleton<ICaptchaSolver, GhostShell.Runtime.Scripts.ManualCaptchaSolver>();
-                s.AddSingleton(new GhostShell.Runtime.Scripts.TwoCaptchaConfig());
+                // ─── Captcha solving — Feature #3 multi-provider router ───
+                // The runner talks to CaptchaSolverRouter (ICaptchaSolver),
+                // which detects the kind and routes: CapSolver → 2captcha →
+                // manual. Each API solver activates only when its key is set
+                // (GHOSTSHELL_CAPSOLVER_KEY / GHOSTSHELL_2CAPTCHA_KEY env, or
+                // Settings); otherwise the router falls back to manual.
+                s.AddSingleton<GhostShell.Runtime.Scripts.ManualCaptchaSolver>();
+                s.AddSingleton(new GhostShell.Runtime.Scripts.TwoCaptchaConfig
+                {
+                    ApiKey = Environment.GetEnvironmentVariable("GHOSTSHELL_2CAPTCHA_KEY") ?? "",
+                });
+                s.AddSingleton(new GhostShell.Runtime.Scripts.CapSolverConfig
+                {
+                    ApiKey = Environment.GetEnvironmentVariable("GHOSTSHELL_CAPSOLVER_KEY") ?? "",
+                });
                 s.AddHttpClient<GhostShell.Runtime.Scripts.TwoCaptchaSolver>();
+                s.AddHttpClient<GhostShell.Runtime.Scripts.CapSolverSolver>();
+                // Build the router via a factory so the automated-provider list
+                // is assembled from the CONCRETE provider types — never from the
+                // ICaptchaSolver registration (which is the router itself, i.e.
+                // a circular dependency). Preference: CapSolver → 2captcha.
+                s.AddSingleton<ICaptchaSolver>(sp => new GhostShell.Runtime.Scripts.CaptchaSolverRouter(
+                    sp.GetRequiredService<GhostShell.Runtime.Scripts.ManualCaptchaSolver>(),
+                    new ICaptchaSolver[]
+                    {
+                        sp.GetRequiredService<GhostShell.Runtime.Scripts.CapSolverSolver>(),
+                        sp.GetRequiredService<GhostShell.Runtime.Scripts.TwoCaptchaSolver>(),
+                    },
+                    sp.GetRequiredService<ILoggerFactory>().CreateLogger<GhostShell.Runtime.Scripts.CaptchaSolverRouter>()));
 
                 // Navigation + dialogs
                 s.AddSingleton<INavigationService, NavigationService>();
