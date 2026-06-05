@@ -1881,6 +1881,90 @@ public sealed class ScriptRunner : IScriptRunner
                 break;
             }
 
+            // ── Feature #7 — reliability + verification DSL ─────────
+
+            // retry: run the body; on any step failure, wait an
+            // exponential-backoff-with-jitter delay and try again, up to
+            // max_attempts. After the last failure the exception propagates
+            // (so abort_on_error still applies). Makes flaky automation (SPA
+            // re-renders, slow SERPs, transient nav errors) self-healing.
+            case "retry":
+            {
+                var maxAttempts = Math.Clamp(ParamInt(step, "max_attempts", 3), 1, 20);
+                var baseMs = Math.Max(0, ParamInt(step, "backoff_ms", 1000));
+                var maxMs  = Math.Max(baseMs, ParamInt(step, "backoff_max_ms", 30000));
+                Exception? last = null;
+                for (var attempt = 1; attempt <= maxAttempts; attempt++)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    try
+                    {
+                        var flow = await ExecuteStepsAsync(step.Body, s, ctx, counters, log, runId, profileName, ct);
+                        last = null;
+                        if (flow != StepFlow.Normal) return flow;
+                        break; // success
+                    }
+                    catch (OperationCanceledException) { throw; }
+                    catch (CaptchaRecoveryAbortException) { throw; } // recovery handles its own retry
+                    catch (Exception ex)
+                    {
+                        last = ex;
+                        if (attempt >= maxAttempts) break;
+                        var delay = RetryPolicy.BackoffMs(attempt, baseMs, maxMs, Random.Shared);
+                        _log.LogInformation(
+                            "retry: attempt {N}/{Max} failed ({Err}); backing off {Ms}ms",
+                            attempt, maxAttempts, ex.Message?.Split('\n').FirstOrDefault(), delay);
+                        await Task.Delay(delay, ct);
+                    }
+                }
+                if (last is not null)
+                    throw new InvalidOperationException(
+                        $"retry: body still failing after {maxAttempts} attempt(s): {last.Message}", last);
+                break;
+            }
+
+            // assert_selector: fail the step unless the selector is present
+            // (optionally within timeout_ms). A verification primitive so a
+            // script can hard-check it reached the expected page state.
+            case "assert_selector":
+            {
+                var sel = ParamString(step, "selector")
+                    ?? throw new InvalidOperationException("assert_selector requires 'selector'");
+                var timeoutMs = Math.Max(0, ParamInt(step, "timeout_ms", 0));
+                var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+                var found = false;
+                var checkJs = $"return !!document.querySelector({JsonSerializer.Serialize(sel)});";
+                do
+                {
+                    ct.ThrowIfCancellationRequested();
+                    if (await s.ExecuteScriptAsync(checkJs, null, ct) is true) { found = true; break; }
+                    if (DateTime.UtcNow >= deadline) break;
+                    await Task.Delay(200, ct);
+                } while (DateTime.UtcNow < deadline);
+                if (!found)
+                    throw new InvalidOperationException(
+                        $"assert_selector failed: '{sel}' not present" +
+                        (timeoutMs > 0 ? $" within {timeoutMs}ms" : ""));
+                break;
+            }
+
+            // assert_text: fail the step unless the page's visible text contains
+            // the expected substring (case-insensitive).
+            case "assert_text":
+            {
+                var needle = InterpolateVars(ParamString(step, "text") ?? "", ctx);
+                if (string.IsNullOrEmpty(needle))
+                    throw new InvalidOperationException("assert_text requires non-empty 'text'");
+                var js = $$"""
+                    return (document.body ? (document.body.innerText || '') : '')
+                      .toLowerCase().indexOf({{JsonSerializer.Serialize(needle.ToLowerInvariant())}}) !== -1;
+                """;
+                var present = await s.ExecuteScriptAsync(js, null, ct) is true;
+                if (!present)
+                    throw new InvalidOperationException($"assert_text failed: page does not contain '{needle}'");
+                break;
+            }
+
             // ── Phase 17 — web-parity additions ────────────────────
 
             case "while_loop":
