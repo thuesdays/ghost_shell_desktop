@@ -309,6 +309,9 @@ public partial class App : Application
                 s.AddSingleton<IChromeImporter, ChromeImporter>();
                 s.AddHostedService<WarmupQualityMonitor>();
                 s.AddHostedService<SnapshotRetentionService>();
+                // Feature #4 — autonomous profile aging (OFF by default; opt in
+                // via GHOSTSHELL_AUTO_WARMUP=1 or warmup.auto_enabled).
+                s.AddHostedService<GhostShell.Runtime.Browser.AutoWarmupService>();
 
                 // ─── Phase 9: Fingerprint orchestration ─────────
                 s.AddSingleton<IFingerprintService, GhostShell.Runtime.Fingerprint.FingerprintService>();

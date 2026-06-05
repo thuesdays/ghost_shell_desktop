@@ -81,6 +81,12 @@ public static class SettingsKeys
     // activates; otherwise scoring is heuristic-only.
     public const string ProxyReputationIpqsKey = "proxy.reputation_ipqs_key";
 
+    // ─── Feature #4 — autonomous profile warm-up / aging ─────────────
+    public const string AutoWarmupEnabled        = "warmup.auto_enabled";       // bool, default false
+    public const string AutoWarmupIntervalMin    = "warmup.auto_interval_min";  // int minutes, default 30
+    public const string AutoWarmupTrustThreshold = "warmup.auto_trust_threshold"; // int 0-100, default 50
+    public const string AutoWarmupPreset         = "warmup.auto_preset";        // preset id
+
     public const string AutoEnrichEnabled    = "browser.auto_enrich_from_host_chrome";
     public const string AutoEnrichMaxDays    = "browser.auto_enrich_max_days";
     public const string AutoEnrichMaxUrls    = "browser.auto_enrich_max_urls";

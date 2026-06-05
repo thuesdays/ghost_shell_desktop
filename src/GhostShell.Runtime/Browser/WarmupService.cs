@@ -51,6 +51,7 @@ public sealed class WarmupService : IWarmupService, IAsyncDisposable
     private readonly IProfileRunner _runner;
     private readonly ISessionService _sessions;
     private readonly IWarmupHistoryService _history;
+    private readonly IProxyService? _proxies;
     private readonly ILogger<WarmupService> _log;
 
     /// <summary>
@@ -76,13 +77,15 @@ public sealed class WarmupService : IWarmupService, IAsyncDisposable
         IProfileRunner runner,
         ISessionService sessions,
         IWarmupHistoryService history,
-        ILogger<WarmupService> log)
+        ILogger<WarmupService> log,
+        IProxyService? proxies = null)
     {
         _launcher = launcher;
         _profiles = profiles;
         _runner   = runner;
         _sessions = sessions;
         _history  = history;
+        _proxies  = proxies;
         _log      = log;
     }
 
@@ -163,7 +166,11 @@ public sealed class WarmupService : IWarmupService, IAsyncDisposable
             // (another file); if/when that's plumbed through it should be
             // preferred here. null = no resolvable country → unfiltered
             // pick, same as the prior behaviour (documented, not silent).
-            var targetCountry = ResolveTargetCountry(profile);
+            // Feature #4: prefer the PROXY exit country for warmup geo (the IP
+            // the sites actually see), falling back to the profile language
+            // region. A US-proxied profile should build US browsing history,
+            // not history dictated by its UI language.
+            var targetCountry = await ResolveTargetCountryAsync(profile, ct);
 
             // Pick sites BEFORE inserting the row so we can record an
             // accurate sites_planned even if pick_sites returns fewer than
@@ -252,6 +259,25 @@ public sealed class WarmupService : IWarmupService, IAsyncDisposable
     /// country can be derived, which leaves <see cref="PresetCatalog.PickSites"/>
     /// unfiltered — the documented fallback, not a silent skip.
     /// </summary>
+    /// <summary>Feature #4: resolve warmup geo, preferring the proxy exit
+    /// country (what sites actually see) over the language region. Falls back
+    /// to the language-derived country, then null (unfiltered).</summary>
+    private async Task<string?> ResolveTargetCountryAsync(Profile profile, CancellationToken ct)
+    {
+        if (_proxies is not null && !string.IsNullOrWhiteSpace(profile.ProxySlug))
+        {
+            try
+            {
+                var proxy = await _proxies.GetAsync(profile.ProxySlug, ct);
+                var cc = proxy?.CountryCode?.Trim();
+                if (!string.IsNullOrEmpty(cc) && cc.Length == 2)
+                    return cc.ToUpperInvariant();
+            }
+            catch { /* fall back to language */ }
+        }
+        return ResolveTargetCountry(profile);
+    }
+
     private static string? ResolveTargetCountry(Profile profile)
     {
         var lang = profile.Language;
