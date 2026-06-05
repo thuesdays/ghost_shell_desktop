@@ -193,6 +193,7 @@ public sealed class ChromeImporter : IChromeImporter
         var historyEntries = new List<string>();
         var skippedSensitive = 0;
         var undecryptable = 0;
+        var appBoundV20 = 0;
         var historySkippedSensitive = 0;
 
         try
@@ -298,7 +299,7 @@ public sealed class ChromeImporter : IChromeImporter
                 {
                     ct.ThrowIfCancellationRequested();
                     ReadCookies(cookiesCopy, cookiesIsLocked, aesKey, opts, cookies,
-                        out skippedSensitive, out undecryptable, warnings);
+                        out skippedSensitive, out undecryptable, out appBoundV20, warnings);
                     _log.LogInformation(
                         "Chrome import: read {N} cookie(s); {Skipped} sensitive, {Bad} undecryptable",
                         cookies.Count, skippedSensitive, undecryptable);
@@ -326,11 +327,11 @@ public sealed class ChromeImporter : IChromeImporter
             // browser via the enterprise policy, then let it re-save cookies in
             // the DPAPI-readable v10 format. Surface that instead of the old
             // (incorrect) LockProfileCookieDatabase hint.
-            if (undecryptable > 0 && opts.ImportCookies)
+            if (appBoundV20 > 0 && opts.ImportCookies)
             {
                 warnings.RemoveAll(w => w.Contains("App-Bound encryption", StringComparison.Ordinal));
                 warnings.Add(
-                    $"{undecryptable} cookies use Chrome v127+ App-Bound encryption (v20). Google protects " +
+                    $"{appBoundV20} cookies use Chrome v127+ App-Bound encryption (v20). Google protects " +
                     "these from programmatic export — neither DPAPI nor a remote-debugging/CDP session can " +
                     "decrypt them (verified). To import them, disable App-Bound on the SOURCE browser and let " +
                     "it re-encrypt cookies to the readable v10 format: run (as admin) " +
@@ -535,10 +536,11 @@ public sealed class ChromeImporter : IChromeImporter
     private void ReadCookies(
         string dbPath, bool sourceIsLocked, byte[]? aesKey, ChromeImportOptions opts,
         List<CookieEntry> output, out int skippedSensitive, out int undecryptable,
-        List<string> warnings)
+        out int appBoundV20, List<string> warnings)
     {
         skippedSensitive = 0;
         undecryptable    = 0;
+        appBoundV20      = 0;
 
         // Phase 70 — track WHY cookies failed to decrypt. The most common
         // case as of late-2024 is Chrome v127+ App-Bound encryption: the
@@ -640,12 +642,9 @@ public sealed class ChromeImporter : IChromeImporter
 
             if (prefixCounts.TryGetValue("v20", out var v20Count) && v20Count > 0)
             {
-                warnings.Add(
-                    $"{v20Count} cookies use Chrome v127+ App-Bound encryption (prefix 'v20') " +
-                    "which can only be decrypted from inside an authenticated chrome.exe process. " +
-                    "Workaround: launch Chrome with --disable-features=LockProfileCookieDatabase " +
-                    "(close all Chrome windows first, then start it from a shortcut with that flag), " +
-                    "or use a different browser profile (Edge / Brave / older Chrome) for the source.");
+                // Report the v20 subset count out to the caller; the caller
+                // (ImportAsync Stage 3b) owns the accurate, actionable message.
+                appBoundV20 = v20Count;
             }
             var unknownPrefixes = prefixCounts
                 .Where(kv => kv.Key is not ("v10" or "v11" or "v20" or "(empty)"))

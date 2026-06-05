@@ -275,7 +275,10 @@ public sealed partial class SessionsViewModel : BaseViewModel
         && SelectedProfileRow is not null;
 
     partial void OnSelectedChromeSourceChanged(ChromeProfileSource? value)
-        => OnPropertyChanged(nameof(CanRunChromeImport));
+    {
+        OnPropertyChanged(nameof(CanRunChromeImport));
+        OnPropertyChanged(nameof(CanDisableAppBound));
+    }
     partial void OnIsChromeImportingChanged(bool value)
         => OnPropertyChanged(nameof(CanRunChromeImport));
 
@@ -1175,6 +1178,56 @@ public sealed partial class SessionsViewModel : BaseViewModel
             try { stopwatch.Stop(); } catch { /* ignore */ }
             IsChromeImporting = false;
         }
+    }
+
+    /// <summary>True when the selected source supports the App-Bound policy
+    /// toggle (so the "Disable App-Bound" button is enabled).</summary>
+    public bool CanDisableAppBound =>
+        SelectedChromeSource is { } s
+        && GhostShell.App.Browser.ChromeAppBoundPolicy.IsSupported(s.BrandLabel);
+
+    /// <summary>
+    /// Disable Chrome v127+ App-Bound encryption on the selected SOURCE browser
+    /// (machine policy) so its v20 cookies become importable. App-Bound cookies
+    /// can't be exported programmatically otherwise (Google blocks DPAPI + remote
+    /// debugging); flipping this policy makes the browser re-save cookies in the
+    /// readable v10 format. Requires admin + a browser restart.
+    /// </summary>
+    [RelayCommand]
+    private async Task DisableAppBoundAsync()
+    {
+        var src = SelectedChromeSource;
+        if (src is null)
+        {
+            await _dialogs.ConfirmAsync(
+                "Pick a source",
+                "Select the Chromium browser whose App-Bound encryption you want to disable (click Detect first).",
+                "OK", ConfirmSeverity.Warning);
+            return;
+        }
+        if (!GhostShell.App.Browser.ChromeAppBoundPolicy.IsSupported(src.BrandLabel))
+        {
+            await _dialogs.ConfirmAsync(
+                "Not supported",
+                $"No App-Bound policy is known for {src.BrandLabel}.",
+                "OK", ConfirmSeverity.Warning);
+            return;
+        }
+
+        var ok = await _dialogs.ConfirmAsync(
+            $"Disable App-Bound encryption for {src.BrandLabel}?",
+            $"This sets a machine-wide policy so {src.BrandLabel} stops protecting cookies with v127+ " +
+            "App-Bound encryption — required to import them into GhostShell. After this you must restart " +
+            $"{src.BrandLabel} and browse for a bit so it re-saves cookies in the readable format, then run " +
+            "the import. Requires administrator rights. Continue?",
+            "Disable", ConfirmSeverity.Warning);
+        if (!ok) return;
+
+        var (success, message) = GhostShell.App.Browser.ChromeAppBoundPolicy.Disable(src.BrandLabel);
+        ChromeImportStatus = success ? "App-Bound disabled — restart the browser, then re-import." : message;
+        await _dialogs.ConfirmAsync(
+            success ? "App-Bound encryption disabled" : "Couldn't disable App-Bound",
+            message, "OK", success ? ConfirmSeverity.Success : ConfirmSeverity.Error);
     }
 
     // ──────────────────────────────────────────────────────────────

@@ -463,20 +463,24 @@ internal sealed class SeleniumBrowserSession : IBrowserSession
 
         IWebElement Find() => _driver.FindElement(By.CssSelector(selector));
 
-        // Focus + clear via a trusted click on the element.
-        await Task.Run(() =>
+        // Perf: resolve the element ONCE up front and reuse the reference for
+        // every keystroke, re-finding only if it goes stale (SPA re-render).
+        // The old code did a fresh FindElement on EVERY character — hundreds of
+        // WebDriver round-trips for a long string.
+        IWebElement el = await Task.Run(() =>
         {
-            var el = Find();
-            try { el.Clear(); } catch { /* contenteditable / non-clearable — fine */ }
-            try { el.Click(); } catch { /* already focused / overlay — SendKeys still targets it */ }
+            var e = Find();
+            try { e.Clear(); } catch { /* contenteditable / non-clearable — fine */ }
+            try { e.Click(); } catch { /* already focused / overlay — SendKeys still targets it */ }
+            return e;
         }, ct);
 
         void Send(string s)
         {
             // SendKeys routes through the WebDriver input pipeline →
             // real keydown/keypress/input/keyup with isTrusted=true.
-            try { Find().SendKeys(s); }
-            catch (StaleElementReferenceException) { Find().SendKeys(s); }
+            try { el.SendKeys(s); }
+            catch (StaleElementReferenceException) { el = Find(); el.SendKeys(s); }
         }
 
         var prev = '\0';

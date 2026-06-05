@@ -167,25 +167,19 @@ public static class AppShutdown
         var killed = 0;
         try
         {
-            using var searcher = new System.Management.ManagementObjectSearcher(
-                "SELECT ProcessId, Name, CommandLine FROM Win32_Process " +
-                "WHERE Name = 'chrome.exe' OR Name = 'chromedriver.exe'");
-            using var results = searcher.Get();
-            foreach (var obj in results)
+            // Perf: native command-line scan (no WMI COM init) with a free
+            // skip when nothing is running. See BrowserProcessScanner.
+            foreach (var proc in GhostShell.Runtime.Browser.BrowserProcessScanner.Enumerate(
+                         new[] { "chrome", "chromedriver" }, log))
             {
-                using var mo = (System.Management.ManagementObject)obj;
-                var cmd = mo["CommandLine"] as string ?? "";
-                if (!cmd.Contains(profilesRoot, StringComparison.OrdinalIgnoreCase))
+                if (!proc.CommandLine.Contains(profilesRoot, StringComparison.OrdinalIgnoreCase))
                     continue;
-                if (mo["ProcessId"] is not { } pidObj) continue;
-
                 try
                 {
-                    var pid = Convert.ToInt32(pidObj);
-                    using var proc = Process.GetProcessById(pid);
-                    if (proc.HasExited) continue;
-                    proc.Kill(entireProcessTree: true);
-                    proc.WaitForExit(1500);
+                    using var p = Process.GetProcessById(proc.Pid);
+                    if (p.HasExited) continue;
+                    p.Kill(entireProcessTree: true);
+                    p.WaitForExit(1500);
                     killed++;
                 }
                 catch (ArgumentException) { /* process already gone */ }
@@ -197,7 +191,7 @@ public static class AppShutdown
         }
         catch (Exception ex)
         {
-            log.LogDebug(ex, "Orphan sweep WMI query failed (non-fatal)");
+            log.LogDebug(ex, "Orphan sweep failed (non-fatal)");
         }
 
         if (killed > 0)

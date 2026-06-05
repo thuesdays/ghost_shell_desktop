@@ -355,6 +355,12 @@ public partial class App : Application
                 // manual. Each API solver activates only when its key is set
                 // (GHOSTSHELL_CAPSOLVER_KEY / GHOSTSHELL_2CAPTCHA_KEY env, or
                 // Settings); otherwise the router falls back to manual.
+                // Register IHttpClientFactory infrastructure. We no longer use
+                // AddHttpClient<T> for the captcha solvers (they're singletons
+                // now), but other services (ExtensionService, GitHubUpdateService)
+                // inject IHttpClientFactory — so register it explicitly.
+                s.AddHttpClient();
+
                 s.AddSingleton<GhostShell.Runtime.Scripts.ManualCaptchaSolver>();
                 s.AddSingleton(new GhostShell.Runtime.Scripts.TwoCaptchaConfig
                 {
@@ -364,8 +370,19 @@ public partial class App : Application
                 {
                     ApiKey = Environment.GetEnvironmentVariable("GHOSTSHELL_CAPSOLVER_KEY") ?? "",
                 });
-                s.AddHttpClient<GhostShell.Runtime.Scripts.TwoCaptchaSolver>();
-                s.AddHttpClient<GhostShell.Runtime.Scripts.CapSolverSolver>();
+                // Register the solvers as SINGLETONS (the router that holds them
+                // is a singleton) with a long-lived HttpClient — avoids the
+                // captive-transient lifetime mismatch AddHttpClient<T> would
+                // create here. Call volume is low and to fixed CDN endpoints, so
+                // factory handler-rotation isn't needed.
+                s.AddSingleton(sp => new GhostShell.Runtime.Scripts.TwoCaptchaSolver(
+                    new System.Net.Http.HttpClient(),
+                    sp.GetRequiredService<GhostShell.Runtime.Scripts.TwoCaptchaConfig>(),
+                    sp.GetRequiredService<ILoggerFactory>().CreateLogger<GhostShell.Runtime.Scripts.TwoCaptchaSolver>()));
+                s.AddSingleton(sp => new GhostShell.Runtime.Scripts.CapSolverSolver(
+                    new System.Net.Http.HttpClient(),
+                    sp.GetRequiredService<GhostShell.Runtime.Scripts.CapSolverConfig>(),
+                    sp.GetRequiredService<ILoggerFactory>().CreateLogger<GhostShell.Runtime.Scripts.CapSolverSolver>()));
                 // Build the router via a factory so the automated-provider list
                 // is assembled from the CONCRETE provider types — never from the
                 // ICaptchaSolver registration (which is the router itself, i.e.

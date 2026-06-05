@@ -59,23 +59,38 @@ public sealed class ProxyReputationService : IProxyReputationService
     public ProxyReputationReport Evaluate(Proxy proxy)
         => Score(proxy, external: null);
 
+    // Per-IP cache of external fraud-score results. An IP's reputation barely
+    // moves hour to hour, so we avoid re-hitting the provider (and paying the
+    // HTTP latency) for the same IP within the TTL.
+    private static readonly TimeSpan ExternalTtl = TimeSpan.FromHours(6);
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (DateTime At, ExternalReputation? Rep)> _extCache = new();
+
     public async Task<ProxyReputationReport> EvaluateAsync(
         Proxy proxy, CancellationToken ct = default)
     {
         ExternalReputation? ext = null;
-        if (_external.IsEnabled && !string.IsNullOrWhiteSpace(proxy.LastIp))
+        var ip = proxy.LastIp;
+        if (_external.IsEnabled && !string.IsNullOrWhiteSpace(ip))
         {
-            try
+            if (_extCache.TryGetValue(ip!, out var cached) && DateTime.UtcNow - cached.At < ExternalTtl)
             {
-                ext = await _external.LookupAsync(proxy.LastIp!, ct);
+                ext = cached.Rep;
             }
-            catch (Exception ex)
+            else
             {
-                // Fail-open: a flaky provider must never block a launch or
-                // skew the score. Heuristic-only is a safe fallback.
-                _log.LogDebug(ex,
-                    "Proxy reputation: external provider lookup failed for {Ip}; using heuristic only",
-                    proxy.LastIp);
+                try
+                {
+                    ext = await _external.LookupAsync(ip!, ct);
+                    _extCache[ip!] = (DateTime.UtcNow, ext);
+                }
+                catch (Exception ex)
+                {
+                    // Fail-open: a flaky provider must never block a launch or
+                    // skew the score. Heuristic-only is a safe fallback.
+                    _log.LogDebug(ex,
+                        "Proxy reputation: external provider lookup failed for {Ip}; using heuristic only",
+                        ip);
+                }
             }
         }
         return Score(proxy, ext);

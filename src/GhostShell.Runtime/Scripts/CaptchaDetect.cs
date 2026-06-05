@@ -34,6 +34,12 @@ public static class CaptchaDetect
             // best handled as 'sorry' (rotate IP) — solving rarely sticks.
             return 'sorry';
           }
+          // Cloudflare FULL-PAGE interstitial ("Just a moment…" / JS challenge)
+          // — not a solvable widget; the caller should rotate IP, not burn
+          // solver credits. Distinct from an embedded Turnstile widget below.
+          if (document.querySelector('#challenge-running, #cf-challenge-running, .cf-browser-verification, #cf-please-wait')
+              || /just a moment|checking your browser|attention required/i.test(document.title || ''))
+            return 'cloudflare';
           if (document.querySelector('.cf-turnstile, iframe[src*="challenges.cloudflare.com"], input[name="cf-turnstile-response"]'))
             return 'turnstile';
           if (document.querySelector('iframe[src*="hcaptcha"], div.h-captcha, textarea[name="h-captcha-response"]'))

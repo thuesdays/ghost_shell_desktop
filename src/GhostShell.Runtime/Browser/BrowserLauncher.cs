@@ -511,21 +511,22 @@ public sealed class BrowserLauncher : IBrowserLauncher
     {
         if (_settings is null) return;
 
-        // Resolve the active toggle set by reading each bucket flag.
-        // Defaults are OFF — users opt in deliberately. Missing keys
-        // → bool? null → treated as off.
+        // Resolve the active toggle set. Perf: ONE settings query (GetAllAsync)
+        // instead of 8 serialized DB round-trips on the launch path. Defaults
+        // are OFF — missing keys treated as off.
+        var all = await _settings.GetAllAsync(ct);
+        bool On(string key) => all.TryGetValue(key, out var v)
+            && v is "1" or "true" or "True" or "yes";
         var enabled = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        async Task<bool> ReadAsync(string key)
-            => (await _settings.GetBoolAsync(key, ct)) ?? false;
-        if (await ReadAsync(SettingsKeys.BlockYoutubeVideo))    enabled.Add("block_youtube_video");
-        if (await ReadAsync(SettingsKeys.BlockGoogleImages))    enabled.Add("block_google_images");
-        if (await ReadAsync(SettingsKeys.BlockGoogleMapsTiles)) enabled.Add("block_google_maps_tiles");
-        if (await ReadAsync(SettingsKeys.BlockFonts))           enabled.Add("block_fonts");
-        if (await ReadAsync(SettingsKeys.BlockAnalytics))       enabled.Add("block_analytics");
-        if (await ReadAsync(SettingsKeys.BlockSocialWidgets))   enabled.Add("block_social_widgets");
-        if (await ReadAsync(SettingsKeys.BlockVideoEverywhere)) enabled.Add("block_video_everywhere");
+        if (On(SettingsKeys.BlockYoutubeVideo))    enabled.Add("block_youtube_video");
+        if (On(SettingsKeys.BlockGoogleImages))    enabled.Add("block_google_images");
+        if (On(SettingsKeys.BlockGoogleMapsTiles)) enabled.Add("block_google_maps_tiles");
+        if (On(SettingsKeys.BlockFonts))           enabled.Add("block_fonts");
+        if (On(SettingsKeys.BlockAnalytics))       enabled.Add("block_analytics");
+        if (On(SettingsKeys.BlockSocialWidgets))   enabled.Add("block_social_widgets");
+        if (On(SettingsKeys.BlockVideoEverywhere)) enabled.Add("block_video_everywhere");
 
-        var customBlob = await _settings.GetStringAsync(SettingsKeys.BlockCustomPatterns, ct);
+        all.TryGetValue(SettingsKeys.BlockCustomPatterns, out var customBlob);
         var patterns   = ResourceBlockingPatterns.Compose(enabled, customBlob);
         if (patterns.Count == 0)
         {
@@ -589,7 +590,11 @@ public sealed class BrowserLauncher : IBrowserLauncher
         ProxyReputationReport report;
         try
         {
-            report = await _reputation.EvaluateAsync(proxy, ct);
+            // Perf: use the SYNCHRONOUS heuristic score on the launch hot path —
+            // it's instant (no I/O). The external fraud-score lookup (which can
+            // do a multi-second HTTP call) is reserved for the explicit proxy
+            // test/refresh flow via EvaluateAsync, so it never stalls a launch.
+            report = _reputation.Evaluate(proxy);
         }
         catch (Exception ex)
         {

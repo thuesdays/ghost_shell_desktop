@@ -75,6 +75,10 @@ public sealed class CapSolverSolver : ICaptchaSolver
             _log.LogWarning("CapSolver: no sitekey on page (kind={Kind})", kind);
             return false;
         }
+        if (kind == "recaptcha_v3" && string.IsNullOrEmpty(info.Value.Action))
+            _log.LogDebug(
+                "CapSolver: reCAPTCHA v3 with no detectable page action — solving with fallback 'verify'; " +
+                "the token may score low if the site expects a specific action");
 
         var task = BuildTask(kind, info.Value);
         string taskId;

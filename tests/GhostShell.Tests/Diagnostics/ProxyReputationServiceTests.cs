@@ -117,6 +117,21 @@ public sealed class ProxyReputationServiceTests
         Assert.NotEmpty(r.Reasons);
     }
 
+    [Fact]
+    public async Task ExternalLookup_IsCachedPerIp()
+    {
+        // Audit fix: repeated EvaluateAsync for the same IP must NOT re-hit the
+        // external provider (it caches with a TTL) — avoids paying HTTP latency
+        // for the same proxy over and over.
+        var counting = new CountingProvider(new ExternalReputation(40, false, false, "t"));
+        var svc = Svc(counting);
+        var proxy = MakeProxy(IpType.Residential, isp: "Comcast", ip: "203.0.113.7");
+        await svc.EvaluateAsync(proxy);
+        await svc.EvaluateAsync(proxy);
+        await svc.EvaluateAsync(proxy);
+        Assert.Equal(1, counting.Calls);
+    }
+
     private sealed class FakeProvider : IIpReputationProvider
     {
         private readonly ExternalReputation _r;
@@ -124,5 +139,18 @@ public sealed class ProxyReputationServiceTests
         public bool IsEnabled => true;
         public Task<ExternalReputation?> LookupAsync(string ip, CancellationToken ct = default)
             => Task.FromResult<ExternalReputation?>(_r);
+    }
+
+    private sealed class CountingProvider : IIpReputationProvider
+    {
+        private readonly ExternalReputation _r;
+        public int Calls;
+        public CountingProvider(ExternalReputation r) => _r = r;
+        public bool IsEnabled => true;
+        public Task<ExternalReputation?> LookupAsync(string ip, CancellationToken ct = default)
+        {
+            Calls++;
+            return Task.FromResult<ExternalReputation?>(_r);
+        }
     }
 }

@@ -1883,43 +1883,53 @@ public sealed class ScriptRunner : IScriptRunner
 
             // ── Feature #7 — reliability + verification DSL ─────────
 
-            // retry: run the body; on any step failure, wait an
-            // exponential-backoff-with-jitter delay and try again, up to
-            // max_attempts. After the last failure the exception propagates
-            // (so abort_on_error still applies). Makes flaky automation (SPA
-            // re-renders, slow SERPs, transient nav errors) self-healing.
+            // retry: run the body; if any step in it fails, wait an
+            // exponential-backoff-with-jitter delay and try the whole body
+            // again, up to max_attempts. After the last failure we throw (so the
+            // retry step's own abort_on_error still applies). Self-heals flaky
+            // automation (SPA re-renders, slow SERPs, transient nav errors).
+            //
+            // Failure detection: a body step that throws WITHOUT abort_on_error
+            // is SWALLOWED by ExecuteStepsAsync (logged, loop continues) — so we
+            // can't rely on exceptions escaping. Instead we watch the global
+            // counters.Failed delta across the attempt (incremented for every
+            // step error, including nested), which catches both swallowed and
+            // thrown failures. Thrown ones (abort_on_error / ScriptAbort) are
+            // also caught below and retried, except cancellation + captcha
+            // recovery which must propagate.
             case "retry":
             {
                 var maxAttempts = Math.Clamp(ParamInt(step, "max_attempts", 3), 1, 20);
                 var baseMs = Math.Max(0, ParamInt(step, "backoff_ms", 1000));
                 var maxMs  = Math.Max(baseMs, ParamInt(step, "backoff_max_ms", 30000));
-                Exception? last = null;
+                string? lastErr = null;
                 for (var attempt = 1; attempt <= maxAttempts; attempt++)
                 {
                     ct.ThrowIfCancellationRequested();
+                    var failedBefore = counters.Failed;
                     try
                     {
                         var flow = await ExecuteStepsAsync(step.Body, s, ctx, counters, log, runId, profileName, ct);
-                        last = null;
                         if (flow != StepFlow.Normal) return flow;
-                        break; // success
+                        if (counters.Failed == failedBefore) { lastErr = null; break; } // clean success
+                        lastErr = $"a step in the retry body failed (attempt {attempt}/{maxAttempts})";
                     }
                     catch (OperationCanceledException) { throw; }
                     catch (CaptchaRecoveryAbortException) { throw; } // recovery handles its own retry
                     catch (Exception ex)
                     {
-                        last = ex;
-                        if (attempt >= maxAttempts) break;
-                        var delay = RetryPolicy.BackoffMs(attempt, baseMs, maxMs, Random.Shared);
-                        _log.LogInformation(
-                            "retry: attempt {N}/{Max} failed ({Err}); backing off {Ms}ms",
-                            attempt, maxAttempts, ex.Message?.Split('\n').FirstOrDefault(), delay);
-                        await Task.Delay(delay, ct);
+                        lastErr = ex.Message?.Split('\n').FirstOrDefault();
                     }
+                    if (lastErr is null || attempt >= maxAttempts) break;
+                    var delay = RetryPolicy.BackoffMs(attempt, baseMs, maxMs, Random.Shared);
+                    _log.LogInformation(
+                        "retry: attempt {N}/{Max} failed ({Err}); backing off {Ms}ms",
+                        attempt, maxAttempts, lastErr, delay);
+                    await Task.Delay(delay, ct);
                 }
-                if (last is not null)
+                if (lastErr is not null)
                     throw new InvalidOperationException(
-                        $"retry: body still failing after {maxAttempts} attempt(s): {last.Message}", last);
+                        $"retry: body still failing after {maxAttempts} attempt(s): {lastErr}");
                 break;
             }
 

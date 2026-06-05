@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Mykola Kovhanko <thuesdays@gmail.com>
 
 using System.Diagnostics;
-using System.Management;
 using System.Runtime.Versioning;
 using Microsoft.Extensions.Logging;
 
@@ -126,42 +125,33 @@ internal static class LaunchPreflight
         // the actual --user-data-dir argument value out of each command
         // line and compare it to the target for exact path equality.
         var killed = 0;
-        // WMI query gives us each process plus its full command line —
-        // standard Process API on Windows only exposes the file name
-        // and we'd need a second native call per process to get argv.
-        const string query =
-            "SELECT ProcessId, Name, CommandLine FROM Win32_Process " +
-            "WHERE Name = 'chrome.exe' OR Name = 'chromedriver.exe'";
-        using var searcher = new ManagementObjectSearcher(query);
-        using var results  = searcher.Get();
-
-        foreach (var obj in results)
+        // Perf: read command lines via BrowserProcessScanner (native PEB read,
+        // no WMI COM init) and skip all work when no chrome/chromedriver is
+        // running at all. The previous WMI query ran on every launch and cost
+        // 0.3–2 s on weak machines. Native is sub-ms; WMI stays as a fallback
+        // inside the scanner if the native read ever fails.
+        foreach (var proc in BrowserProcessScanner.Enumerate(new[] { "chrome", "chromedriver" }, log))
         {
-            using var mo = (ManagementObject)obj;
-            var pidObj = mo["ProcessId"];
-            var cmd    = mo["CommandLine"] as string ?? "";
-            if (pidObj is null) continue;
-            // audit LAUNCH-08: exact, separator-normalized path equality
-            // on the parsed argument value — not a prefix-prone substring.
-            if (!CommandLineTargetsDir(cmd, userDataDir))
+            // audit LAUNCH-08: exact, separator-normalized path equality on the
+            // parsed --user-data-dir value — not a prefix-prone substring.
+            if (!CommandLineTargetsDir(proc.CommandLine, userDataDir))
                 continue;
 
-            var pid = Convert.ToInt32(pidObj);
             try
             {
-                using var proc = Process.GetProcessById(pid);
-                if (proc.HasExited) continue;
+                using var p = Process.GetProcessById(proc.Pid);
+                if (p.HasExited) continue;
                 log.LogInformation(
                     "Preflight: killing orphan {Name} pid={Pid} (matches user-data-dir)",
-                    proc.ProcessName, pid);
-                proc.Kill(entireProcessTree: true);
-                proc.WaitForExit(2000);
+                    p.ProcessName, proc.Pid);
+                p.Kill(entireProcessTree: true);
+                p.WaitForExit(2000);
                 killed++;
             }
             catch (ArgumentException) { /* process already gone */ }
             catch (Exception ex)
             {
-                log.LogDebug(ex, "Preflight: could not kill pid={Pid}", pid);
+                log.LogDebug(ex, "Preflight: could not kill pid={Pid}", proc.Pid);
             }
         }
         return killed;

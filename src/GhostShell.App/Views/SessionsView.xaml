@@ -777,6 +777,7 @@
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="*"/>
                                         <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="Auto"/>
                                     </Grid.ColumnDefinitions>
                                     <TextBlock Grid.Column="0"
                                                Text="{Binding ChromeImportStatus}"
@@ -784,7 +785,21 @@
                                                FontSize="11"
                                                VerticalAlignment="Center"
                                                TextWrapping="Wrap"/>
+                                    <!-- For Chrome v127+ App-Bound cookies that can't be
+                                         imported directly: disable the policy, restart the
+                                         browser, then import. -->
                                     <Button Grid.Column="1"
+                                            Content="Disable App-Bound"
+                                            ToolTip="Disable Chrome v127+ App-Bound cookie encryption on the selected source browser (machine policy, admin) so its cookies become importable. Restart the browser afterwards."
+                                            Command="{Binding DisableAppBoundCommand}"
+                                            IsEnabled="{Binding CanDisableAppBound}"
+                                            Padding="12,8"
+                                            Margin="0,0,8,0"
+                                            MinWidth="150"
+                                            Background="Transparent"
+                                            Foreground="{StaticResource Text}"
+                                            BorderBrush="{StaticResource Border}"/>
+                                    <Button Grid.Column="2"
                                             Content="▶  Run import"
                                             Command="{Binding RunChromeImportCommand}"
                                             IsEnabled="{Binding CanRunChromeImport}"

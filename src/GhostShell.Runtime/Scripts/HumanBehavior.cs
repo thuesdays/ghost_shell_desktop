@@ -100,8 +100,11 @@ public static class MousePath
         var dist = Math.Sqrt(dx * dx + dy * dy);
 
         // Point count scales with distance; bounded so short hops stay cheap
-        // and long drags stay smooth.
-        var steps = (int)Math.Clamp(Math.Round(dist / 22.0) + rng.Next(2, 6), 8, 26);
+        // and long drags stay smooth. Each point is a CDP round-trip on the hot
+        // path, so we keep the count modest (5–16) — still a realistic curve
+        // (human pointer sampling for a typical move is ~10–30 events) while
+        // roughly halving the per-click chromedriver chatter vs the old 8–26.
+        var steps = (int)Math.Clamp(Math.Round(dist / 28.0) + rng.Next(1, 4), 5, 16);
 
         // Total travel time: ease-curve area; scales sub-linearly with distance.
         var totalMs = (int)Math.Clamp(

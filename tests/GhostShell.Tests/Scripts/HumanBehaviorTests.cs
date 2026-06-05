@@ -126,4 +126,28 @@ public sealed class HumanBehaviorTests
         var longP  = MousePath.Generate(0, 0, 1500, 1000, rng, BehaviorPersona.Default);
         Assert.True(longP.Count >= shortP.Count);
     }
+
+    [Fact]
+    public void MousePath_ShortMove_IsCheap()
+    {
+        // Audit perf fix: short hops must stay cheap (few CDP round-trips).
+        var rng = new Random(7);
+        for (var i = 0; i < 50; i++)
+        {
+            var p = MousePath.Generate(0, 0, 12, 8, rng, BehaviorPersona.Default);
+            Assert.True(p.Count <= 9, $"short move produced {p.Count} points");
+        }
+    }
+
+    [Fact]
+    public void MousePath_PointCount_NeverExceedsCap()
+    {
+        var rng = new Random(8);
+        for (var i = 0; i < 50; i++)
+        {
+            var p = MousePath.Generate(0, 0, 4000, 3000, rng, BehaviorPersona.Default);
+            // 16 bezier points + overshoot-settle + final = 18 max.
+            Assert.True(p.Count <= 18, $"long move produced {p.Count} points");
+        }
+    }
 }
