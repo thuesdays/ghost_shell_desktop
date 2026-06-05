@@ -899,7 +899,7 @@ index c5a0d3f25629c..5e4047b4d9810 100644
      // Let insertion silently fail if `settings_map` already contains
      // `greased_id`.
 diff --git a/services/network/p2p/socket_manager.cc b/services/network/p2p/socket_manager.cc
-index ffc2c2c133160..cd500e82e13ed 100644
+index ffc2c2c133160..08e94814e88d8 100644
 --- a/services/network/p2p/socket_manager.cc
 +++ b/services/network/p2p/socket_manager.cc
 @@ -6,11 +6,21 @@
@@ -924,7 +924,7 @@ index ffc2c2c133160..cd500e82e13ed 100644
  #include "base/task/single_thread_task_runner.h"
  #include "base/task/thread_pool.h"
  #include "net/base/address_family.h"
-@@ -261,11 +271,115 @@ void P2PSocketManager::DumpPacket(base::span<const uint8_t> packet,
+@@ -261,11 +271,125 @@ void P2PSocketManager::DumpPacket(base::span<const uint8_t> packet,
                                               incoming);
  }
  
@@ -941,7 +941,17 @@ index ffc2c2c133160..cd500e82e13ed 100644
 +// When the user launches the browser without --ghost-shell-payload,
 +// IsActive() returns false and the filter is bypassed (stock behaviour).
 +bool GhostShellShouldFilterHostCandidates() {
-+  return GhostShell_IsActive();
++  // audit WRTC-02: native-mDNS strategy. We no longer ERASE host-scope
++  // addresses from the enumerated network list — doing so left zero host
++  // candidates (itself an atypical, non-Chrome shape). Instead we keep the
++  // host addresses so Chromium's mDNS obfuscation (re-enabled by the launcher)
++  // can replace each with a "<uuid>.local" candidate, exactly like stock
++  // Chrome 149. Returning false here neutralises BOTH call sites (the network
++  // list filter and the default-local-address substitution) in lockstep while
++  // keeping the helpers referenced (no -Werror unused-function). The real
++  // public-IP leak is prevented by the webrtc.ip_handling_policy pref, not by
++  // erasing local interfaces. One flip to revert.
++  return false;
 +}
 +
 +bool GhostShellIsHostScopeAddress(const net::IPAddress& a) {
@@ -1040,7 +1050,7 @@ index ffc2c2c133160..cd500e82e13ed 100644
    return list;
  }
  
-@@ -351,7 +465,17 @@ void P2PSocketManager::FinishGetDefaultLocalAddress(
+@@ -351,7 +475,17 @@ void P2PSocketManager::FinishGetDefaultLocalAddress(
      return;
    }
  

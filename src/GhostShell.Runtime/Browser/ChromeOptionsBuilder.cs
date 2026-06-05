@@ -242,10 +242,16 @@ public static class ChromeOptionsBuilder
         options.AddArgument("--disable-blink-features=AutomationControlled");
         options.AddAdditionalOption("useAutomationExtension", false);
 
-        // WebRTC: force the patched policy that suppresses non-proxied
-        // UDP candidates. Without this, the browser leaks the local
-        // IP through STUN even when --proxy-server is set.
-        options.AddArgument("--force-webrtc-ip-handling-policy=disable_non_proxied_udp");
+        // WebRTC IP-handling policy.
+        // audit WRTC-01/WRTC-02: the --force-webrtc-ip-handling-policy SWITCH
+        // is IGNORED by Chromium 149 (the only honored path is the
+        // webrtc.ip_handling_policy PREFERENCE, written below into
+        // Default/Preferences). For a proxied profile we use
+        // "disable_non_proxied_udp" so WebRTC never sends UDP outside the proxy
+        // (the public-IP leak guard); for a direct profile we use "default",
+        // which is stock Chrome's behaviour (mDNS hides the local IP, srflx via
+        // the real connection — same as a normal user). The pref is applied in
+        // the experimental-prefs block at the end of this method.
 
         // ─── Chromium nuisances ──────────────────────────────────
         options.AddArgument("--no-first-run");
@@ -288,7 +294,10 @@ public static class ChromeOptionsBuilder
             "GlobalMediaControls",
             "DestroyProfileOnBrowserClose",
             "AutoExpandDetailsElement",
-            "WebRtcHideLocalIpsWithMdns",
+            // audit WRTC-02: WebRtcHideLocalIpsWithMdns is NO LONGER disabled —
+            // we WANT Chromium's native mDNS so host candidates are
+            // "<uuid>.local" exactly like real Chrome 149 (the native fake-IP
+            // rewrite is neutralised in peer_connection.cc / socket_manager.cc).
         }));
 
         // Reduce Chrome's own log noise; chromedriver gets its own
@@ -331,6 +340,16 @@ public static class ChromeOptionsBuilder
         options.AddUserProfilePreference("extensions.autoupdate.next_check", 0);
         options.AddUserProfilePreference("browser.startup_pages_pref_migration_state", 1);
         options.AddUserProfilePreference("browser.crash_reporter_local_storage_path", "");
+
+        // audit WRTC-01/WRTC-02: the ONLY honored WebRTC IP-handling control in
+        // Chrome 149 — written as a preference, not the (ignored) CLI switch.
+        // Proxied profile → disable_non_proxied_udp (no UDP outside the proxy →
+        // no public-IP leak). Direct profile → default (stock Chrome: mDNS hides
+        // the local IP; same behaviour a normal user has).
+        var webrtcPolicy = string.IsNullOrWhiteSpace(proxyUrl)
+            ? "default"
+            : "disable_non_proxied_udp";
+        options.AddUserProfilePreference("webrtc.ip_handling_policy", webrtcPolicy);
 
         return options;
     }

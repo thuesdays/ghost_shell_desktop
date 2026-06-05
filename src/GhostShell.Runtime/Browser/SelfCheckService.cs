@@ -395,14 +395,24 @@ public sealed class SelfCheckService : ISelfCheckService
             var raw = await session.ExecuteScriptAsync(WebRtcJs, null, ct);
             if (raw is System.Collections.IEnumerable arr)
             {
+                // audit WRTC-06: under the native-mDNS posture (WRTC-02) host
+                // candidates MUST be "<uuid>.local" — a raw RFC1918 IPv4 host
+                // candidate means mDNS isn't obfuscating (a regression that
+                // external detectors catch but IsTrivialIp would mask as
+                // "safe"). Track it and surface a note even though it isn't a
+                // public-IP leak, so QA notices the mDNS posture broke.
+                var sawRawPrivate = false;
                 foreach (var ip in arr.Cast<object?>().Select(o => o?.ToString() ?? ""))
                 {
                     if (string.IsNullOrEmpty(ip)) continue;
+                    if (IsRawPrivateIpv4(ip)) sawRawPrivate = true;
                     if (IsTrivialIp(ip)) continue;
                     webrtcLeak = true;
                     webrtcLocalIp = ip;
                     break;
                 }
+                if (sawRawPrivate && !webrtcLeak)
+                    notes.Add("webrtc: raw private IP visible — mDNS not obfuscating (WRTC-06)");
             }
         }
         catch (Exception ex)
@@ -1214,6 +1224,27 @@ public sealed class SelfCheckService : ISelfCheckService
     /// mDNS) is a genuine identity leak on a dual-stack host behind an
     /// IPv4-only proxy and MUST return false here so the WebRTC test fails.
     /// </summary>
+    /// <summary>audit WRTC-06: true for a raw RFC1918 IPv4 literal (10/8,
+    /// 172.16/12, 192.168/16). Under the native-mDNS posture seeing one means
+    /// mDNS failed to obfuscate the host candidate — a regression worth a note.
+    /// Distinct from <see cref="IsTrivialIp"/>, which (correctly) treats these
+    /// as non-leaks of public information.</summary>
+    private static bool IsRawPrivateIpv4(string ip)
+    {
+        if (string.IsNullOrWhiteSpace(ip) || ip.Contains(':')) return false;
+        if (ip.EndsWith(".local", StringComparison.OrdinalIgnoreCase)) return false;
+        if (ip.StartsWith("10.")) return true;
+        if (ip.StartsWith("192.168.")) return true;
+        if (ip.StartsWith("172."))
+        {
+            var parts = ip.Split('.');
+            if (parts.Length > 1 && int.TryParse(parts[1], out var second)
+                && second is >= 16 and <= 31)
+                return true;
+        }
+        return false;
+    }
+
     private static bool IsTrivialIp(string ip)
     {
         if (string.IsNullOrWhiteSpace(ip)) return true;
