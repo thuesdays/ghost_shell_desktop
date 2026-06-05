@@ -108,10 +108,15 @@ public static class Humanizer
     {
         var endsAt = DateTime.UtcNow.AddSeconds(Math.Max(1, totalSec));
         var step = 0;
+        var rng = Random.Shared;
         while (DateTime.UtcNow < endsAt && step < 12)
         {
             ct.ThrowIfCancellationRequested();
-            var delta = Random.Shared.Next(200, 701);
+            // Feature #2: Gaussian scroll deltas (momentum), occasional small
+            // up-scroll mid-read (re-reading), and the odd longer reading dwell
+            // — instead of a flat uniform nudge every fixed interval.
+            var delta = HumanTiming.NextDelay(rng, 180, 720);
+            if (step > 0 && rng.NextDouble() < 0.15) delta = -HumanTiming.NextDelay(rng, 80, 220);
             try
             {
                 await session.ExecuteScriptAsync(
@@ -119,7 +124,11 @@ public static class Humanizer
                     null, ct);
             }
             catch { /* visit-non-fatal */ }
-            await Task.Delay(Random.Shared.Next(800, 2401), ct);
+            // Most dwells are short; ~1 in 4 is a longer "reading" pause.
+            var dwell = rng.NextDouble() < 0.25
+                ? HumanTiming.NextDelay(rng, 1800, 4200)
+                : HumanTiming.NextDelay(rng, 700, 1900);
+            await Task.Delay(dwell, ct);
             step++;
         }
         try

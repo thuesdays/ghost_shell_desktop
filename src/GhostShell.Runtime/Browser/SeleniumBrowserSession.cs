@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.Text.Json;
 using GhostShell.Core.Models;
 using GhostShell.Core.Services;
+using GhostShell.Runtime.Scripts;
 using Microsoft.Extensions.Logging;
 using OpenQA.Selenium;
 using OpenQA.Selenium.Chrome;
@@ -33,6 +34,15 @@ internal sealed class SeleniumBrowserSession : IBrowserSession
     private readonly GhostShell.Runtime.Traffic.TrafficCollector? _trafficCollector;
     private bool _disposed;
 
+    // Feature #2 — behavioural humanisation. A per-session RNG drives the
+    // jitter; the persona (stable per profile) sets typing speed / typo rate /
+    // cursor curvature; _lastMouseX/Y give the cursor continuity between
+    // actions so each move starts where the last one ended (no teleports).
+    private readonly Random _rng = new();
+    private readonly Scripts.BehaviorPersona _persona;
+    private double _lastMouseX;
+    private double _lastMouseY;
+
     public string ProfileName { get; }
     public long RunId { get; }
     public DateTime StartedAt { get; }
@@ -55,6 +65,12 @@ internal sealed class SeleniumBrowserSession : IBrowserSession
         _ownedPids  = ownedPids.ToList();
         _forwarder  = forwarder;
         _log        = log;
+        _persona    = Scripts.BehaviorPersona.ForProfile(profileName);
+        // Seed the cursor somewhere plausible inside a typical viewport so the
+        // first move isn't from (0,0). Real coordinates converge after the
+        // first action anyway.
+        _lastMouseX = _rng.Next(80, 360);
+        _lastMouseY = _rng.Next(80, 300);
 
         // Phase 28/31 — start the traffic collector. The CDP counter
         // is created for EVERY session (proxied or not) so direct
@@ -383,33 +399,62 @@ internal sealed class SeleniumBrowserSession : IBrowserSession
     // returns, so no DPR scaling is needed here.
     // ─────────────────────────────────────────────────────────────
 
-    public Task TrustedClickAsync(string selector, int clickCount = 1, string button = "left", CancellationToken ct = default) =>
-        Task.Run(() =>
-        {
-            var center = ElementCenter(selector)
-                ?? throw new InvalidOperationException($"selector not found / not visible: {selector}");
-            var (x, y) = center;
-            var btnMask = button == "right" ? 2 : button == "middle" ? 4 : 1;
-            // Approach the target with a couple of jittered moves so the
-            // pointer trail isn't a single teleport to dead-centre.
-            DispatchMouse("mouseMoved", x - Random.Shared.Next(8, 26), y - Random.Shared.Next(6, 20), "none", 0, 0);
-            DispatchMouse("mouseMoved", x, y, "none", 0, 0);
-            for (var i = 1; i <= Math.Max(1, clickCount); i++)
-            {
-                DispatchMouse("mousePressed",  x, y, button, btnMask, i);
-                DispatchMouse("mouseReleased", x, y, button, 0,        i);
-            }
-        }, ct);
+    public async Task TrustedClickAsync(string selector, int clickCount = 1, string button = "left", CancellationToken ct = default)
+    {
+        var center = await Task.Run(() => ElementCenter(selector), ct)
+            ?? throw new InvalidOperationException($"selector not found / not visible: {selector}");
+        var (x, y) = center;
+        // Feature #2: glide the cursor to the target along a human curve
+        // (overshoot + settle), so page mousemove listeners see a real
+        // trajectory rather than a 2-point teleport.
+        await GlideToAsync(x, y, ct);
 
-    public Task TrustedHoverAsync(string selector, CancellationToken ct = default) =>
-        Task.Run(() =>
+        var btnMask = button == "right" ? 2 : button == "middle" ? 4 : 1;
+        // Brief settle before pressing — humans don't click the instant the
+        // cursor lands.
+        await Task.Delay(HumanTiming.NextDelay(_rng, 30, 110), ct);
+        for (var i = 1; i <= Math.Max(1, clickCount); i++)
         {
-            var center = ElementCenter(selector);
-            if (center is null) return;
-            var (x, y) = center.Value;
-            DispatchMouse("mouseMoved", x - Random.Shared.Next(10, 30), y - Random.Shared.Next(6, 18), "none", 0, 0);
-            DispatchMouse("mouseMoved", x, y, "none", 0, 0);
-        }, ct);
+            DispatchMouse("mousePressed",  x, y, button, btnMask, i);
+            await Task.Delay(HumanTiming.NextDelay(_rng, 40, 110), ct); // press-hold
+            DispatchMouse("mouseReleased", x, y, button, 0,        i);
+            if (i < clickCount) await Task.Delay(HumanTiming.NextDelay(_rng, 60, 140), ct);
+        }
+    }
+
+    public async Task TrustedHoverAsync(string selector, CancellationToken ct = default)
+    {
+        var center = await Task.Run(() => ElementCenter(selector), ct);
+        if (center is null) return;
+        var (x, y) = center.Value;
+        await GlideToAsync(x, y, ct);
+    }
+
+    /// <summary>Feature #2 — dispatch a humanised cursor path from the last
+    /// known position to (<paramref name="x"/>,<paramref name="y"/>) via CDP
+    /// mouseMoved events with ease-in-out timing. Updates the stored cursor
+    /// position. Fail-safe: on any error falls back to a single direct move so
+    /// a click never fails because the glide threw.</summary>
+    private async Task GlideToAsync(double x, double y, CancellationToken ct)
+    {
+        try
+        {
+            var path = MousePath.Generate(_lastMouseX, _lastMouseY, x, y, _rng, _persona);
+            foreach (var p in path)
+            {
+                ct.ThrowIfCancellationRequested();
+                if (p.DelayMs > 0) await Task.Delay(p.DelayMs, ct);
+                DispatchMouse("mouseMoved", p.X, p.Y, "none", 0, 0);
+            }
+        }
+        catch (OperationCanceledException) { throw; }
+        catch
+        {
+            try { DispatchMouse("mouseMoved", x, y, "none", 0, 0); } catch { /* swallow */ }
+        }
+        _lastMouseX = x;
+        _lastMouseY = y;
+    }
 
     public async Task TrustedTypeAsync(string selector, string text, int minMs = 40, int maxMs = 180, CancellationToken ct = default)
     {
@@ -426,19 +471,42 @@ internal sealed class SeleniumBrowserSession : IBrowserSession
             try { el.Click(); } catch { /* already focused / overlay — SendKeys still targets it */ }
         }, ct);
 
+        void Send(string s)
+        {
+            // SendKeys routes through the WebDriver input pipeline →
+            // real keydown/keypress/input/keyup with isTrusted=true.
+            try { Find().SendKeys(s); }
+            catch (StaleElementReferenceException) { Find().SendKeys(s); }
+        }
+
+        var prev = '\0';
         foreach (var ch in text)
         {
             ct.ThrowIfCancellationRequested();
-            var s = ch.ToString();
-            await Task.Run(() =>
+
+            // Feature #2: occasional typo + correction on letters (not the
+            // first char). Type a wrong neighbouring letter, pause, backspace,
+            // pause — exactly the micro-pattern human keystroke-dynamics models
+            // expect to see.
+            if (prev != '\0' && char.IsLetter(ch) && _rng.NextDouble() < _persona.TypoRate)
             {
-                // SendKeys routes through the WebDriver input pipeline →
-                // real keydown/keypress/input/keyup with isTrusted=true.
-                try { Find().SendKeys(s); }
-                catch (StaleElementReferenceException) { Find().SendKeys(s); }
-            }, ct);
-            // audit SCRIPTSUPPORT-02: variable per-keystroke gap (not uniform).
-            await Task.Delay(Random.Shared.Next(minMs, maxMs + 1), ct);
+                var wrong = (char)('a' + _rng.Next(26));
+                if (char.IsUpper(ch)) wrong = char.ToUpperInvariant(wrong);
+                var w = wrong.ToString();
+                await Task.Run(() => Send(w), ct);
+                await Task.Delay(HumanTiming.KeystrokeDelayMs(_rng, ch, wrong, _persona), ct);
+                await Task.Run(() => Send(OpenQA.Selenium.Keys.Backspace), ct);
+                await Task.Delay(HumanTiming.NextDelay(_rng, 90, 260), ct);
+            }
+
+            var s = ch.ToString();
+            await Task.Run(() => Send(s), ct);
+            // audit SCRIPTSUPPORT-02 + Feature #2: Gaussian, context-aware
+            // per-keystroke cadence (word/sentence boundaries, persona speed).
+            var delay = HumanTiming.KeystrokeDelayMs(_rng, prev, ch, _persona);
+            if (maxMs > minMs) delay = Math.Clamp(delay, minMs, Math.Max(maxMs, minMs + 1) * 3);
+            await Task.Delay(delay, ct);
+            prev = ch;
         }
     }
 
