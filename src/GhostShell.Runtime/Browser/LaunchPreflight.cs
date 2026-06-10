@@ -41,24 +41,10 @@ internal static class LaunchPreflight
     /// then wipe stale session-restore state and ensure the dir
     /// exists.
     /// </summary>
-    public static void Run(string userDataDir, string profileName, ILogger log)
+    public static int Run(string userDataDir, string profileName, ILogger log)
     {
         // ── 1. orphan sweep ────────────────────────────────────────
-        try
-        {
-            var killed = KillProcessesUsingDir(userDataDir, log);
-            if (killed > 0)
-                log.LogWarning(
-                    "Preflight: reaped {Count} orphan chrome/chromedriver process(es) " +
-                    "still holding profile '{Name}' from a previous run",
-                    killed, profileName);
-            else
-                log.LogDebug("Preflight: no orphan chrome processes for '{Name}'", profileName);
-        }
-        catch (Exception ex)
-        {
-            log.LogWarning(ex, "Preflight: orphan sweep failed (non-fatal)");
-        }
+        var reaped = ReapOrphans(userDataDir, profileName, log);
 
         // ── 2. ensure dir exists ───────────────────────────────────
         try
@@ -107,6 +93,47 @@ internal static class LaunchPreflight
         TryDelete(Path.Combine(userDataDir, "SingletonLock"),    log);
         TryDelete(Path.Combine(userDataDir, "SingletonCookie"),  log);
         TryDelete(Path.Combine(userDataDir, "SingletonSocket"),  log);
+
+        return reaped;
+    }
+
+    /// <summary>
+    /// Kill any chrome.exe / chromedriver.exe still holding
+    /// <paramref name="userDataDir"/> as its <c>--user-data-dir</c>, and
+    /// return how many were reaped. Best-effort and exception-safe.
+    ///
+    /// Exposed separately from <see cref="Run"/> so it can run as the FINAL
+    /// step of session teardown too (SeleniumBrowserSession.DisposeAsync):
+    /// when <c>driver.Quit()</c> can't unwind a wedged chrome (e.g. the tab
+    /// is stuck on a captcha page during a captcha-recovery stop), the
+    /// browser is orphaned and keeps an exclusive handle on
+    /// <c>Default/Preferences</c>. The next launch's chromedriver then can't
+    /// write that file and dies with
+    /// <c>"session not created: ... failed to write prefs file"</c> on every
+    /// retry until the zombie eventually exits — the exact persistent
+    /// launch-failure loop seen in the field. Reaping at teardown closes the
+    /// hole at the source; the launcher's retry path also calls it as a
+    /// backstop.
+    /// </summary>
+    public static int ReapOrphans(string userDataDir, string profileName, ILogger log)
+    {
+        try
+        {
+            var killed = KillProcessesUsingDir(userDataDir, log);
+            if (killed > 0)
+                log.LogWarning(
+                    "Preflight: reaped {Count} orphan chrome/chromedriver process(es) " +
+                    "still holding profile '{Name}' from a previous run",
+                    killed, profileName);
+            else
+                log.LogDebug("Preflight: no orphan chrome processes for '{Name}'", profileName);
+            return killed;
+        }
+        catch (Exception ex)
+        {
+            log.LogWarning(ex, "Preflight: orphan sweep failed (non-fatal)");
+            return 0;
+        }
     }
 
     // ─────────────────────────────────────────────────────────

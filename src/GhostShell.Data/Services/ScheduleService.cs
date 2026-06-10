@@ -155,19 +155,45 @@ public sealed class ScheduleService : IScheduleService
 
     public async Task<IReadOnlyList<Schedule>> GetDueAsync(DateTime now, CancellationToken ct = default)
     {
-        // We compare ISO8601 strings — SQLite TEXT date comparison is
-        // lexicographic and matches chronological order for the format
-        // .NET emits via DateTime.ToString("O").
+        // CRITICAL (date-format mismatch bug): the WHERE clause used to be a
+        // raw lexicographic compare `next_fire_at <= @nowIso` with
+        // `@nowIso = now.ToString("O")`. That is WRONG here because the two
+        // sides are stored in DIFFERENT text formats:
+        //
+        //   • Stored value — every schedules date column is bound to Dapper as
+        //     a .NET DateTime (see ToRow / RecordFailureAsync / AsUtc), and
+        //     Microsoft.Data.Sqlite serialises a DateTime to TEXT as
+        //     "yyyy-MM-dd HH:mm:ss.FFFFFFF" — a SPACE separator, no 'Z'.
+        //   • @nowIso — DateTime.ToString("O") emits
+        //     "yyyy-MM-ddTHH:mm:ss.fffffffZ" — a 'T' separator and a 'Z'.
+        //
+        // Lexicographic comparison diverges at index 10: ' ' (0x20) in the
+        // stored value vs 'T' (0x54) in @nowIso. Since 0x20 < 0x54, EVERY
+        // stored next_fire_at sorts strictly before EVERY @nowIso — so the
+        // predicate was always true and EVERY enabled schedule was returned as
+        // "due" on EVERY tick, regardless of its real next_fire_at. The whole
+        // back-off / jitter / next-fire mechanism was silently a no-op: a
+        // failing target got hammered every 30 s tick (the user-reported
+        // "много фейлов запуска по шедулеру" + the earlier "150 runs in 6.5h"
+        // burst that the in-memory min-gap guard in RunnerHost was bolted on to
+        // mask). The stored next_fire_at was never actually honoured.
+        //
+        // Fix: normalise BOTH sides through SQLite's datetime() before
+        // comparing. datetime() parses the space form, the 'T'/'Z' ISO form,
+        // and fractional seconds alike, and yields a canonical
+        // "YYYY-MM-DD HH:MM:SS" that compares chronologically. Whole-second
+        // truncation is irrelevant at a 30 s tick. The schedules table is tiny
+        // so the per-row datetime() (non-indexable) is free.
         var sql = $"""
             SELECT  {SelectColumns}
               FROM  schedules
              WHERE  enabled = 1
                AND  next_fire_at IS NOT NULL
-               AND  next_fire_at <= @nowIso
-          ORDER BY  next_fire_at ASC;
+               AND  datetime(next_fire_at) <= datetime(@nowIso)
+          ORDER BY  datetime(next_fire_at) ASC;
         """;
         var rows = await _db.QueueAsync(c => c.QueryAsync<ScheduleRow>(
-            sql, new { nowIso = now.ToString("O") }), ct);
+            sql, new { nowIso = AsUtc(now).ToString("O") }), ct);
         return rows.Select(ToModel).ToList();
     }
 

@@ -208,6 +208,52 @@ public static class ChromeProfileHealer
     }
 
     /// <summary>
+    /// True when the driver-init failure looks like a STALE-PROFILE-LOCK
+    /// failure — i.e. an orphaned chrome.exe / chromedriver.exe from a
+    /// previous run is still holding the profile's <c>--user-data-dir</c>
+    /// (or a leftover SingletonLock), so the new launch can't take it over.
+    /// The launcher responds by reaping those orphans + clearing the
+    /// singleton locks and retrying once.
+    ///
+    /// The dominant field signature is
+    ///   <c>"session not created: from unknown error: failed to write prefs
+    ///    file (SessionNotCreated)"</c>
+    /// which is chromedriver being unable to (over)write
+    /// <c>Default/Preferences</c> because the directory is held by a live
+    /// chrome.exe. Pre-fix this was NOT recognised as recoverable (only the
+    /// corrupt-JSON signature was), so the launch fell straight through to
+    /// the generic catch and rethrew — the profile then failed on EVERY
+    /// subsequent attempt until the zombie chrome happened to exit, which is
+    /// exactly the 30-minute "launch_failed" loop seen in the logs.
+    ///
+    /// <c>"DevToolsActivePort file doesn't exist"</c> is the same family
+    /// (chrome died at boot because the dir was in use). We also match a bare
+    /// <c>"session not created"</c> that ISN'T the corrupt-JSON case, since a
+    /// reap+retry is a safe, cheap thing to try for any SessionNotCreated
+    /// that the heal path doesn't already own.
+    /// </summary>
+    public static bool LooksLikeProfileLockFailure(Exception? ex)
+    {
+        // Corrupt-JSON has its own dedicated heal path; don't double-claim it.
+        if (LooksLikeCorruptJsonFailure(ex)) return false;
+
+        for (var e = ex; e is not null; e = e.InnerException)
+        {
+            var msg = e.Message;
+            if (string.IsNullOrEmpty(msg)) continue;
+
+            if (msg.Contains("failed to write prefs file", StringComparison.OrdinalIgnoreCase))
+                return true;
+            if (msg.Contains("DevToolsActivePort", StringComparison.OrdinalIgnoreCase))
+                return true;
+            if (msg.Contains("session not created", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("SessionNotCreated", StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>
     /// If the file at <paramref name="path"/> is broken (0 bytes or
     /// invalid JSON), rename it to <c>&lt;name&gt;.broken-&lt;ts&gt;</c>
     /// and return true. If it's healthy, missing, or unreadable,

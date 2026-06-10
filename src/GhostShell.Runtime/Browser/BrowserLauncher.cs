@@ -348,33 +348,74 @@ public sealed class BrowserLauncher : IBrowserLauncher
                 () => new ChromeDriver(service, options, TimeSpan.FromSeconds(60)),
                 ct);
         }
-        catch (Exception ex) when (ChromeProfileHealer.LooksLikeCorruptJsonFailure(ex))
+        catch (Exception ex) when (ChromeProfileHealer.LooksLikeCorruptJsonFailure(ex)
+                                   || ChromeProfileHealer.LooksLikeProfileLockFailure(ex))
         {
-            // Phase 71nn — the dreaded
-            //   "cannot parse internal JSON template: EOF while parsing
-            //    a value at line 1 column 0 (SessionNotCreated)"
-            // failure. The pre-launch heal sweep didn't catch this file
-            // (maybe it was clean THEN, but a previous half-aborted
-            // chrome.exe truncated it on its way out — possible because
-            // chromedriver writes Local State during the failed boot
-            // attempt itself). Try once more: re-heal, dispose the
-            // dead service, then rebuild ChromeDriverService + retry
-            // the ctor. ChromeDriverService is single-use after a
-            // failed Start so we MUST recreate it.
+            // Two transient driver-init failures that a fresh attempt can
+            // clear, handled by one unified reap + heal + retry:
+            //
+            //   • Phase 71nn — corrupt JSON state ("cannot parse internal
+            //     JSON template" / "EOF while parsing … SessionNotCreated").
+            //     A previous half-aborted chrome.exe truncated Local State /
+            //     Preferences on its way out. Fix: quarantine the bad file so
+            //     Chrome regenerates it.
+            //
+            //   • Stale profile lock ("session not created: … failed to write
+            //     prefs file" — the dominant field signature — also
+            //     "DevToolsActivePort file doesn't exist"). An orphaned
+            //     chrome.exe from the previous run is still holding this
+            //     profile's --user-data-dir, so chromedriver can't (over)write
+            //     Default/Preferences and dies on EVERY attempt until the
+            //     zombie exits. Fix: reap the orphan(s) + clear the singleton
+            //     locks. Pre-fix this signature was NOT recognised as
+            //     recoverable, so the launch rethrew unchanged and the profile
+            //     looped on "launch_failed" for ~30 min (see the field logs).
+            //
+            // The two fixes are independent and cheap, so we apply BOTH (full
+            // preflight reap + heal) regardless of which signature tripped,
+            // then rebuild the single-use ChromeDriverService and retry the
+            // ctor exactly once. A second failure propagates — the scheduler's
+            // exponential back-off then governs cadence instead of hammering.
+            var lockFailure = ChromeProfileHealer.LooksLikeProfileLockFailure(ex);
             _log.LogWarning(ex,
-                "ChromeDriver ctor failed for '{Name}' with corrupt-JSON signature — " +
-                "healing profile and retrying once", profile.Name);
+                "ChromeDriver ctor failed for '{Name}' ({Kind}) — reaping orphans + healing " +
+                "profile, then retrying once",
+                profile.Name, lockFailure ? "stale profile lock" : "corrupt JSON state");
 
             try { service.Dispose(); } catch { /* swallow */ }
 
+            // Forceful cleanup. Re-run the FULL preflight (reaps any chrome /
+            // chromedriver still holding this --user-data-dir, wipes stale
+            // session-restore state, clears SingletonLock/Cookie/Socket) and
+            // re-heal corrupt JSON. The reap is the actual fix for the
+            // write-prefs lock; the heal is the fix for corrupt JSON. Each
+            // failed attempt can ALSO leave Default/Preferences zero-length,
+            // which the heal then quarantines so the retry starts clean.
+            var reaped = 0;
+            if (OperatingSystem.IsWindows())
+            {
+                try { reaped = LaunchPreflight.Run(userDataDir, profile.Name, _log); }
+                catch (Exception pex)
+                {
+                    _log.LogDebug(pex,
+                        "Retry preflight threw for '{Name}' — continuing to heal+retry", profile.Name);
+                }
+            }
             var healed = ChromeProfileHealer.HealProfile(userDataDir, _log);
-            if (healed == 0)
+
+            // If nothing actionable happened (no orphan reaped, nothing healed)
+            // AND this was a pure corrupt-JSON signature, the Chrome install
+            // dir itself is likely damaged — a retry would fail identically,
+            // so let the original error surface. For a lock-class failure we
+            // ALWAYS retry: the previous attempt's own dying chrome may have
+            // released the dir even when the reaper found nothing live to kill
+            // (a killed process's handles can outlive it by a few hundred ms).
+            if (reaped == 0 && healed == 0 && !lockFailure)
             {
                 _log.LogWarning(
-                    "ChromeProfileHealer reported nothing to heal for '{Name}' yet ctor still " +
-                    "failed with corrupt-JSON signature — Chrome install dir may be damaged. " +
-                    "Letting the original error propagate so the user sees it",
-                    profile.Name);
+                    "Nothing to reap or heal for '{Name}' yet ctor failed with corrupt-JSON " +
+                    "signature — Chrome install dir may be damaged. Letting the original error " +
+                    "propagate so the user sees it", profile.Name);
                 if (forwarder is not null)
                 {
                     try { await forwarder.DisposeAsync(); } catch { /* swallow */ }
@@ -382,8 +423,23 @@ public sealed class BrowserLauncher : IBrowserLauncher
                 throw;
             }
 
-            // Rebuild the service + log path. Same parameters as above
-            // — just a fresh ChromeDriverService instance.
+            // Give the OS a brief beat to release file handles the reaped (or
+            // self-exiting) chrome held before we retry into the same dir.
+            if (lockFailure)
+            {
+                try { await Task.Delay(750, ct); }
+                catch (OperationCanceledException)
+                {
+                    if (forwarder is not null)
+                    {
+                        try { await forwarder.DisposeAsync(); } catch { /* swallow */ }
+                    }
+                    throw;
+                }
+            }
+
+            // Rebuild the service + log path (ChromeDriverService is single-use
+            // after a failed Start).
             service = ChromeDriverService.CreateDefaultService(driverDir, driverExe);
             service.HideCommandPromptWindow      = true;
             service.InitializationTimeout        = TimeSpan.FromSeconds(30);
@@ -393,7 +449,7 @@ public sealed class BrowserLauncher : IBrowserLauncher
                 var safeName2 = string.Concat(profile.Name.Where(c =>
                     char.IsLetterOrDigit(c) || c is '-' or '_'));
                 var stamp2    = DateTime.Now.ToString("yyyyMMdd-HHmmss");
-                service.LogPath              = Path.Combine(logsDir2, $"chromedriver-{safeName2}-{stamp2}-heal.log");
+                service.LogPath              = Path.Combine(logsDir2, $"chromedriver-{safeName2}-{stamp2}-retry.log");
                 service.EnableVerboseLogging = true;
             }
             catch { /* log path is diagnostic — never fail retry on it */ }
@@ -404,14 +460,14 @@ public sealed class BrowserLauncher : IBrowserLauncher
                     () => new ChromeDriver(service, options, TimeSpan.FromSeconds(60)),
                     ct);
                 _log.LogInformation(
-                    "ChromeDriver ctor succeeded for '{Name}' after healing {Count} corrupt file(s)",
-                    profile.Name, healed);
+                    "ChromeDriver ctor succeeded for '{Name}' after recovery (reaped {Reaped}, healed {Healed})",
+                    profile.Name, reaped, healed);
             }
             catch (Exception ex2)
             {
                 _log.LogError(ex2,
-                    "ChromeDriver ctor STILL failed for '{Name}' after heal+retry — " +
-                    "giving up; see chromedriver-*-heal.log for details", profile.Name);
+                    "ChromeDriver ctor STILL failed for '{Name}' after reap+heal+retry — " +
+                    "giving up; see chromedriver-*-retry.log for details", profile.Name);
                 try { service.Dispose(); } catch { /* swallow */ }
                 if (forwarder is not null)
                 {

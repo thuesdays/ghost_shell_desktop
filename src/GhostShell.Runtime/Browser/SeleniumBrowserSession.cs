@@ -805,6 +805,34 @@ internal sealed class SeleniumBrowserSession : IBrowserSession
             }
         }
 
+        // Final orphan-reap backstop. driver.Quit() above normally exits
+        // chrome cleanly, but when the browser is wedged — e.g. a tab stuck on
+        // a captcha "sorry" page during a captcha-recovery stop, or a hung
+        // renderer — Quit() can't unwind it and chrome is left orphaned, still
+        // holding this profile's --user-data-dir. The NEXT launch's
+        // chromedriver then can't (over)write Default/Preferences and dies with
+        // "session not created: ... failed to write prefs file" on EVERY retry
+        // until the zombie finally exits — the persistent launch-failure loop
+        // seen in the field. _ownedPids is currently always empty (the launcher
+        // doesn't track chrome PIDs), so the loop above is a no-op and this is
+        // the only teardown step that actually guarantees no straggler survives.
+        // Scoped to THIS profile's --user-data-dir, so it never touches the
+        // user's real Chrome or another profile's live session. Windows-only:
+        // the reaper reads each process's PEB command line; elsewhere we rely
+        // on driver.Quit().
+        if (OperatingSystem.IsWindows())
+        {
+            try
+            {
+                var userDataDir = GhostShell.Core.Common.AppPaths.ProfileDir(ProfileName);
+                LaunchPreflight.ReapOrphans(userDataDir, ProfileName, _log);
+            }
+            catch (Exception ex)
+            {
+                _log.LogDebug(ex, "Teardown orphan-reap threw for '{Profile}'", ProfileName);
+            }
+        }
+
         // Tear down the auth-proxy forwarder LAST — connections from
         // chromedriver might still be flushing as the driver quits,
         // and pulling the forwarder out from under them would surface
